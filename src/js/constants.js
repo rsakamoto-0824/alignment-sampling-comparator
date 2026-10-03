@@ -166,6 +166,8 @@
         seed: 1,
         methods: { random: true, poisson: true, dOptimal: true, iOptimal: true, manual: true },
       },
+      // 計測点数のスイープ（計測Shot数の範囲と、ランダム・ポアソンの試行回数）
+      sweep: { startShots: 10, endShots: 60, stepShots: 10, draws: 10 },
       constraints: {
         center: { enabled: true, priority: 1 },
         scan: { enabled: true, hard: true, priority: 2, allocation: constants.ALLOCATION_EQUAL },

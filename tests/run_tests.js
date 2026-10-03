@@ -628,6 +628,99 @@ async function main() {
     console.log(`  （参考）Wafer20枚・試行4回の計算時間: ${elapsed} ms`);
   });
 
+  await test("推定精度: 未計測Markだけで評価し、Markごとの2乗誤差の合計はWaferごとのRMSと整合する", () => {
+    const map = defaultMap();
+    const settings = ASC.defaultSettings();
+    const data = ASC.evaluationData.generateEvaluationData(map, defaultEvaluationSettings({ waferCount: 6 })).data;
+    const random = ASC.math.createRandom(31);
+    const sample = random.shuffle(allIndices(map.marks.length)).slice(0, 50).sort((a, b) => a - b);
+    const variants = ASC.correction.buildVariants(settings.model);
+    const evaluation = ASC.evaluator.evaluateSampleSet(map, data, settings.model, sample, variants);
+    const keys = Object.keys(evaluation.estimation);
+    assert(keys.join(",") === "howa,rbfXY,rbfXYR,gpXY,gpXYR", `推定精度の対象が違います: ${keys}`);
+    const unmeasuredCount = map.marks.length - sample.length;
+    for (const key of keys) {
+      const squares = evaluation.estimationSquares[key].x;
+      assert(sample.every((markIndex) => Number.isNaN(squares[markIndex])), `${key}: 計測Markに誤差が入っています`);
+      let total = 0;
+      squares.forEach((value) => {
+        if (Number.isFinite(value)) {
+          total += value;
+        }
+      });
+      const rms = evaluation.estimation[key].x.rms;
+      const fromWafers = Array.from(rms).reduce((sum, value) => sum + value * value * unmeasuredCount, 0);
+      assertClose(total, fromWafers, 1e-6 * fromWafers, `${key}: 2乗誤差の合計`);
+    }
+    // HOWAの推定誤差は、HOWAのみの補正残差の未計測Mark部分と同じもの（符号違い）
+    const howaParts = howaPartsFor(map.marks, sample, settings.model.termsX);
+    const measured = sample.map((markIndex) => data.truthX[markIndex] + data.noiseX[markIndex]);
+    let sumSquares = 0;
+    let count = 0;
+    for (let i = 0; i < map.marks.length; i++) {
+      if (sample.includes(i)) {
+        continue;
+      }
+      let prediction = 0;
+      for (let j = 0; j < sample.length; j++) {
+        prediction += howaParts.howa[i * sample.length + j] * measured[j];
+      }
+      sumSquares += (prediction - data.truthX[i]) ** 2;
+      count++;
+    }
+    assertClose(evaluation.estimation.howa.x.rms[0], Math.sqrt(sumSquares / count), 1e-9, "HOWAの推定誤差（Wafer 1）");
+  });
+
+  await test("推定精度: ずれが説明変数の1次式でノイズがなければ、RBF・GPの推定誤差は0", () => {
+    const map = defaultMap();
+    const settings = ASC.defaultSettings();
+    const waferCount = 3;
+    const markCount = map.marks.length;
+    const data = { waferCount, markCount, truthX: new Float64Array(waferCount * markCount), truthY: new Float64Array(waferCount * markCount), noiseX: new Float64Array(waferCount * markCount), noiseY: new Float64Array(waferCount * markCount) };
+    for (let w = 0; w < waferCount; w++) {
+      map.marks.forEach((mark, i) => {
+        data.truthX[w * markCount + i] = 1 + w + 2 * mark.u - mark.v;
+        data.truthY[w * markCount + i] = -1 + 0.5 * mark.u + 3 * mark.v;
+      });
+    }
+    const random = ASC.math.createRandom(32);
+    const sample = random.shuffle(allIndices(markCount)).slice(0, 40);
+    const evaluation = ASC.evaluator.evaluateSampleSet(map, data, settings.model, sample, ASC.correction.buildVariants(settings.model));
+    for (const key of ["rbfXY", "gpXY", "howa"]) {
+      for (const axis of ["x", "y"]) {
+        const worst = Math.max(...evaluation.estimation[key][axis].max);
+        assert(worst < 1e-7, `${key}・${axis}: 推定誤差が0になりません（${worst}）`);
+      }
+    }
+  });
+
+  await test("スイープ: 計測Shot数ごとに評価し、Mark数はShot数×k。点を増やすとD最適のHOWAの残差は小さくなる", async () => {
+    const map = defaultMap();
+    const settings = ASC.defaultSettings();
+    settings.evaluationData = defaultEvaluationSettings({ waferCount: 10 });
+    settings.sampling.optimalStarts = 1;
+    settings.model.estimators = { rbfXY: true, rbfXYR: false, gpXY: true, gpXYR: false };
+    const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
+    const sweep = { startShots: 12, endShots: 36, stepShots: 12, draws: 2 };
+    let lastFraction = 0;
+    const output = await ASC.evaluator.runSweep({ map, data, settings }, sweep, (done, total) => {
+      lastFraction = done / total;
+    }, () => false);
+    assert(output.errors.length === 0, output.errors.join(" / "));
+    assert(output.points.length === 3, `点の数が3ではありません（${output.points.length}）`);
+    assert(Math.abs(lastFraction - 1) < 1e-9, "進み具合が100%になりません");
+    output.points.forEach((point) => {
+      assert(point.markCounts.dOptimal === point.shotCount * 2, `Shot ${point.shotCount}: Mark数がShot数×2ではありません`);
+      assert(!point.summary.manual, "スイープに手動選択が入っています");
+      assert(point.summary.random.estimation.gpXY, "スイープに推定精度がありません");
+    });
+    const first = output.points[0].summary.dOptimal.variants.howa.x.rms.all.mean;
+    const lastValue = output.points[2].summary.dOptimal.variants.howa.x.rms.all.mean;
+    assert(lastValue < first, `点を増やしても残差が減りません（${first} → ${lastValue}）`);
+    const invalid = await ASC.evaluator.runSweep({ map, data, settings }, { startShots: 10, endShots: 500, stepShots: 10, draws: 2 }, () => {}, () => false);
+    assert(invalid.errors.some((text) => text.includes("選べるShot数")), "選べるShot数を超える範囲を知らせていません");
+  });
+
   // ---- 結果の表示 ----
   let failed = 0;
   for (const result of results) {

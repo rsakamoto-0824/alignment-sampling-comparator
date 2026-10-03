@@ -16,6 +16,8 @@
     frequency: "選ばれた割合（全試行）",
   };
   const FREQUENCY_STEPS = 5;
+  // 推定誤差のマップの色の上限に使うパーセント点
+  const ESTIMATION_SCALE_PERCENT = 95;
 
   /** 試行の良し悪しを決める値: 基準の補正での残差RMSのWafer平均（XとYの平均）。 */
   function rankingValue(set, variantKey) {
@@ -164,5 +166,80 @@
     container.replaceChildren(...children);
   }
 
-  ASC.samplingMapsView = { render };
+  /**
+   * 推定誤差のマップ（選び方を1つ、推定手法ごとに並べる）。
+   * ランダム系は中央の試行を使う。色は全マップ共通の5段階（最大値を5等分）で、計測Markは黒い点。
+   */
+  function renderEstimationMaps(output, methodKey, axis) {
+    const sets = output.sets.filter((set) => set.method === methodKey && set.estimationSquares);
+    if (sets.length === 0) {
+      return ui.create("p", { className: "hint", text: "推定誤差のマップを出せる結果がありません。" });
+    }
+    const entry = sets.length > 1 ? rankedDraws(sets, output.variants[0].key).median : { set: sets[0], index: 0 };
+    const set = entry.set;
+    const map = output.map;
+    const waferCount = output.waferCount;
+    const keys = output.estimationKeys.filter((key) => set.estimationSquares[key]);
+    const perKey = keys.map((key) => {
+      const squares = set.estimationSquares[key][axis];
+      const rms = Array.from(squares, (value) => (Number.isFinite(value) ? Math.sqrt(value / waferCount) : NaN));
+      return { key, rms };
+    });
+    // 色の目盛りの上限は、全マップの値の95%点にする（一部の大きな誤差に引っぱられて全体が薄くならないように）
+    const allValues = perKey.flatMap((entryRms) => entryRms.rms.filter(Number.isFinite)).sort((a, b) => a - b);
+    const maximum = allValues.length > 0 ? ASC.math.percentileOfSorted(allValues, ESTIMATION_SCALE_PERCENT) : 0;
+    const context = output.context;
+    const eligibleShots = new Set(context.items.map((item) => item.shotIndex));
+    const cards = perKey.map(({ key, rms }) => {
+      const markSteps = new Map();
+      const finite = [];
+      rms.forEach((value, markIndex) => {
+        if (Number.isFinite(value)) {
+          finite.push(value);
+          const step = maximum > 0 ? Math.min(FREQUENCY_STEPS, Math.max(1, Math.ceil((value / maximum) * FREQUENCY_STEPS))) : 1;
+          markSteps.set(markIndex, { step, text: `推定誤差RMS ${ui.formatNumber(value)} nm` });
+        }
+      });
+      const frame = ui.create("div");
+      ASC.mapView.render(frame, {
+        map,
+        zones: output.zones,
+        eligibleShots,
+        selectedShots: new Set(),
+        measuredMarks: new Set(set.markIndices),
+        centerMarkIndex: null,
+        editable: false,
+        extraCandidates: new Set(),
+        compact: true,
+        markSteps,
+        ariaLabel: `${ASC.evaluator.estimationLabel(key)}の推定誤差のマップ`,
+      });
+      const overall = Math.sqrt(finite.reduce((sum, value) => sum + value * value, 0) / Math.max(finite.length, 1));
+      return ui.create("section", { className: "map-card", "aria-label": `${ASC.evaluator.estimationLabel(key)}の推定誤差` }, [
+        ui.create("h3", { text: ASC.evaluator.estimationLabel(key) }),
+        frame,
+        statList([
+          ["未計測Mark全体のRMS", `${ui.formatNumber(overall)} nm`],
+          ["Markごとの最大", `${ui.formatNumber(Math.max(...finite))} nm`],
+        ]),
+      ]);
+    });
+    const legendItems = [ui.create("li", null, [ui.create("span", { className: "step-swatch", style: "background:var(--map-mark-measured)" }), "計測したMark（小さい点。推定の対象外）"])];
+    for (let step = 1; step <= FREQUENCY_STEPS; step++) {
+      const low = (maximum * (step - 1)) / FREQUENCY_STEPS;
+      const high = (maximum * step) / FREQUENCY_STEPS;
+      const text = step === FREQUENCY_STEPS ? `${ui.formatNumber(low, 2)} nm 以上` : `${ui.formatNumber(low, 2)}〜${ui.formatNumber(high, 2)} nm`;
+      legendItems.push(ui.create("li", null, [ui.create("span", { className: "step-swatch", style: `background:var(--step-${step})` }), text]));
+    }
+    return ui.create("div", null, [
+      ui.create("p", {
+        className: "hint",
+        text: `${sets.length > 1 ? `試行 ${entry.index + 1}（中央の試行）` : "選んだ点"}で、未計測Markごとに全${waferCount}枚の推定誤差をRMSにしたものです（軸 ${axis.toUpperCase()}）。色が濃いほど推定を外しています。色の上限は全マップの値の${ESTIMATION_SCALE_PERCENT}%点で、それより大きいMarkは一番濃い色です。各Markにポインターを合わせると値が出ます。`,
+      }),
+      ui.create("ul", { className: "step-legend", "aria-label": "推定誤差の色" }, legendItems),
+      ui.create("div", { className: "maps-grid" }, cards),
+    ]);
+  }
+
+  ASC.samplingMapsView = { render, renderEstimationMaps, rankedDraws };
 })(typeof window !== "undefined" ? window : globalThis);
