@@ -34,10 +34,20 @@
     DISTRIBUTION_NORMAL: "normal",
 
     // ---- 補正の流れ ----
-    FLOWS: [
+    // 推定を使う流れは、下の推定手法ごとに評価する
+    FLOW_TYPES: [
       { key: "howa", label: "HOWAのみ" },
-      { key: "rbfThenHowa", label: "RBFで推定→HOWA" },
-      { key: "howaPlusRbf", label: "HOWA＋RBF" },
+      { key: "estimateThenHowa", label: "推定→HOWA" },
+      { key: "howaPlusEstimate", label: "HOWA＋推定" },
+    ],
+
+    // ---- 推定手法（未計測Markのずれを推定する方法）----
+    // features: 説明変数。xy は (x, y)、xyr は (x, y, 半径)
+    ESTIMATORS: [
+      { key: "rbfXY", type: "rbf", features: "xy", label: "RBF（X,Y）", longLabel: "RBF（説明変数 X,Y）" },
+      { key: "rbfXYR", type: "rbf", features: "xyr", label: "RBF（X,Y,半径）", longLabel: "RBF（説明変数 X,Y,半径）" },
+      { key: "gpXY", type: "gp", features: "xy", label: "GP（X,Y）", longLabel: "ガウス過程回帰（説明変数 X,Y）" },
+      { key: "gpXYR", type: "gp", features: "xyr", label: "GP（X,Y,半径）", longLabel: "ガウス過程回帰（説明変数 X,Y,半径）" },
     ],
 
     // ---- RBFの基底 ----
@@ -47,6 +57,19 @@
       multiquadric: "マルチクアドリック",
       inverseQuadric: "逆二次",
     },
+
+    // ---- ガウス過程回帰 ----
+    GP_KERNELS: {
+      squaredExponential: "二乗指数（ガウス）",
+      matern52: "Matérn 5/2",
+    },
+    // 調整値の探索範囲。相関の長さは正規化座標（1 = 150 mm）、ノイズ比は「ノイズの分散 ÷ 信号の分散」
+    GP_LENGTH_SCALE_MIN: 0.05,
+    GP_LENGTH_SCALE_MAX: 2,
+    GP_LENGTH_SCALE_STEPS: 10,
+    GP_NOISE_RATIO_MIN: 1e-4,
+    GP_NOISE_RATIO_MAX: 10,
+    GP_NOISE_RATIO_STEPS: 11,
 
     // ---- 選び方 ----
     METHODS: [
@@ -126,10 +149,12 @@
         // 21項のうち使う項の番号（0始まり）。初期値はすべて使う
         termsX: Array.from({ length: 21 }, (_, i) => i),
         termsY: Array.from({ length: 21 }, (_, i) => i),
-        flows: { howa: true, rbfThenHowa: true, howaPlusRbf: true },
+        flows: { howa: true, estimateThenHowa: true, howaPlusEstimate: true },
+        estimators: { rbfXY: true, rbfXYR: true, gpXY: true, gpXYR: true },
         rbfKernel: "tps",
         rbfLambda: 0,
         rbfShapeFactor: 2,
+        gpKernel: "squaredExponential",
       },
       sampling: {
         shotCount: 20,

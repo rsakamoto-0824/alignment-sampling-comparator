@@ -367,6 +367,16 @@
     }
   }
 
+  function renderEstimatorChoices() {
+    const container = ui.byId("estimator-choices");
+    container.replaceChildren();
+    for (const estimator of C.ESTIMATORS) {
+      const input = ui.create("input", { type: "checkbox", "data-setting": `model.estimators.${estimator.key}` });
+      input.addEventListener("change", handleBoundInput);
+      container.append(ui.create("label", { className: "choice" }, [input, ` ${estimator.longLabel}`]));
+    }
+  }
+
   function renderMethodChoices() {
     const container = ui.byId("method-choices");
     container.replaceChildren();
@@ -461,8 +471,7 @@
     ui.byId("polynomial-summary").textContent = `X: ${model.termsX.length}項、Y: ${model.termsY.length}項を使います。`;
     ui.byId("polynomial-table-error").textContent =
       model.termsX.length === 0 || model.termsY.length === 0 ? "X・Yとも1項以上選んでください。" : "";
-    const anyFlow = C.FLOWS.some((flow) => model.flows[flow.key]);
-    ui.byId("flows-error").textContent = anyFlow ? "" : "補正の流れを1つ以上選んでください。";
+    ui.byId("flows-error").textContent = flowSettingError(model);
     ui.byId("rbf-shape").disabled = model.rbfKernel === "tps";
 
     const zones = settings.zones;
@@ -477,17 +486,32 @@
     updateZernikeStatus();
   }
 
+  /** 補正の流れと推定手法の組み合わせの誤り（なければ空文字）。 */
+  function flowSettingError(model) {
+    const estimatorFlow = model.flows.estimateThenHowa || model.flows.howaPlusEstimate;
+    const anyEstimator = C.ESTIMATORS.some((estimator) => model.estimators[estimator.key]);
+    if (!model.flows.howa && !estimatorFlow) {
+      return "補正の流れを1つ以上選んでください。";
+    }
+    if (estimatorFlow && !anyEstimator) {
+      return "推定を使う流れを選んだときは、推定手法を1つ以上選んでください。";
+    }
+    return "";
+  }
+
   /** 設定欄を作り、入力と settings を結ぶ。 */
   function initialize(appState, onChange) {
     state = appState;
     notifyChange = onChange;
     fillSelect(ui.byId("scan-pattern"), C.SCAN_PATTERNS);
     fillSelect(ui.byId("rbf-kernel"), C.RBF_KERNELS);
+    fillSelect(ui.byId("gp-kernel"), C.GP_KERNELS);
+    renderEstimatorChoices();
     renderMethodChoices();
     renderConstraintTable();
     for (const input of document.querySelectorAll("[data-setting]")) {
       const eventName = input.type === "number" ? "input" : "change";
-      if (!input.closest("#constraint-table") && !input.closest("#method-choices")) {
+      if (!input.closest("#constraint-table") && !input.closest("#method-choices") && !input.closest("#estimator-choices")) {
         input.addEventListener(eventName, handleBoundInput);
       }
     }
@@ -515,5 +539,5 @@
     updateDerivedTexts();
   }
 
-  ASC.settingsForm = { initialize, writeAll, renderDesignatedMarks, updateDerivedTexts };
+  ASC.settingsForm = { initialize, writeAll, renderDesignatedMarks, updateDerivedTexts, flowSettingError };
 })(typeof window !== "undefined" ? window : globalThis);

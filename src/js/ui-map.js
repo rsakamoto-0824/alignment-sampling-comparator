@@ -31,6 +31,8 @@
    * マップを描く。options:
    *   map, zones, eligibleShots(Set), selectedShots(Set), measuredMarks(Set), centerMarkIndex,
    *   editable, extraCandidates(Set: クリックで追加・解除できるMark), onToggleShot, onToggleMark
+   *   compact（小さく並べる用。Scan方向・区画の文字を省く）、
+   *   shotSteps（Map: Shot番号 → { step: 1〜5, text }。選ばれた割合などを段階色で塗る）、ariaLabel
    */
   function render(container, options) {
     const { map, zones } = options;
@@ -38,7 +40,7 @@
     const svg = ui.createSvg("svg", {
       viewBox: `${-VIEW_HALF_SIZE_MM} ${-VIEW_HALF_SIZE_MM} ${size} ${size}`,
       role: "img",
-      "aria-label": "Waferマップ。Shot、Mark、Scan方向、4象限と同心円の区切り、選んだ点を表示",
+      "aria-label": options.ariaLabel || "Waferマップ。Shot、Mark、Scan方向、4象限と同心円の区切り、選んだ点を表示",
     });
     svg.append(hatchPattern(HATCH_ID_MAP, 4));
     svg.append(ui.createSvg("circle", { className: "map-wafer", cx: 0, cy: 0, r: C.WAFER_RADIUS_MM }));
@@ -49,7 +51,7 @@
     const height = map.shotHeightMm;
     map.shots.forEach((shot, shotIndex) => {
       shotLayer.append(drawShot(shot, shotIndex, width, height, options));
-      if (Math.min(width, height) >= SCAN_GLYPH_MIN_SHOT_MM) {
+      if (!options.compact && Math.min(width, height) >= SCAN_GLYPH_MIN_SHOT_MM) {
         shotLayer.append(
           ui.createSvg("text", { className: "map-scan", x: shot.x, y: -shot.y, text: shot.scan === C.SCAN_UP ? "▲" : "▼" })
         );
@@ -59,7 +61,7 @@
       }
     });
     svg.append(shotLayer);
-    svg.append(drawGuides(map, zones));
+    svg.append(drawGuides(map, zones, Boolean(options.compact)));
     svg.append(markLayer);
 
     if (options.centerMarkIndex !== null && options.centerMarkIndex !== undefined) {
@@ -83,7 +85,14 @@
     if (editable) {
       classes.push("editable");
     }
-    const stateText = selected ? "選択中" : eligible ? "未選択" : "選べない（必ず測るMarkが範囲外）";
+    const stepInfo = options.shotSteps ? options.shotSteps.get(shotIndex) : null;
+    if (stepInfo && stepInfo.step > 0) {
+      classes.push(`step-${stepInfo.step}`);
+    }
+    let stateText = selected ? "選択中" : eligible ? "未選択" : "選べない（必ず測るMarkが範囲外）";
+    if (stepInfo) {
+      stateText = stepInfo.text;
+    }
     const label = `Shot ${shot.id}（中心 ${shot.x}, ${shot.y} mm、Scan ${shot.scan}）${stateText}`;
     const rect = ui.createSvg("rect", {
       className: classes.join(" "),
@@ -152,8 +161,8 @@
     }
   }
 
-  /** 4象限の境界、同心円の区切り、有効半径、ノッチ。 */
-  function drawGuides(map, zones) {
+  /** 4象限の境界、同心円の区切り、有効半径、ノッチ。compact なら文字を省く。 */
+  function drawGuides(map, zones, compact) {
     const group = ui.createSvg("g", { "pointer-events": "none" });
     const radius = C.WAFER_RADIUS_MM;
     // Wafer端のShotに隠れないよう、外周線はShotの上に描く
@@ -164,6 +173,9 @@
     for (const zoneRadius of [zones.innerRadiusMm, zones.outerRadiusMm]) {
       if (zoneRadius > 0 && zoneRadius < radius) {
         group.append(ui.createSvg("circle", { className: "map-guide", cx: 0, cy: 0, r: zoneRadius, "stroke-dasharray": "3 2" }));
+        if (compact) {
+          continue;
+        }
         group.append(
           ui.createSvg("text", {
             className: "map-guide-label",
@@ -184,6 +196,9 @@
         d: `M ${-notch} ${radius} L 0 ${radius - notch} L ${notch} ${radius}`,
       })
     );
+    if (compact) {
+      return group;
+    }
     const labels = [
       ["第1象限", 1, 1],
       ["第2象限", -1, 1],

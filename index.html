@@ -213,12 +213,17 @@
             <fieldset>
               <legend>比べる補正の流れ</legend>
               <label class="choice"><input type="checkbox" data-setting="model.flows.howa" /> HOWAのみ</label>
-              <label class="choice"><input type="checkbox" data-setting="model.flows.rbfThenHowa" /> RBFで推定→HOWA</label>
-              <label class="choice"><input type="checkbox" data-setting="model.flows.howaPlusRbf" /> HOWA＋RBF</label>
+              <label class="choice"><input type="checkbox" data-setting="model.flows.estimateThenHowa" /> 推定→HOWA（未計測Markを推定して埋め、全Markに多項式）</label>
+              <label class="choice"><input type="checkbox" data-setting="model.flows.howaPlusEstimate" /> HOWA＋推定（多項式の取り残しを推定して足す）</label>
+            </fieldset>
+            <p class="hint">2つの流れの違いは「使い方」のタブに図で説明しています。</p>
+            <fieldset>
+              <legend>推定手法（推定を使う流れで、それぞれ評価します）</legend>
+              <div id="estimator-choices"></div>
             </fieldset>
             <p class="field-error" id="flows-error"></p>
 
-            <h3 class="subheading">RBF（1次多項式＋RBFの和）</h3>
+            <h3 class="subheading">RBF（1次式＋RBFの和）</h3>
             <div class="field">
               <label for="rbf-kernel">基底関数</label>
               <select id="rbf-kernel" data-setting="model.rbfKernel"></select>
@@ -236,6 +241,13 @@
               </div>
             </div>
             <p class="hint">λ = 0 なら計測点をそのまま通ります。大きくするほど、なめらかにノイズをならします。幅は薄板スプラインでは使いません。</p>
+
+            <h3 class="subheading">ガウス過程回帰（GP）</h3>
+            <div class="field">
+              <label for="gp-kernel">共分散関数</label>
+              <select id="gp-kernel" data-setting="model.gpKernel"></select>
+            </div>
+            <p class="hint">相関の長さとノイズの大きさは、Waferごとに、選んだ計測点の値で学習します（周辺尤度が最大になる値）。結果の「GPが学習した値」で確かめられます。</p>
           </div>
         </details>
 
@@ -345,6 +357,7 @@
         <div class="tab-list" role="tablist" aria-label="表示の切り替え">
           <button type="button" class="tab" role="tab" id="tab-map" aria-controls="panel-map" aria-selected="true">マップと選択点</button>
           <button type="button" class="tab" role="tab" id="tab-results" aria-controls="panel-results" aria-selected="false" tabindex="-1">評価結果</button>
+          <button type="button" class="tab" role="tab" id="tab-maps" aria-controls="panel-maps" aria-selected="false" tabindex="-1">選び方ごとのマップ</button>
           <button type="button" class="tab" role="tab" id="tab-help" aria-controls="panel-help" aria-selected="false" tabindex="-1">使い方</button>
         </div>
 
@@ -384,6 +397,12 @@
           </div>
         </section>
 
+        <section class="tab-panel" role="tabpanel" id="panel-maps" aria-labelledby="tab-maps" hidden>
+          <div id="maps-content">
+            <p class="empty-state">「評価を実行」を押すと、選び方ごとに選んだ点のマップがここに並びます。</p>
+          </div>
+        </section>
+
         <section class="tab-panel help-content" role="tabpanel" id="panel-help" aria-labelledby="tab-help" hidden>
           <h2>このアプリでできること</h2>
           <p>Wafer高次補正（HOWA）のアライメント計測で、どのMarkを測るかの選び方を、条件制約つきで比べます。アプリの中で乱数のWafer高次傾向（評価データ）を作り、選んだMarkの計測値から補正したときの残差で評価します。</p>
@@ -391,10 +410,10 @@
           <ol>
             <li>「1. Waferマップ」でShotとMarkを用意する（生成するか、CSVを読み込む）</li>
             <li>「2. 評価データ」でZernike項の大きさ、計測ノイズ、Scan方向のずれを決める</li>
-            <li>「3. 補正モデル」でHOWAの多項式の項と、比べる補正の流れを選ぶ</li>
+            <li>「3. 補正モデル」でHOWAの多項式の項、比べる補正の流れ、推定手法を選ぶ</li>
             <li>「4. サンプリング」と「5. 条件制約」で、計測Shot数・必ず測るMark・制約を決める</li>
             <li>必要なら「マップと選択点」で手動選択を作る（Shotをクリック）</li>
-            <li>「評価を実行」を押し、「評価結果」で選び方と補正の流れを比べる</li>
+            <li>「評価を実行」を押し、「評価結果」で選び方と補正を比べ、「選び方ごとのマップ」で選ばれた点を見比べる</li>
           </ol>
           <h2>選び方</h2>
           <ul>
@@ -405,15 +424,49 @@
             <li><strong>手動</strong>: マップ上で選んだShot（と追加Mark）です。</li>
           </ul>
           <h2>補正の流れ</h2>
+          <p>違いは、<strong>最後に掛ける補正量が「多項式だけ」か「多項式＋取り残し」か</strong>です。</p>
+          <div class="flow-compare">
+            <div class="flow-card">
+              <h3>HOWAのみ</h3>
+              <ol class="flow-steps">
+                <li>計測したMarkに多項式を当てはめる</li>
+                <li class="flow-result">補正量 ＝ 多項式</li>
+              </ol>
+            </div>
+            <div class="flow-card">
+              <h3>推定→HOWA</h3>
+              <ol class="flow-steps">
+                <li>計測したMarkの値から、推定手法で<strong>未計測Markのずれ</strong>を推定し、全Markを埋める</li>
+                <li>埋めた全Markに多項式を当てはめる</li>
+                <li class="flow-result">補正量 ＝ 多項式（推定値は当てはめに使うだけ）</li>
+              </ol>
+              <p class="hint">推定の役目は、計測点の偏りをならすこと。点が固まった場所が当てはめに効きすぎるのを防ぎます。多項式で表せない形は補正されません。</p>
+            </div>
+            <div class="flow-card">
+              <h3>HOWA＋推定</h3>
+              <ol class="flow-steps">
+                <li>計測したMarkに多項式を当てはめる</li>
+                <li>計測Markでの<strong>取り残し</strong>（計測値 − 多項式）を、推定手法で全Markに広げる</li>
+                <li class="flow-result">補正量 ＝ 多項式 ＋ 取り残しの推定</li>
+              </ol>
+              <p class="hint">多項式で表せない形（局所的な歪み）も補正に入ります。そのぶん計測ノイズも乗りやすくなります。ASML特許 US20120218533A1 の「1次多項式＋RBF」に近い形です。</p>
+            </div>
+          </div>
+          <h2>推定手法</h2>
           <ul>
-            <li><strong>HOWAのみ</strong>: 計測したMarkだけに多項式を当てはめて、全Markを補正します。</li>
-            <li><strong>RBFで推定→HOWA</strong>: RBFで未計測Markのずれを推定し、計測値と合わせた全Markに多項式を当てはめます。</li>
-            <li><strong>HOWA＋RBF</strong>: 多項式で補正し、計測Markに残ったずれをRBFで補間して足します（ASML特許 US20120218533A1 の形に近いもの）。</li>
+            <li><strong>RBF（X,Y）</strong>: 1次式（定数・X・Y）と、計測点からの距離の関数（基底関数）の和で補間します。基底関数・λ・幅は設定で決めます。</li>
+            <li><strong>RBF（X,Y,半径）</strong>: 説明変数に半径 r = √(X²+Y²) を加えます。1次式は定数・X・Y・r、距離は (X, Y, r) の空間で測ります。同じ半径の点どうしが似ている（同心円状の歪み）ことを表しやすくなります。</li>
+            <li><strong>GP（X,Y）</strong>: ガウス過程回帰。平均を1次式（定数・X・Y）とし、残りを共分散関数でつないで推定します。相関の長さとノイズの大きさを、Waferごとに計測点の値で学習します（周辺尤度が最大になる値）。</li>
+            <li><strong>GP（X,Y,半径）</strong>: ガウス過程回帰の説明変数に半径を加えたものです（平均は定数・X・Y・r の1次式）。</li>
           </ul>
+          <p>座標はどれも 150 mm で割った値（−1〜1）で扱います。半径も同じ尺度です。</p>
           <h2>結果の見方</h2>
           <ul>
             <li>残差は、真のずれから補正量を引いた値です。全Waferの全Markで求め、Waferごとに RMS・|平均|+3σ・最大 を出します。</li>
-            <li>箱ひげ図の箱は25〜75%点、線は5〜95%点、箱の中の縦線は中央値です。ランダム系は全試行・全Waferの値をまとめています。</li>
+            <li>「一覧」は、選び方（行）× 補正（列）のWafer平均です。行ごとに最も小さい値に ★ を付けています。</li>
+            <li>箱ひげ図は、「推定手法を比べる流れ」で選んだ流れについて、HOWAのみと各推定手法を並べます。箱は25〜75%点、線は5〜95%点、箱の中の縦線は中央値です。ランダム系は全試行・全Waferの値をまとめています。</li>
+            <li>「GPが学習した値」は、ガウス過程回帰がWaferごとに選んだ相関の長さとノイズ比です。</li>
+            <li>「選び方ごとのマップ」のタブで、選び方ごとに選んだ点を並べて見比べられます。ランダム・ポアソンは中央・最良・最悪の試行か、全試行で各Shotが選ばれた割合を表示できます。</li>
             <li>「全点計測」は全Markを測ってHOWAで補正した残差です。多項式で表せない成分だけが残るので、選び方による悪化を測る物差しになります。</li>
             <li>κ は、計測ノイズ σ が補正量にどれだけ乗るかの倍率です（全Markで平均した予測誤差の標準偏差 ÷ σ、HOWAのみの場合）。小さいほど良い選び方です。</li>
           </ul>
@@ -442,6 +495,7 @@
     <script src="src/js/ui-settings.js"></script>
     <script src="src/js/ui-map.js"></script>
     <script src="src/js/ui-results.js"></script>
+    <script src="src/js/ui-sampling-maps.js"></script>
     <script src="src/js/app.js"></script>
   </body>
 </html>
