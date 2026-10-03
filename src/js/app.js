@@ -24,7 +24,7 @@
     invalidFields: new Set(),
     running: false,
     cancelRequested: false,
-    view: { selection: MANUAL_KEY, draw: 0, editing: false, metric: "rms", axis: "x" },
+    view: { selection: MANUAL_KEY, draw: 0, editing: false, metric: "rms", axis: "x", flowType: "estimateThenHowa", mapChoices: {} },
   };
 
   function createInitialSettings() {
@@ -115,12 +115,12 @@
     drawField.hidden = sets.length <= 1;
     if (sets.length > 1) {
       const drawSelect = ui.byId("view-draw");
-      // 試行を見比べる目安として、最初の補正の流れでの残差RMS（X）のWafer平均を添える
-      const flow = C.FLOWS.find((entry) => sets[0].results[entry.key]);
+      // 試行を見比べる目安として、最初の補正での残差RMS（X）のWafer平均を添える
+      const variant = state.output.variants[0];
       drawSelect.replaceChildren(
         ...sets.map((set, index) => {
-          const value = ASC.math.summarize(set.results[flow.key].x.rms).mean;
-          return ui.create("option", { value: String(index), text: `試行 ${index + 1}（${flow.label}の残差RMS X 平均 ${ui.formatNumber(value)} nm）` });
+          const value = ASC.math.summarize(set.results[variant.key].x.rms).mean;
+          return ui.create("option", { value: String(index), text: `試行 ${index + 1}（${variant.label}の残差RMS X 平均 ${ui.formatNumber(value)} nm）` });
         })
       );
       state.view.draw = Math.min(state.view.draw, sets.length - 1);
@@ -289,8 +289,9 @@
     if (settings.model.termsX.length === 0 || settings.model.termsY.length === 0) {
       errors.push("補正の多項式の項を、X・Yとも1つ以上選んでください。");
     }
-    if (!C.FLOWS.some((flow) => settings.model.flows[flow.key])) {
-      errors.push("比べる補正の流れを1つ以上選んでください。");
+    const flowError = ASC.settingsForm.flowSettingError(settings.model);
+    if (flowError) {
+      errors.push(flowError);
     }
     const methods = C.METHODS.filter((method) => settings.sampling.methods[method.key]);
     if (methods.length === 0) {
@@ -355,7 +356,7 @@
         return;
       }
       output.map = map;
-      output.flows = settings.model.flows;
+      output.zones = settings.zones;
       state.output = output;
       state.outputStale = false;
       state.view.selection = MANUAL_KEY;
@@ -368,6 +369,7 @@
       ui.showMessage("success", "評価が終わりました。", details);
       renderMapTab();
       renderResultsTab();
+      renderMapsTab();
       selectTab("tab-results");
     } catch (error) {
       ui.showMessage("error", "計算の途中で問題が起きました。", [
@@ -388,20 +390,46 @@
     ASC.resultsView.render(
       container,
       state.output,
-      state.output.flows,
       state.view,
       {
-        onViewChange: (change) => {
+        onViewChange: (change, focusId) => {
           Object.assign(state.view, change);
           renderResultsTab();
-          const id = change.metric ? "result-metric" : "result-axis";
-          ui.byId(id).focus();
+          // 作り直した画面で、操作した選択欄にフォーカスを戻す
+          ui.byId(focusId).focus();
         },
-        onExportResults: () => ui.download(`評価結果_${ui.timestampForFile()}.csv`, ASC.resultsView.resultsCsv(state.output, state.output.flows), "text/csv"),
+        onExportResults: () => ui.download(`評価結果_${ui.timestampForFile()}.csv`, ASC.resultsView.resultsCsv(state.output), "text/csv"),
         onExportSelections: () => ui.download(`選択点_${ui.timestampForFile()}.csv`, ASC.resultsView.selectionsCsv(state.output, state.output.map), "text/csv"),
       },
       state.outputStale
     );
+  }
+
+  /** 「選び方ごとのマップ」タブ。結果を出したときのマップと区切りで描く。 */
+  function renderMapsTab() {
+    const container = ui.byId("maps-content");
+    if (!state.output) {
+      container.replaceChildren(ui.create("p", { className: "empty-state", text: "「評価を実行」を押すと、選び方ごとに選んだ点のマップがここに並びます。" }));
+      return;
+    }
+    ASC.samplingMapsView.render(container, state.output, state.output.map, state.output.zones, state.view.mapChoices, {
+      onChoiceChange: (methodKey, choice, focusId) => {
+        state.view.mapChoices[methodKey] = choice;
+        renderMapsTab();
+        ui.byId(focusId).focus();
+      },
+      onOpenInMapTab: (methodKey, drawIndex) => {
+        if (!outputMatchesMap()) {
+          ui.showMessage("warning", "マップが変わったため、この選択は「マップと選択点」で表示できません。", ["もう一度「評価を実行」を押してください。"]);
+          return;
+        }
+        state.view.selection = methodKey;
+        state.view.draw = drawIndex;
+        renderMapTab();
+        selectTab("tab-map");
+        ui.byId("tab-map").focus();
+      },
+    });
   }
 
   // ---- ファイルの読み書き --------------------------------------------------
@@ -497,6 +525,7 @@
       ui.byId("csv-file-name").textContent = state.csvText ? "設定ファイルに含まれていたCSVを使います。" : "";
       state.manual = { shots: new Set(), marks: new Set() };
       state.output = null;
+      state.view.mapChoices = {};
       rebuildMap();
       restoreManual(content.manual);
       ASC.settingsForm.writeAll();
@@ -504,6 +533,7 @@
       ASC.settingsForm.updateDerivedTexts();
       renderMapTab();
       renderResultsTab();
+      renderMapsTab();
       ui.showMessage("success", "設定を読み込みました。", [`ファイル: ${file.name}`]);
     } catch (error) {
       ui.showMessage("error", "設定を読み込めませんでした。", [`内容: ${error.message}`, "このアプリの「設定をJSONで保存」で作ったファイルを選んでください。"]);
@@ -536,7 +566,7 @@
 
   // ---- タブ ----------------------------------------------------------------
 
-  const TAB_IDS = ["tab-map", "tab-results", "tab-help"];
+  const TAB_IDS = ["tab-map", "tab-results", "tab-maps", "tab-help"];
 
   function selectTab(tabId) {
     for (const id of TAB_IDS) {

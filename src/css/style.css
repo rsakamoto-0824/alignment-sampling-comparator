@@ -51,6 +51,21 @@
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+
+  /* 一覧表と選ばれた割合の段階色（青の濃淡。値が大きいほど濃い） */
+  --step-1: #e3eefc;
+  --step-2: #b7d3f6;
+  --step-3: #86b6ef;
+  --step-4: #3987e5;
+  --step-5: #1c5cab;
+  /* 各段階の上に置く文字の色（コントラスト比4.5以上） */
+  --step-ink-1: #0b0b0b;
+  --step-ink-2: #0b0b0b;
+  --step-ink-3: #0b0b0b;
+  --step-ink-4: #0b0b0b;
+  --step-ink-5: #ffffff;
 
   --map-wafer: #ffffff;
   --map-shot: #fcfcfb;
@@ -85,6 +100,19 @@
     --series-1: #3987e5;
     --series-2: #d95926;
     --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    /* 濃色表示では、値が大きいほど明るくする */
+    --step-1: #16304f;
+    --step-2: #184f95;
+    --step-3: #256abf;
+    --step-4: #6da7ec;
+    --step-5: #cde2fb;
+    --step-ink-1: #ffffff;
+    --step-ink-2: #ffffff;
+    --step-ink-3: #ffffff;
+    --step-ink-4: #0b0b0b;
+    --step-ink-5: #0b0b0b;
     --map-wafer: #202020;
     --map-shot: #262624;
     --map-shot-disabled: #34342f;
@@ -594,6 +622,27 @@ th.number {
   stroke-width: 0.8;
 }
 
+/* 選ばれた割合の段階色（色に加えて、各Shotの説明文に割合を書く） */
+.map-shot.step-1 {
+  fill: var(--step-1);
+}
+
+.map-shot.step-2 {
+  fill: var(--step-2);
+}
+
+.map-shot.step-3 {
+  fill: var(--step-3);
+}
+
+.map-shot.step-4 {
+  fill: var(--step-4);
+}
+
+.map-shot.step-5 {
+  fill: var(--step-5);
+}
+
 .map-shot.editable {
   cursor: pointer;
 }
@@ -697,6 +746,63 @@ th.number {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- 選び方ごとのマップ ---- */
+
+.maps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--space-4);
+}
+
+.map-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  background: var(--surface-1);
+  min-width: 0;
+}
+
+.map-card h3 {
+  font-size: var(--font-size-section);
+  margin-bottom: var(--space-2);
+}
+
+.map-card .field {
+  margin-bottom: var(--space-2);
+}
+
+.map-card svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.map-card .stat-list {
+  margin: var(--space-2) 0;
+}
+
+.step-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-3);
+}
+
+.step-legend li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.step-swatch {
+  width: 20px;
+  height: 14px;
+  border: 1px solid var(--axis);
+  flex: none;
+}
+
 /* ---- グラフ ---- */
 
 .chart-frame svg {
@@ -743,6 +849,59 @@ th.number {
   stroke-width: 1;
 }
 
+.chart-row-label {
+  fill: var(--ink-2);
+  font-size: 13px;
+}
+
+/* 補正の名前は長いので、一覧表の見出しは折り返して列の幅を抑える */
+.heat-table thead th {
+  white-space: normal;
+  min-width: 7.5em;
+  vertical-align: bottom;
+}
+
+.heat-table th[scope="row"] {
+  position: static;
+  background: var(--surface-1);
+  text-align: left;
+}
+
+.heat-cell {
+  white-space: nowrap;
+}
+
+.heat-1 {
+  background: var(--step-1);
+  color: var(--step-ink-1);
+}
+
+.heat-2 {
+  background: var(--step-2);
+  color: var(--step-ink-2);
+}
+
+.heat-3 {
+  background: var(--step-3);
+  color: var(--step-ink-3);
+}
+
+.heat-4 {
+  background: var(--step-4);
+  color: var(--step-ink-4);
+}
+
+.heat-5 {
+  background: var(--step-5);
+  color: var(--step-ink-5);
+}
+
+.heat-best {
+  font-weight: 700;
+  outline: 2px solid var(--ink-1);
+  outline-offset: -2px;
+}
+
 .chart-baseline {
   stroke: var(--ink-2);
   stroke-width: 1.5;
@@ -782,6 +941,60 @@ th.number {
 }
 
 /* ---- 使い方 ---- */
+
+.flow-compare {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-3);
+  margin: var(--space-3) 0 var(--space-4);
+}
+
+.flow-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-1);
+}
+
+.flow-card h3 {
+  font-size: var(--font-size-body);
+  margin-bottom: var(--space-2);
+}
+
+.help-content .flow-steps {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-2);
+}
+
+.flow-steps li {
+  border: 1px solid var(--grid);
+  border-radius: 6px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-2);
+}
+
+/* 手順の間に下向きの矢印を置く */
+.flow-steps li + li {
+  margin-top: var(--space-5);
+  position: relative;
+}
+
+.flow-steps li + li::before {
+  content: "↓";
+  position: absolute;
+  top: calc(-1 * var(--space-5));
+  left: 50%;
+  transform: translateX(-50%);
+  line-height: var(--space-5);
+  color: var(--ink-2);
+}
+
+.flow-steps .flow-result {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  font-weight: 700;
+}
 
 .help-content h2 {
   font-size: var(--font-size-section);

@@ -85,32 +85,25 @@
     return store;
   }
 
-  /**
-   * 補正の演算子 P（Mark数×計測点数）を全Waferに掛け、残差の指標を求める。
-   */
-  function evaluateOperator(operator, sampleIndices, truth, noise, data, store, axis) {
-    const markCount = data.markCount;
-    const n = sampleIndices.length;
-    const measured = new Float64Array(n);
-    const residual = new Float64Array(markCount);
-    for (let wafer = 0; wafer < data.waferCount; wafer++) {
-      const waferOffset = wafer * markCount;
+  /** out = P y（P は Mark数×計測点数）。 */
+  function applyOperator(operator, measured, n, markCount, out) {
+    for (let i = 0; i < markCount; i++) {
+      let sum = 0;
+      const rowOffset = i * n;
       for (let j = 0; j < n; j++) {
-        const markIndex = sampleIndices[j];
-        measured[j] = truth[waferOffset + markIndex] + noise[waferOffset + markIndex];
+        sum += operator[rowOffset + j] * measured[j];
       }
-      for (let i = 0; i < markCount; i++) {
-        let correction = 0;
-        const rowOffset = i * n;
-        for (let j = 0; j < n; j++) {
-          correction += operator[rowOffset + j] * measured[j];
-        }
-        residual[i] = truth[waferOffset + i] - correction;
-      }
-      const metrics = residualMetrics(residual, markCount);
-      for (const metric of METRIC_KEYS) {
-        store[axis][metric][wafer] = metrics[metric];
-      }
+      out[i] = sum;
+    }
+  }
+
+  function storeMetrics(store, axis, wafer, truth, waferOffset, correction, markCount, residual) {
+    for (let i = 0; i < markCount; i++) {
+      residual[i] = truth[waferOffset + i] - correction[i];
+    }
+    const metrics = residualMetrics(residual, markCount);
+    for (const metric of METRIC_KEYS) {
+      store[axis][metric][wafer] = metrics[metric];
     }
   }
 
@@ -130,67 +123,180 @@
   }
 
   /**
-   * 1組の計測Markについて、補正の流れごと・軸ごとの残差の指標を求める。
+   * 全Markでの多項式の当てはめの部品。選んだ点によらないので、項の組み合わせごとに1回だけ作る。
    */
-  function evaluateSampleSet(map, data, modelSettings, sampleIndices, flows) {
-    const marks = map.marks;
-    const allIndices = Array.from({ length: marks.length }, (_, i) => i);
-    const warnings = [];
-    let rbf = null;
-    if (flows.rbfThenHowa || flows.howaPlusRbf) {
-      const result = ASC.correction.rbfOperator(marks, sampleIndices, {
-        kernel: modelSettings.rbfKernel,
-        lambda: modelSettings.rbfLambda,
-        shapeFactor: modelSettings.rbfShapeFactor,
-      });
-      if (result.error) {
-        warnings.push(result.error);
+  function createModelCache(map) {
+    const cache = new Map();
+    const allIndices = Array.from({ length: map.marks.length }, (_, i) => i);
+    return function (terms) {
+      const key = terms.join(",");
+      if (!cache.has(key)) {
+        const allDesign = ASC.correction.polynomialDesign(map.marks, allIndices, terms);
+        const allLeastSquares = ASC.correction.leastSquaresOperator(allDesign, map.marks.length, terms.length);
+        cache.set(key, { allDesign, allLeastSquares });
       }
-      rbf = result.operator;
+      return cache.get(key);
+    };
+  }
+
+  /** 推定手法ごとの前準備（選んだ点ごとに1回、XとYで共通）。 */
+  function prepareEstimators(marks, sampleIndices, modelSettings, variants, warnings) {
+    const prepared = {};
+    for (const variant of variants) {
+      const estimator = variant.estimator;
+      if (!estimator || prepared[estimator.key]) {
+        continue;
+      }
+      if (estimator.type === "rbf") {
+        const result = ASC.correction.rbfOperator(
+          marks,
+          sampleIndices,
+          { kernel: modelSettings.rbfKernel, lambda: modelSettings.rbfLambda, shapeFactor: modelSettings.rbfShapeFactor },
+          estimator.features
+        );
+        prepared[estimator.key] = result.error ? { error: result.error } : { type: "linear", operator: result.operator };
+      } else {
+        const result = ASC.correction.prepareGp(marks, sampleIndices, estimator.features, modelSettings.gpKernel);
+        prepared[estimator.key] = result.error ? { error: result.error } : { type: "gp", gp: result };
+      }
+      if (prepared[estimator.key].error) {
+        warnings.push(`${estimator.longLabel}: ${prepared[estimator.key].error}`);
+      }
     }
+    return prepared;
+  }
+
+  /**
+   * 1組の計測Markについて、補正ごと（HOWAのみ、流れ × 推定手法）・軸ごとの残差の指標を求める。
+   * 戻り値の gpChoices は、ガウス過程回帰がWaferごとに選んだ相関の長さ [mm] とノイズ比。
+   */
+  function evaluateSampleSet(map, data, modelSettings, sampleIndices, variants, modelCache) {
+    const marks = map.marks;
+    const markCount = marks.length;
+    const n = sampleIndices.length;
+    const warnings = [];
+    const getAllFit = modelCache || createModelCache(map);
+    const estimators = prepareEstimators(marks, sampleIndices, modelSettings, variants, warnings);
 
     const results = {};
-    for (const flow of C.FLOWS) {
-      if (flows[flow.key]) {
-        results[flow.key] = createMetricStore(data.waferCount);
+    const gpChoices = {};
+    for (const variant of variants) {
+      results[variant.key] = createMetricStore(data.waferCount);
+      if (variant.estimator && variant.estimator.type === "gp") {
+        gpChoices[variant.key] = { lengthMm: [], noiseRatio: [] };
       }
     }
-    const cache = new Map();
+
+    const measured = new Float64Array(n);
+    const howaCorrection = new Float64Array(markCount);
+    const correction = new Float64Array(markCount);
+    const residual = new Float64Array(markCount);
+    const leftover = new Float64Array(n);
+    const howaCache = new Map();
+    const gpProjectors = new Map();
+
     for (const axis of AXES) {
       const terms = axis === "x" ? modelSettings.termsX : modelSettings.termsY;
-      const cacheKey = terms.join(",");
-      let built = cache.get(cacheKey);
-      if (!built) {
-        const allDesign = ASC.correction.polynomialDesign(marks, allIndices, terms);
-        built = ASC.correction.buildAxisOperators({ marks, sampleIndices, termIndices: terms, allDesign, rbf, flows });
-        cache.set(cacheKey, built);
-        warnings.push(...built.warnings);
+      const termsKey = terms.join(",");
+      if (!howaCache.has(termsKey)) {
+        const allFit = getAllFit(terms);
+        const howaParts = ASC.correction.prepareHowa(marks, sampleIndices, terms, allFit.allDesign, allFit.allLeastSquares);
+        warnings.push(...howaParts.warnings);
+        // 線形の補正（HOWAのみ・RBFを使う流れ）は、演算子を先に作っておく
+        const operators = {};
+        for (const variant of variants) {
+          if (!variant.estimator) {
+            operators[variant.key] = howaParts.howa;
+          } else {
+            const estimator = estimators[variant.estimator.key];
+            if (estimator.type === "linear") {
+              operators[variant.key] = ASC.correction.linearFlowOperator(howaParts, estimator.operator, sampleIndices, variant.flowType, markCount);
+            }
+          }
+        }
+        howaCache.set(termsKey, { howaParts, operators });
       }
+      const { howaParts, operators } = howaCache.get(termsKey);
+      const p = howaParts.p;
+      const coefficients = new Float64Array(p);
       const truth = axis === "x" ? data.truthX : data.truthY;
       const noise = axis === "x" ? data.noiseX : data.noiseY;
-      for (const flowKey of Object.keys(results)) {
-        if (built.operators[flowKey]) {
-          evaluateOperator(built.operators[flowKey], sampleIndices, truth, noise, data, results[flowKey], axis);
-        } else {
-          // RBFが解けなかったときなど。0のままだと「残差0」と誤解されるので、値なしにする
-          for (const metric of METRIC_KEYS) {
-            results[flowKey][axis][metric].fill(NaN);
+
+      for (let wafer = 0; wafer < data.waferCount; wafer++) {
+        const waferOffset = wafer * markCount;
+        for (let j = 0; j < n; j++) {
+          const markIndex = sampleIndices[j];
+          measured[j] = truth[waferOffset + markIndex] + noise[waferOffset + markIndex];
+        }
+        applyOperator(howaParts.howa, measured, n, markCount, howaCorrection);
+
+        for (const variant of variants) {
+          const store = results[variant.key];
+          if (operators[variant.key]) {
+            applyOperator(operators[variant.key], measured, n, markCount, correction);
+            storeMetrics(store, axis, wafer, truth, waferOffset, correction, markCount, residual);
+            continue;
+          }
+          const estimator = estimators[variant.estimator.key];
+          if (estimator.error) {
+            // 推定できなかったとき。0のままだと「残差0」と誤解されるので、値なしにする
+            for (const metric of METRIC_KEYS) {
+              store[axis][metric][wafer] = NaN;
+            }
+            continue;
+          }
+          // ガウス過程回帰はWaferごとに調整値を学習する
+          let fit;
+          if (variant.flowType === "estimateThenHowa") {
+            // 未計測Markを推定して全Markを埋め、全Markに多項式を当てはめる（係数を直接求める）
+            fit = ASC.correction.gpFit(estimator.gp, measured);
+            const projectorKey = `${termsKey}|${variant.estimator.key}`;
+            if (!gpProjectors.has(projectorKey)) {
+              gpProjectors.set(projectorKey, ASC.correction.gpHowaProjector(estimator.gp, howaParts, sampleIndices));
+            }
+            ASC.correction.gpThenHowaCoefficients(estimator.gp, gpProjectors.get(projectorKey), fit, measured, coefficients);
+            for (let i = 0; i < markCount; i++) {
+              let sum = 0;
+              const offset = i * p;
+              for (let k = 0; k < p; k++) {
+                sum += howaParts.allDesign[offset + k] * coefficients[k];
+              }
+              correction[i] = sum;
+            }
+          } else {
+            for (let j = 0; j < n; j++) {
+              let fittedValue = 0;
+              for (let k = 0; k < n; k++) {
+                fittedValue += howaParts.fitted[j * n + k] * measured[k];
+              }
+              leftover[j] = measured[j] - fittedValue;
+            }
+            fit = ASC.correction.gpFit(estimator.gp, leftover);
+            const estimate = ASC.correction.gpPredictAll(estimator.gp, fit);
+            for (let i = 0; i < markCount; i++) {
+              correction[i] = howaCorrection[i] + estimate[i];
+            }
+          }
+          storeMetrics(store, axis, wafer, truth, waferOffset, correction, markCount, residual);
+          if (Number.isFinite(fit.length)) {
+            gpChoices[variant.key].lengthMm.push(fit.length * C.NORMALIZATION_RADIUS_MM);
+            gpChoices[variant.key].noiseRatio.push(fit.noiseRatio);
           }
         }
       }
     }
-    return { results, warnings: Array.from(new Set(warnings)) };
+    return { results, gpChoices, warnings: Array.from(new Set(warnings)) };
   }
 
   /**
    * 全Markを計測してHOWAで補正したときの基準。
    * 多項式で表せない成分だけが残るので、選び方による悪化を測る物差しになる。
-   * （全Markを測るとRBFは計測値をそのまま通るため、RBFの流れは基準に使わない）
+   * （全Markを測ると未計測Markがなく推定の出番がないため、推定を使う流れは基準に使わない）
    */
-  function evaluateAllMarks(map, data, modelSettings) {
+  function evaluateAllMarks(map, data, modelSettings, modelCache) {
     const allIndices = Array.from({ length: map.marks.length }, (_, i) => i);
-    const baselineFlows = { howa: true, rbfThenHowa: false, howaPlusRbf: false };
-    return evaluateSampleSet(map, data, modelSettings, allIndices, baselineFlows);
+    const howaOnly = [{ key: "howa", flowType: "howa", estimator: null, label: "HOWAのみ" }];
+    return evaluateSampleSet(map, data, modelSettings, allIndices, howaOnly, modelCache);
   }
 
   /**
@@ -209,7 +315,8 @@
     const relaxed = ASC.constraints.resolveHardConstraints(context, sampling.seed, (ctx, random) =>
       Boolean(ASC.sampling.findFeasibleState(ctx, random))
     );
-    const flows = settings.model.flows;
+    const variants = ASC.correction.buildVariants(settings.model);
+    const modelCache = createModelCache(map);
     const termSets = [settings.model.termsX, settings.model.termsY];
 
     // ---- 選ぶ ----
@@ -271,15 +378,16 @@
       if (isCancelled()) {
         return { cancelled: true };
       }
-      const evaluation = evaluateSampleSet(map, data, settings.model, set.markIndices, flows);
+      const evaluation = evaluateSampleSet(map, data, settings.model, set.markIndices, variants, modelCache);
       set.results = evaluation.results;
+      set.gpChoices = evaluation.gpChoices;
       set.warnings.push(...evaluation.warnings);
       doneSteps++;
       onProgress(doneSteps, totalSteps, "補正して残差を求めています");
       await yieldToBrowser();
     }
     const uncorrected = evaluateUncorrected(data);
-    const allMarks = evaluateAllMarks(map, data, settings.model);
+    const allMarks = evaluateAllMarks(map, data, settings.model, modelCache);
     doneSteps += 2;
     onProgress(doneSteps, totalSteps, "集計しています");
 
@@ -289,7 +397,8 @@
       relaxed,
       sets,
       baselines: { uncorrected, allMarks: allMarks.results },
-      summary: summarizeResults(sets, flows),
+      variants,
+      summary: summarizeResults(sets, variants),
       waferCount: data.waferCount,
     };
   }
@@ -314,40 +423,43 @@
       status: ASC.constraints.describeStatus(context, selection.items, markIndices),
       warnings,
       results: null,
+      gpChoices: null,
     };
   }
 
   /**
-   * 選び方 × 補正の流れ × 軸 × 指標ごとに、全試行・全Waferの値をまとめる。
+   * 選び方 × 補正 × 軸 × 指標ごとに、全試行・全Waferの値をまとめる。
    * ランダム系は、試行ごとの平均（Wafer平均）のばらつきも出す。
    */
-  function summarizeResults(sets, flows) {
+  function summarizeResults(sets, variants) {
     const summary = {};
     for (const method of C.METHODS) {
       const methodSets = sets.filter((set) => set.method === method.key && set.results);
       if (methodSets.length === 0) {
         continue;
       }
-      summary[method.key] = { drawCount: methodSets.length, flows: {} };
-      for (const flow of C.FLOWS) {
-        if (!flows[flow.key]) {
-          continue;
-        }
-        const flowSummary = {};
+      summary[method.key] = { drawCount: methodSets.length, variants: {}, gpChoices: {} };
+      for (const variant of variants) {
+        const variantSummary = {};
         for (const axis of AXES) {
-          flowSummary[axis] = {};
+          variantSummary[axis] = {};
           for (const metric of METRIC_KEYS) {
             const all = [];
             const perDraw = [];
             for (const set of methodSets) {
-              const values = set.results[flow.key][axis][metric];
+              const values = set.results[variant.key][axis][metric];
               all.push(...values);
-              perDraw.push(M.mean(values));
+              perDraw.push(M.summarize(values).mean);
             }
-            flowSummary[axis][metric] = { all: M.summarize(all), perDraw: M.summarize(perDraw) };
+            variantSummary[axis][metric] = { all: M.summarize(all), perDraw: M.summarize(perDraw) };
           }
         }
-        summary[method.key].flows[flow.key] = flowSummary;
+        summary[method.key].variants[variant.key] = variantSummary;
+        if (variant.estimator && variant.estimator.type === "gp") {
+          const lengths = methodSets.flatMap((set) => set.gpChoices[variant.key].lengthMm);
+          const ratios = methodSets.flatMap((set) => set.gpChoices[variant.key].noiseRatio);
+          summary[method.key].gpChoices[variant.key] = { lengthMm: M.summarize(lengths), noiseRatio: M.summarize(ratios) };
+        }
       }
       summary[method.key].kappaX = M.summarize(methodSets.map((set) => set.kappaX));
       summary[method.key].kappaY = M.summarize(methodSets.map((set) => set.kappaY));
