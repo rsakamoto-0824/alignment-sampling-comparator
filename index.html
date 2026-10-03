@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>アライメント計測Markの選び方の比較</title>
+    <link rel="stylesheet" href="src/css/style.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>アライメント計測Markの選び方の比較</h1>
+      <div class="run-area">
+        <div class="progress-area" id="progress-area" hidden>
+          <progress id="progress-bar" max="1" value="0"></progress>
+          <span id="progress-label" aria-live="polite"></span>
+          <button type="button" class="button-secondary" id="cancel-button">中止</button>
+        </div>
+        <button type="button" class="button-primary" id="run-button">評価を実行</button>
+      </div>
+    </header>
+
+    <div class="message-area" id="message-area" role="status" aria-live="polite"></div>
+
+    <div class="layout">
+      <aside class="settings-panel" aria-label="設定">
+        <!-- 1. Waferマップ -->
+        <details class="settings-section" open>
+          <summary>1. Waferマップ</summary>
+          <div class="section-body">
+            <fieldset>
+              <legend>マップの用意のしかた</legend>
+              <div class="choice-group">
+                <label class="choice"><input type="radio" name="map-source" value="generate" data-setting="map.source" /> 生成する</label>
+                <label class="choice"><input type="radio" name="map-source" value="csv" data-setting="map.source" /> CSVを読み込む</label>
+              </div>
+            </fieldset>
+
+            <div class="field-row">
+              <div class="field">
+                <label for="shot-width">Shotの幅 [mm]</label>
+                <input type="number" id="shot-width" step="any" data-setting="map.shotWidthMm" data-min-exclusive="0" />
+                <p class="field-error" id="shot-width-error"></p>
+              </div>
+              <div class="field">
+                <label for="shot-height">Shotの高さ [mm]</label>
+                <input type="number" id="shot-height" step="any" data-setting="map.shotHeightMm" data-min-exclusive="0" />
+                <p class="field-error" id="shot-height-error"></p>
+              </div>
+            </div>
+            <div class="field">
+              <label for="valid-radius">有効半径 [mm]</label>
+              <input type="number" id="valid-radius" step="any" data-setting="map.validRadiusMm" data-min-exclusive="0" data-max="150" />
+              <p class="hint">この半径より内側（r &lt; 有効半径）のMarkだけを使います。</p>
+              <p class="field-error" id="valid-radius-error"></p>
+            </div>
+
+            <div id="generate-fields">
+              <div class="field-row">
+                <div class="field">
+                  <label for="offset-x">Shot配置のずらし X [mm]</label>
+                  <input type="number" id="offset-x" step="any" data-setting="map.offsetXmm" />
+                  <p class="field-error" id="offset-x-error"></p>
+                </div>
+                <div class="field">
+                  <label for="offset-y">Shot配置のずらし Y [mm]</label>
+                  <input type="number" id="offset-y" step="any" data-setting="map.offsetYmm" />
+                  <p class="field-error" id="offset-y-error"></p>
+                </div>
+              </div>
+              <p class="hint">Shot中心がこの座標を通る格子に並べます。Shot幅の半分にすると、Wafer中心がShotの角になります。</p>
+              <div class="field">
+                <label for="scan-pattern">Scan方向の並べ方</label>
+                <select id="scan-pattern" data-setting="map.scanPattern"></select>
+              </div>
+              <h3 class="subheading">Shot内のMark（Shot中心からの座標）</h3>
+              <div class="table-scroll">
+                <table class="data-table" id="mark-table">
+                  <thead>
+                    <tr><th>Mark番号</th><th>X [mm]</th><th>Y [mm]</th><th><span class="visually-hidden">操作</span></th></tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div class="button-row">
+                <button type="button" class="button-secondary button-small" id="add-mark-button">Markを追加</button>
+              </div>
+              <p class="field-error" id="mark-table-error"></p>
+            </div>
+
+            <div id="csv-fields" hidden>
+              <div class="field">
+                <label for="csv-file">CSVファイル（1行1Mark）</label>
+                <input type="file" id="csv-file" accept=".csv,text/csv" />
+              </div>
+              <p class="hint">列は ShotId, ShotX, ShotY, ScanDir, MarkNo, MarkX, MarkY。ScanDir は Up / Down。Shot座標はWafer中心から、Mark座標はShot中心からの mm です。</p>
+              <p id="csv-file-name" class="hint"></p>
+            </div>
+
+            <p id="map-summary" class="hint"></p>
+            <div class="button-row">
+              <button type="button" class="button-secondary button-small" id="export-map-button">現在のマップをCSVで保存</button>
+            </div>
+          </div>
+        </details>
+
+        <!-- 2. 評価データ -->
+        <details class="settings-section">
+          <summary>2. 評価データ（Wafer高次傾向）</summary>
+          <div class="section-body">
+            <div class="field-row">
+              <div class="field">
+                <label for="wafer-count">Wafer数</label>
+                <input type="number" id="wafer-count" step="1" data-setting="evaluationData.waferCount" data-integer data-min="1" data-max="5000" />
+                <p class="field-error" id="wafer-count-error"></p>
+              </div>
+              <div class="field">
+                <label for="data-seed">乱数シード</label>
+                <input type="number" id="data-seed" step="1" data-setting="evaluationData.seed" data-integer data-min="0" />
+                <p class="field-error" id="data-seed-error"></p>
+              </div>
+            </div>
+            <fieldset>
+              <legend>係数の乱数の分布</legend>
+              <div class="choice-group">
+                <label class="choice"><input type="radio" name="distribution" value="uniform" data-setting="evaluationData.distribution" /> 一様分布（範囲 ±a）</label>
+                <label class="choice"><input type="radio" name="distribution" value="normal" data-setting="evaluationData.distribution" /> 正規分布（標準偏差 σ）</label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>Zernikeの正規化（Fringe番号、正規化半径150 mm）</legend>
+              <div class="choice-group">
+                <label class="choice"><input type="radio" name="normalization" value="none" data-setting="evaluationData.normalization" /> 正規化なし</label>
+                <label class="choice"><input type="radio" name="normalization" value="rms" data-setting="evaluationData.normalization" /> RMS正規化</label>
+              </div>
+            </fieldset>
+
+            <h3 class="subheading">Zernike項ごとの大きさ [nm]</h3>
+            <p class="hint">一様分布なら範囲 ±a、正規分布なら標準偏差 σ です。「今の補正」の列は、3で選んだ多項式で補正できるかを示します。</p>
+            <div class="field-row">
+              <div class="field">
+                <label for="bulk-low">5次以下の項にまとめて設定</label>
+                <input type="number" id="bulk-low" step="any" min="0" value="2" />
+              </div>
+              <div class="field">
+                <label for="bulk-high">6次以上の項にまとめて設定</label>
+                <input type="number" id="bulk-high" step="any" min="0" value="0.5" />
+              </div>
+            </div>
+            <div class="button-row">
+              <button type="button" class="button-secondary button-small" id="bulk-apply-button">X・Yにまとめて設定</button>
+            </div>
+            <div class="table-scroll tall">
+              <table class="data-table" id="zernike-table">
+                <thead>
+                  <tr><th>使う</th><th>項</th><th>次数</th><th>X</th><th>Y</th><th>今の補正</th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="field-error" id="zernike-table-error"></p>
+
+            <h3 class="subheading">多項式で補正できない成分</h3>
+            <div class="field-row">
+              <div class="field">
+                <label for="noise-x">計測ノイズ X（σ）[nm]</label>
+                <input type="number" id="noise-x" step="any" data-setting="evaluationData.noiseSigmaXnm" data-min="0" />
+                <p class="field-error" id="noise-x-error"></p>
+              </div>
+              <div class="field">
+                <label for="noise-y">計測ノイズ Y（σ）[nm]</label>
+                <input type="number" id="noise-y" step="any" data-setting="evaluationData.noiseSigmaYnm" data-min="0" />
+                <p class="field-error" id="noise-y-error"></p>
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label for="scan-offset-x">Scan方向のずれ X [nm]</label>
+                <input type="number" id="scan-offset-x" step="any" data-setting="evaluationData.scanOffsetXnm" data-min="0" />
+                <p class="field-error" id="scan-offset-x-error"></p>
+              </div>
+              <div class="field">
+                <label for="scan-offset-y">Scan方向のずれ Y [nm]</label>
+                <input type="number" id="scan-offset-y" step="any" data-setting="evaluationData.scanOffsetYnm" data-min="0" />
+                <p class="field-error" id="scan-offset-y-error"></p>
+              </div>
+            </div>
+            <p class="hint">Scan方向のずれは、UpのShotに +δ、DownのShotに −δ を足します。δはWaferごとに上の分布で決めます（大きさは ±a または σ）。</p>
+          </div>
+        </details>
+
+        <!-- 3. 補正モデル -->
+        <details class="settings-section">
+          <summary>3. 補正モデル（HOWA・RBF）</summary>
+          <div class="section-body">
+            <h3 class="subheading">HOWAの多項式（21項から選ぶ）</h3>
+            <div class="button-row">
+              <button type="button" class="button-secondary button-small" data-term-preset="5">5次まで</button>
+              <button type="button" class="button-secondary button-small" data-term-preset="3">3次まで</button>
+              <button type="button" class="button-secondary button-small" data-term-preset="1">1次まで</button>
+              <button type="button" class="button-secondary button-small" id="copy-x-to-y-button">YをXと同じにする</button>
+            </div>
+            <div class="table-scroll tall">
+              <table class="data-table" id="polynomial-table">
+                <thead>
+                  <tr><th>項</th><th>次数</th><th>X</th><th>Y</th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p id="polynomial-summary" class="hint"></p>
+            <p class="field-error" id="polynomial-table-error"></p>
+
+            <fieldset>
+              <legend>比べる補正の流れ</legend>
+              <label class="choice"><input type="checkbox" data-setting="model.flows.howa" /> HOWAのみ</label>
+              <label class="choice"><input type="checkbox" data-setting="model.flows.rbfThenHowa" /> RBFで推定→HOWA</label>
+              <label class="choice"><input type="checkbox" data-setting="model.flows.howaPlusRbf" /> HOWA＋RBF</label>
+            </fieldset>
+            <p class="field-error" id="flows-error"></p>
+
+            <h3 class="subheading">RBF（1次多項式＋RBFの和）</h3>
+            <div class="field">
+              <label for="rbf-kernel">基底関数</label>
+              <select id="rbf-kernel" data-setting="model.rbfKernel"></select>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label for="rbf-lambda">緩和パラメータ λ</label>
+                <input type="number" id="rbf-lambda" step="any" data-setting="model.rbfLambda" data-min="0" />
+                <p class="field-error" id="rbf-lambda-error"></p>
+              </div>
+              <div class="field">
+                <label for="rbf-shape">幅（点の平均間隔の倍数）</label>
+                <input type="number" id="rbf-shape" step="any" data-setting="model.rbfShapeFactor" data-min-exclusive="0" />
+                <p class="field-error" id="rbf-shape-error"></p>
+              </div>
+            </div>
+            <p class="hint">λ = 0 なら計測点をそのまま通ります。大きくするほど、なめらかにノイズをならします。幅は薄板スプラインでは使いません。</p>
+          </div>
+        </details>
+
+        <!-- 4. サンプリング -->
+        <details class="settings-section">
+          <summary>4. サンプリング</summary>
+          <div class="section-body">
+            <div class="field">
+              <label for="shot-count">計測Shot数</label>
+              <input type="number" id="shot-count" step="1" data-setting="sampling.shotCount" data-integer data-min="1" />
+              <p class="field-error" id="shot-count-error"></p>
+            </div>
+            <fieldset>
+              <legend>選んだShotで必ず測るMark（番号）</legend>
+              <div class="choice-group" id="designated-marks"></div>
+            </fieldset>
+            <fieldset>
+              <legend>Mark数の扱い</legend>
+              <label class="choice"><input type="radio" name="mark-mode" value="exact" data-setting="sampling.markMode" /> ちょうどk個（必ず測るMarkだけ）</label>
+              <label class="choice"><input type="radio" name="mark-mode" value="atLeast" data-setting="sampling.markMode" /> k個以上（選んだShotから追加のMarkも選ぶ）</label>
+            </fieldset>
+            <div class="field">
+              <label for="total-mark-count">総Mark数</label>
+              <input type="number" id="total-mark-count" step="1" data-setting="sampling.totalMarkCount" data-integer data-min="1" />
+              <p class="hint" id="total-mark-hint"></p>
+              <p class="field-error" id="total-mark-count-error"></p>
+            </div>
+            <p id="eligible-summary" class="hint"></p>
+
+            <fieldset>
+              <legend>比べる選び方</legend>
+              <div id="method-choices"></div>
+            </fieldset>
+            <div class="field-row">
+              <div class="field">
+                <label for="draws">試行回数（ランダム・ポアソン）</label>
+                <input type="number" id="draws" step="1" data-setting="sampling.draws" data-integer data-min="1" data-max="500" />
+                <p class="field-error" id="draws-error"></p>
+              </div>
+              <div class="field">
+                <label for="optimal-starts">開始点の数（D・I最適）</label>
+                <input type="number" id="optimal-starts" step="1" data-setting="sampling.optimalStarts" data-integer data-min="1" data-max="50" />
+                <p class="field-error" id="optimal-starts-error"></p>
+              </div>
+            </div>
+            <div class="field">
+              <label for="sampling-seed">乱数シード（選び方）</label>
+              <input type="number" id="sampling-seed" step="1" data-setting="sampling.seed" data-integer data-min="0" />
+              <p class="field-error" id="sampling-seed-error"></p>
+            </div>
+          </div>
+        </details>
+
+        <!-- 5. 条件制約 -->
+        <details class="settings-section">
+          <summary>5. 条件制約</summary>
+          <div class="section-body">
+            <div class="table-scroll">
+              <table class="data-table" id="constraint-table">
+                <thead>
+                  <tr><th>制約</th><th>オン</th><th>種類</th><th>優先度</th><th>配分</th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="field-error" id="constraint-table-error"></p>
+            <p class="hint">数は「選んだShot」で数え、ほぼ同数（差1以内）を目標にします。象限・領域はShot中心で判定します。ハードは必ず満たし、同時に満たせないときは優先度の低いものからソフトに切り替えます。</p>
+            <div class="field-row">
+              <div class="field">
+                <label for="zone-inner">同心円の内側の区切り [mm]</label>
+                <input type="number" id="zone-inner" step="any" data-setting="zones.innerRadiusMm" data-min-exclusive="0" />
+                <p class="field-error" id="zone-inner-error"></p>
+              </div>
+              <div class="field">
+                <label for="zone-outer">同心円の外側の区切り [mm]</label>
+                <input type="number" id="zone-outer" step="any" data-setting="zones.outerRadiusMm" data-min-exclusive="0" />
+                <p class="field-error" id="zone-outer-error"></p>
+              </div>
+            </div>
+            <p class="field-error" id="zones-error"></p>
+            <div class="field">
+              <label for="soft-strength">ソフト制約の強さ（0〜1）</label>
+              <input type="number" id="soft-strength" step="0.1" data-setting="constraints.softStrength" data-min="0" data-max="1" />
+              <p class="hint">0は制約なしと同じ、1はほぼハードと同じです。優先度が1つ上がるごとに重みが2倍になります。</p>
+              <p class="field-error" id="soft-strength-error"></p>
+            </div>
+          </div>
+        </details>
+
+        <!-- 6. 設定の保存・読込 -->
+        <details class="settings-section">
+          <summary>6. 設定の保存・読込</summary>
+          <div class="section-body">
+            <div class="button-row">
+              <button type="button" class="button-secondary button-small" id="save-settings-button">設定をJSONで保存</button>
+            </div>
+            <div class="field">
+              <label for="settings-file">設定JSONを読み込む</label>
+              <input type="file" id="settings-file" accept=".json,application/json" />
+            </div>
+            <p class="hint">手動選択とCSVで読み込んだマップも一緒に保存します。</p>
+          </div>
+        </details>
+      </aside>
+
+      <main>
+        <div class="tab-list" role="tablist" aria-label="表示の切り替え">
+          <button type="button" class="tab" role="tab" id="tab-map" aria-controls="panel-map" aria-selected="true">マップと選択点</button>
+          <button type="button" class="tab" role="tab" id="tab-results" aria-controls="panel-results" aria-selected="false" tabindex="-1">評価結果</button>
+          <button type="button" class="tab" role="tab" id="tab-help" aria-controls="panel-help" aria-selected="false" tabindex="-1">使い方</button>
+        </div>
+
+        <section class="tab-panel" role="tabpanel" id="panel-map" aria-labelledby="tab-map">
+          <div class="toolbar">
+            <div class="field">
+              <label for="view-selection">表示する選択</label>
+              <select id="view-selection"></select>
+            </div>
+            <div class="field" id="view-draw-field" hidden>
+              <label for="view-draw">試行</label>
+              <select id="view-draw"></select>
+            </div>
+            <button type="button" class="button-secondary" id="copy-to-manual-button" hidden>この選択を手動選択に写す</button>
+          </div>
+          <div class="toolbar" id="manual-toolbar">
+            <label class="choice"><input type="checkbox" id="edit-manual" /> クリックで手動選択を編集する</label>
+            <button type="button" class="button-secondary button-small" id="clear-manual-button">手動選択を消す</button>
+          </div>
+          <p class="hint" id="map-hint"></p>
+          <div class="map-layout">
+            <div class="map-frame" id="map-frame"></div>
+            <div>
+              <h2 class="subheading">記号</h2>
+              <ul class="legend-list" id="map-legend"></ul>
+              <h2 class="subheading">選んだ点</h2>
+              <dl class="stat-list" id="selection-stats"></dl>
+              <h2 class="subheading">制約の満たし具合</h2>
+              <div id="constraint-status"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" role="tabpanel" id="panel-results" aria-labelledby="tab-results" hidden>
+          <div id="results-content">
+            <p class="empty-state">左の設定を確かめて「評価を実行」を押すと、ここに結果が出ます。</p>
+          </div>
+        </section>
+
+        <section class="tab-panel help-content" role="tabpanel" id="panel-help" aria-labelledby="tab-help" hidden>
+          <h2>このアプリでできること</h2>
+          <p>Wafer高次補正（HOWA）のアライメント計測で、どのMarkを測るかの選び方を、条件制約つきで比べます。アプリの中で乱数のWafer高次傾向（評価データ）を作り、選んだMarkの計測値から補正したときの残差で評価します。</p>
+          <h2>使う順番</h2>
+          <ol>
+            <li>「1. Waferマップ」でShotとMarkを用意する（生成するか、CSVを読み込む）</li>
+            <li>「2. 評価データ」でZernike項の大きさ、計測ノイズ、Scan方向のずれを決める</li>
+            <li>「3. 補正モデル」でHOWAの多項式の項と、比べる補正の流れを選ぶ</li>
+            <li>「4. サンプリング」と「5. 条件制約」で、計測Shot数・必ず測るMark・制約を決める</li>
+            <li>必要なら「マップと選択点」で手動選択を作る（Shotをクリック）</li>
+            <li>「評価を実行」を押し、「評価結果」で選び方と補正の流れを比べる</li>
+          </ol>
+          <h2>選び方</h2>
+          <ul>
+            <li><strong>ランダム</strong>: 制約を満たす範囲で、Shotを無作為に選びます。試行回数ぶん選び直して、結果のばらつきも見ます。</li>
+            <li><strong>ポアソンディスク</strong>: Shot中心の最小間隔ができるだけ広くなるように、無作為に選びます。</li>
+            <li><strong>D最適</strong>: 多項式の係数の推定精度（情報行列の行列式）が最も良くなるように、Shotを入れ替えて探します。</li>
+            <li><strong>I最適</strong>: 全Markで平均した予測誤差が最も小さくなるように探します。</li>
+            <li><strong>手動</strong>: マップ上で選んだShot（と追加Mark）です。</li>
+          </ul>
+          <h2>補正の流れ</h2>
+          <ul>
+            <li><strong>HOWAのみ</strong>: 計測したMarkだけに多項式を当てはめて、全Markを補正します。</li>
+            <li><strong>RBFで推定→HOWA</strong>: RBFで未計測Markのずれを推定し、計測値と合わせた全Markに多項式を当てはめます。</li>
+            <li><strong>HOWA＋RBF</strong>: 多項式で補正し、計測Markに残ったずれをRBFで補間して足します（ASML特許 US20120218533A1 の形に近いもの）。</li>
+          </ul>
+          <h2>結果の見方</h2>
+          <ul>
+            <li>残差は、真のずれから補正量を引いた値です。全Waferの全Markで求め、Waferごとに RMS・|平均|+3σ・最大 を出します。</li>
+            <li>箱ひげ図の箱は25〜75%点、線は5〜95%点、箱の中の縦線は中央値です。ランダム系は全試行・全Waferの値をまとめています。</li>
+            <li>「全点計測」は全Markを測ってHOWAで補正した残差です。多項式で表せない成分だけが残るので、選び方による悪化を測る物差しになります。</li>
+            <li>κ は、計測ノイズ σ が補正量にどれだけ乗るかの倍率です（全Markで平均した予測誤差の標準偏差 ÷ σ、HOWAのみの場合）。小さいほど良い選び方です。</li>
+          </ul>
+          <h2>注意</h2>
+          <ul>
+            <li>評価データはすべて乱数です。実測データは読み込みません。</li>
+            <li>多項式で表せる成分だけでノイズがないと、どの選び方でも残差はほぼ0になり差が出ません。6次以上のZernike項や計測ノイズを入れて比べてください。</li>
+            <li>計測点数が多項式の項数より少ないと、補正が不安定になります（警告を出します）。項数の2倍以上が目安です。</li>
+          </ul>
+        </section>
+      </main>
+    </div>
+
+    <div class="chart-tooltip" id="chart-tooltip" role="tooltip" hidden></div>
+
+    <script src="src/js/constants.js"></script>
+    <script src="src/js/math-utils.js"></script>
+    <script src="src/js/zernike.js"></script>
+    <script src="src/js/wafer-map.js"></script>
+    <script src="src/js/evaluation-data.js"></script>
+    <script src="src/js/correction.js"></script>
+    <script src="src/js/constraints.js"></script>
+    <script src="src/js/sampling.js"></script>
+    <script src="src/js/evaluator.js"></script>
+    <script src="src/js/ui-common.js"></script>
+    <script src="src/js/ui-settings.js"></script>
+    <script src="src/js/ui-map.js"></script>
+    <script src="src/js/ui-results.js"></script>
+    <script src="src/js/app.js"></script>
+  </body>
+</html>
