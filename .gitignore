@@ -4,3 +4,10 @@ __pycache__/
 *.pyc
 .env
 .env.local
+
+# Python（仮想環境・ノートブックの一時ファイル）
+.venv/
+.ipynb_checkpoints/
+python/notebooks/output/
+*.egg-info/
+matlab/output/

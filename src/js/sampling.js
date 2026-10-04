@@ -473,7 +473,7 @@
             gain = logDetChange / totalTerms;
           }
           gain -= penaltyScale * state.swapDelta(removed, added, false);
-          if (gain > bestGain) {
+          if (M.isClearlyGreater(gain, bestGain, C.TIE_TOLERANCE)) {
             bestGain = gain;
             bestSwap = [removed, added];
           }
@@ -514,7 +514,7 @@
       const prepared = criterion === "I" ? exchangeOptimize(context, models, "D", startState) : startState;
       const state = exchangeOptimize(context, models, criterion, prepared);
       const objective = objectiveOf(context, models, criterion, state);
-      if (objective > bestObjective) {
+      if (M.isClearlyGreater(objective, bestObjective, C.TIE_TOLERANCE)) {
         bestObjective = objective;
         best = state;
       }
@@ -624,7 +624,7 @@
             gain += Math.log(1 + leverage);
           }
         });
-        if (gain > bestGain) {
+        if (M.isClearlyGreater(gain, bestGain, C.TIE_TOLERANCE)) {
           bestGain = gain;
           bestPosition = position;
         }

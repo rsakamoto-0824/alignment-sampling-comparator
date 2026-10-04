@@ -551,6 +551,17 @@
     }
   }
 
+  /**
+   * value が best より「はっきり」大きいか。差が相対 tolerance 以下なら同点として false を返す。
+   * best が −∞ のときは、有限の値なら true。
+   */
+  function isClearlyGreater(value, best, tolerance) {
+    if (best === -Infinity) {
+      return value > best;
+    }
+    return value > best + tolerance * Math.max(1, Math.abs(best));
+  }
+
   // ---- 統計 -------------------------------------------------------------
 
   function mean(values) {
@@ -613,6 +624,7 @@
     luSolve,
     determinant,
     symmetricEigen,
+    isClearlyGreater,
     mean,
     percentileOfSorted,
     summarize,
