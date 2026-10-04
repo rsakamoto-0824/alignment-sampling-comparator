@@ -18,6 +18,7 @@ const SOURCE_FILES = [
   "constraints.js",
   "sampling.js",
   "evaluator.js",
+  "manual-plans.js",
 ];
 for (const file of SOURCE_FILES) {
   const code = fs.readFileSync(path.join(__dirname, "..", "src", "js", file), "utf8");
@@ -576,7 +577,7 @@ async function main() {
     settings.sampling.optimalStarts = 1;
     settings.sampling.shotCount = 16;
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
-    const output = await ASC.evaluator.runEvaluation({ map, data, settings, manual: { shotIndices: [], extraMarkIndices: [] } }, () => {}, () => false);
+    const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
     assert(output.errors.length === 0, output.errors.join(" / "));
     for (const methodKey of ["random", "poisson", "dOptimal", "iOptimal"]) {
       const rms = output.summary[methodKey].variants.howa.x.rms.all.max;
@@ -599,7 +600,7 @@ async function main() {
     let lastProgress = 0;
     const started = Date.now();
     const output = await ASC.evaluator.runEvaluation(
-      { map, data, settings, manual: { shotIndices: manualShots, extraMarkIndices: [] } },
+      { map, data, settings, manualPlans: [{ key: "manual:1", label: "手動1", shotIndices: manualShots, extraMarkIndices: [] }] },
       (done, total) => {
         lastProgress = done / total;
       },
@@ -609,7 +610,8 @@ async function main() {
     assert(output.errors.length === 0, output.errors.join(" / "));
     assert(lastProgress === 1, "進み具合が100%になりません");
     assert(output.variants.length === 9, `比べる補正が9通り（HOWAのみ＋2つの流れ×4つの推定手法）ではありません（${output.variants.length}）`);
-    for (const method of ASC.constants.METHODS) {
+    assert(output.methods.map((method) => method.key).join(",") === "random,poisson,dOptimal,iOptimal,manual:1", `結果の選び方の並びが違います: ${output.methods.map((method) => method.key)}`);
+    for (const method of output.methods) {
       const summary = output.summary[method.key];
       assert(summary, `${method.label} の結果がありません`);
       for (const variant of output.variants) {
@@ -621,7 +623,7 @@ async function main() {
     assert(gpLength > 0, "ガウス過程回帰の学習した相関の長さがありません");
     const baseline = ASC.evaluator.summarizeStore(output.baselines.allMarks.howa).x.rms.mean;
     const uncorrected = ASC.evaluator.summarizeStore(output.baselines.uncorrected).x.rms.mean;
-    for (const method of ASC.constants.METHODS) {
+    for (const method of output.methods) {
       assert(output.summary[method.key].variants.howa.x.rms.all.mean > baseline, `${method.label} が全点計測より良くなっています`);
     }
     assert(uncorrected > baseline * 3, "補正なしと全点計測の差が小さすぎます");
@@ -711,7 +713,7 @@ async function main() {
     assert(Math.abs(lastFraction - 1) < 1e-9, "進み具合が100%になりません");
     output.points.forEach((point) => {
       assert(point.markCounts.dOptimal === point.shotCount * 2, `Shot ${point.shotCount}: Mark数がShot数×2ではありません`);
-      assert(!point.summary.manual, "スイープに手動選択が入っています");
+      assert(Object.keys(point.summary).every((key) => !key.startsWith("manual:")), "スイープの点に手動プランが入っています");
       assert(point.summary.random.estimation.gpXY, "スイープに推定精度がありません");
     });
     const first = output.points[0].summary.dOptimal.variants.howa.x.rms.all.mean;
@@ -719,6 +721,61 @@ async function main() {
     assert(lastValue < first, `点を増やしても残差が減りません（${first} → ${lastValue}）`);
     const invalid = await ASC.evaluator.runSweep({ map, data, settings }, { startShots: 10, endShots: 500, stepShots: 10, draws: 2 }, () => {}, () => false);
     assert(invalid.errors.some((text) => text.includes("選べるShot数")), "選べるShot数を超える範囲を知らせていません");
+  });
+
+  await test("手動プラン: 複数のプランを別々の選び方として評価し、スイープでは1回だけ評価して点として返す", async () => {
+    const map = defaultMap();
+    const settings = ASC.defaultSettings();
+    settings.evaluationData = defaultEvaluationSettings({ waferCount: 8 });
+    settings.sampling.optimalStarts = 1;
+    settings.sampling.draws = 2;
+    settings.model.estimators = { rbfXY: true, rbfXYR: false, gpXY: false, gpXYR: false };
+    const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
+    const { context } = contextFor(map);
+    const planA = { key: "manual:1", label: "現行", shotIndices: context.items.slice(0, 15).map((item) => item.shotIndex), extraMarkIndices: [] };
+    const planB = { key: "manual:2", label: "案B", shotIndices: context.items.slice(20, 50).map((item) => item.shotIndex), extraMarkIndices: [] };
+    const empty = { key: "manual:3", label: "空", shotIndices: [], extraMarkIndices: [] };
+    const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [planA, planB, empty] }, () => {}, () => false);
+    assert(output.errors.length === 0, output.errors.join(" / "));
+    const keys = output.methods.map((method) => method.key);
+    assert(keys.includes("manual:1") && keys.includes("manual:2") && !keys.includes("manual:3"), `手動プランの並びが違います: ${keys}`);
+    assert(output.methods.find((method) => method.key === "manual:2").label === "案B", "手動プランの名前が結果にありません");
+    assert(output.summary["manual:1"].markCount.mean === 30 && output.summary["manual:2"].markCount.mean === 60, "手動プランのMark数が違います");
+    const sweep = await ASC.evaluator.runSweep({ map, data, settings, manualPlans: [planA, planB] }, { startShots: 10, endShots: 20, stepShots: 10, draws: 1 }, () => {}, () => false);
+    assert(sweep.errors.length === 0, sweep.errors.join(" / "));
+    assert(sweep.manual && sweep.manual.methods.length === 2, "スイープに手動プランの結果がありません");
+    assert(sweep.manual.markCounts["manual:2"] === 60 && sweep.manual.shotCounts["manual:2"] === 30, "スイープの手動プランのMark数・Shot数が違います");
+    assert(sweep.methods.every((method) => !method.manual), "スイープの点の選び方に手動プランが入っています");
+  });
+
+  await test("手動プランの管理: Shot番号で指定・切替・複製・保存と読込（以前の形式も）", () => {
+    const map = defaultMap();
+    const P = ASC.manualPlans;
+    const store = P.createStore();
+    const plan = P.addPlan(store, "現行", [], [], true);
+    assert(plan.key === "manual:1" && plan.name === "現行", "プランの作成が違います");
+    const ids = P.parseShotIdText("10, 11　12\n13、999");
+    assert(ids.join(",") === "10,11,12,13,999", `Shot番号の読み取りが違います: ${ids}`);
+    const applied = P.applyShotIds(plan, map, ids);
+    assert(applied.applied === 4 && applied.unknown.join(",") === "999", "マップにない番号を知らせていません");
+    const shotIndex = map.shots.findIndex((shot) => shot.id === "11");
+    P.toggleShot(plan, map, shotIndex);
+    assert(!plan.shotIds.has("11") && plan.shotIds.size === 3, "Shotを外せません");
+    const markIndex = map.shots[map.shots.findIndex((shot) => shot.id === "12")].markIndices[1];
+    P.toggleExtraMark(plan, map, markIndex);
+    const indices = P.planIndices(plan, map);
+    assert(indices.shotIndices.length === 3 && indices.extraMarkIndices.length === 1, "マップ上の番号に直せません");
+    const copy = P.duplicatePlan(store, plan.key);
+    assert(copy.name === "現行の複製" && copy.shotIds.size === 3, "複製が違います");
+    assert(P.addPlan(store, "現行", [], [], true).name === "現行 (2)", "同じ名前に番号が付きません");
+    const restored = P.fromJson(JSON.parse(JSON.stringify(P.toJson(store))));
+    assert(restored.plans.length === 3 && restored.plans[0].name === "現行" && restored.plans[0].extraMarks.size === 1, "保存と読込で中身が変わりました");
+    const legacy = P.fromJson({ shotIds: ["5", "6"], marks: [] });
+    assert(legacy.plans.length === 1 && legacy.plans[0].shotIds.size === 2, "以前の形式（手動選択1つ）を読めません");
+    while (P.addPlan(store, null, [], [], true)) {
+      // 上限まで足す
+    }
+    assert(store.plans.length === ASC.constants.MAX_MANUAL_PLANS, "プランの上限が効いていません");
   });
 
   // ---- 結果の表示 ----

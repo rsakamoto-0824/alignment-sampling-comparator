@@ -81,13 +81,13 @@
     const cards = [];
     let usesFrequency = false;
 
-    for (const method of C.METHODS) {
+    for (const method of output.methods) {
       const sets = output.sets.filter((set) => set.method === method.key && set.results);
       if (sets.length === 0) {
         continue;
       }
       const card = ui.create("section", { className: "map-card", "aria-label": `${method.label}で選んだ点` });
-      card.append(ui.create("h3", { text: method.label }));
+      card.append(ui.create("h3", { text: method.manual ? `${method.label}（手動プラン）` : method.label }));
       const choice = sets.length > 1 ? choices[method.key] || "median" : "single";
       if (sets.length > 1) {
         const id = `map-choice-${method.key}`;

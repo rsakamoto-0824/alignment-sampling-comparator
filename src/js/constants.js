@@ -72,13 +72,16 @@
     GP_NOISE_RATIO_STEPS: 11,
 
     // ---- 選び方 ----
+    // 自動で選ぶ方法。人が選ぶ「手動プラン」は別に持ち、キーを "manual:番号" にする
     METHODS: [
       { key: "random", label: "ランダム", usesDraws: true },
       { key: "poisson", label: "ポアソンディスク", usesDraws: true },
       { key: "dOptimal", label: "D最適", usesDraws: false },
       { key: "iOptimal", label: "I最適", usesDraws: false },
-      { key: "manual", label: "手動", usesDraws: false },
     ],
+    MANUAL_PREFIX: "manual:",
+    MAX_MANUAL_PLANS: 10,
+    MAX_PLAN_NAME_LENGTH: 30,
 
     // ---- 条件制約 ----
     CONSTRAINT_KEYS: ["center", "scan", "quadrant", "zone"],
@@ -164,7 +167,7 @@
         draws: 30,
         optimalStarts: 5,
         seed: 1,
-        methods: { random: true, poisson: true, dOptimal: true, iOptimal: true, manual: true },
+        methods: { random: true, poisson: true, dOptimal: true, iOptimal: true },
       },
       // 計測点数のスイープ（計測Shot数の範囲と、ランダム・ポアソンの試行回数）
       sweep: { startShots: 10, endShots: 60, stepShots: 10, draws: 10 },

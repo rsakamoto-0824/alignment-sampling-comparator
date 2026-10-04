@@ -35,12 +35,20 @@
   const GROUP_GAP = 16;
   const BOX_HEIGHT = 12;
 
+  // 描いている結果の選び方の一覧（自動の選び方と手動プラン）。render で入れる
+  let methodsInView = [];
+
+  /** 表やグラフに出す選び方の名前。手動プランは自動の選び方と見分けられるように「（手動）」を添える。 */
+  function displayName(method) {
+    return method.manual ? `${method.label}（手動）` : method.label;
+  }
+
   function methodLabel(key) {
     if (key === BASELINE_KEY) {
       return BASELINE_LABEL;
     }
-    const method = C.METHODS.find((entry) => entry.key === key);
-    return method ? method.label : key;
+    const method = methodsInView.find((entry) => entry.key === key);
+    return method ? displayName(method) : key;
   }
 
   function seriesColor(variant) {
@@ -85,7 +93,7 @@
   /** 残差の箱ひげ図に並べる行（選び方 × 補正）。最後に全点計測の基準を置く。 */
   function chartGroups(output, variants, metric, axis) {
     const groups = [];
-    for (const method of C.METHODS) {
+    for (const method of output.methods) {
       const summary = output.summary[method.key];
       if (!summary) {
         continue;
@@ -105,7 +113,7 @@
   /** 推定精度の箱ひげ図に並べる行（選び方 × 推定手法）。 */
   function estimationGroups(output, metric, axis) {
     const groups = [];
-    for (const method of C.METHODS) {
+    for (const method of output.methods) {
       const summary = output.summary[method.key];
       if (!summary) {
         continue;
@@ -317,10 +325,10 @@
   /** 一覧表: 選び方 × 補正の平均。 */
   function renderOverviewTable(output, view) {
     const rows = [];
-    for (const method of C.METHODS) {
+    for (const method of output.methods) {
       const summary = output.summary[method.key];
       if (summary) {
-        rows.push({ label: method.label, values: output.variants.map((variant) => summary.variants[variant.key][view.axis][view.metric].all.mean) });
+        rows.push({ label: displayName(method), values: output.variants.map((variant) => summary.variants[variant.key][view.axis][view.metric].all.mean) });
       }
     }
     const baseline = baselineStats(output, view.axis, view.metric).mean;
@@ -338,10 +346,10 @@
   function renderEstimationTable(output, view) {
     const keys = output.estimationKeys;
     const rows = [];
-    for (const method of C.METHODS) {
+    for (const method of output.methods) {
       const summary = output.summary[method.key];
       if (summary) {
-        rows.push({ label: method.label, values: keys.map((key) => (summary.estimation[key] ? summary.estimation[key][view.axis][view.metric].all.mean : NaN)) });
+        rows.push({ label: displayName(method), values: keys.map((key) => (summary.estimation[key] ? summary.estimation[key][view.axis][view.metric].all.mean : NaN)) });
       }
     }
     return heatTable(keys.map((key) => ASC.evaluator.estimationLabel(key)), rows, "選び方");
@@ -386,7 +394,7 @@
       { text: "ノイズ比 中央値", number: true },
     ];
     const rows = [];
-    for (const method of C.METHODS) {
+    for (const method of output.methods) {
       const summary = output.summary[method.key];
       if (!summary) {
         continue;
@@ -397,7 +405,7 @@
           continue;
         }
         rows.push([
-          method.label,
+          displayName(method),
           variant.label,
           ui.formatNumber(choice.lengthMm.median, 1),
           `${ui.formatNumber(choice.lengthMm.p5, 1)}〜${ui.formatNumber(choice.lengthMm.p95, 1)}`,
@@ -420,14 +428,14 @@
       { text: "制約をすべて満たした回数" },
     ];
     const rows = [];
-    for (const method of C.METHODS) {
+    for (const method of output.methods) {
       const summary = output.summary[method.key];
       if (!summary) {
         continue;
       }
       const all = summary.constraintsMet === summary.drawCount;
       rows.push([
-        method.label,
+        displayName(method),
         `${summary.drawCount}回`,
         ui.formatNumber(summary.shotCount.mean, 0),
         ui.formatNumber(summary.markCount.mean, 0),
@@ -449,14 +457,14 @@
       { text: "最も悪い試行", number: true },
     ];
     const rows = [];
-    for (const method of C.METHODS.filter((entry) => entry.usesDraws)) {
+    for (const method of output.methods.filter((entry) => entry.usesDraws)) {
       const summary = output.summary[method.key];
       if (!summary) {
         continue;
       }
       for (const variant of variants) {
         const perDraw = summary.variants[variant.key][view.axis][view.metric].perDraw;
-        rows.push([method.label, variant.label, ui.formatNumber(perDraw.min), ui.formatNumber(perDraw.median), ui.formatNumber(perDraw.max)]);
+        rows.push([displayName(method), variant.label, ui.formatNumber(perDraw.min), ui.formatNumber(perDraw.median), ui.formatNumber(perDraw.max)]);
       }
     }
     return rows.length > 0 ? table(headers, rows) : null;
@@ -479,6 +487,7 @@
    * handlers: { onViewChange(change, focusId), onExportResults(), onExportSelections() }
    */
   function render(container, output, view, handlers, isStale) {
+    methodsInView = output.methods;
     const children = [];
     if (isStale) {
       children.push(notice("warning", "⚠", "結果を出したあとで設定が変わりました。今の設定で比べるには、もう一度「評価を実行」を押してください。"));
@@ -587,12 +596,12 @@
     children.push(chartContainer);
 
     // 誤差のマップ: 選び方を1つ選び、推定手法ごとにMarkの誤差（Waferで2乗平均）を並べる
-    const methods = C.METHODS.filter((method) => output.summary[method.key]);
+    const methods = output.methods.filter((method) => output.summary[method.key]);
     const methodKey = methods.some((method) => method.key === view.estimationMapMethod) ? view.estimationMapMethod : methods[0].key;
     children.push(ui.create("h3", { className: "subheading", text: "推定誤差のマップ（Markごとに、全WaferのRMS）" }));
     children.push(
       ui.create("div", { className: "toolbar" }, [
-        selectField("estimation-map-method", "選び方", methods.map((method) => [method.key, method.label]), methodKey, (value) =>
+        selectField("estimation-map-method", "選び方", methods.map((method) => [method.key, displayName(method)]), methodKey, (value) =>
           handlers.onViewChange({ estimationMapMethod: value }, "estimation-map-method")
         ),
       ])
@@ -612,6 +621,7 @@
   // ---- CSV -----------------------------------------------------------------
 
   function resultsCsv(output) {
+    methodsInView = output.methods;
     const header = ["Method", "Correction", "Axis", "Metric", "Mean", "Median", "P5", "P25", "P75", "P95", "Max", "Count"];
     const lines = [header.join(",")];
     const push = (methodName, variantName, axis, metric, stats) => {
@@ -621,7 +631,7 @@
           .join(",")
       );
     };
-    for (const method of C.METHODS) {
+    for (const method of output.methods) {
       const summary = output.summary[method.key];
       if (!summary) {
         continue;
@@ -629,12 +639,12 @@
       for (const variant of output.variants) {
         for (const axis of ASC.evaluator.AXES) {
           for (const metric of ASC.evaluator.METRIC_KEYS) {
-            push(method.label, variant.label, axis, metric, summary.variants[variant.key][axis][metric].all);
+            push(displayName(method), variant.label, axis, metric, summary.variants[variant.key][axis][metric].all);
           }
         }
       }
     }
-    for (const method of C.METHODS) {
+    for (const method of output.methods) {
       const summary = output.summary[method.key];
       if (!summary) {
         continue;
@@ -645,7 +655,7 @@
         }
         for (const axis of ASC.evaluator.AXES) {
           for (const metric of ASC.evaluator.METRIC_KEYS) {
-            push(method.label, `推定精度: ${ASC.evaluator.estimationLabel(key)}`, axis, metric, summary.estimation[key][axis][metric].all);
+            push(displayName(method), `推定精度: ${ASC.evaluator.estimationLabel(key)}`, axis, metric, summary.estimation[key][axis][metric].all);
           }
         }
       }
@@ -662,6 +672,7 @@
   }
 
   function selectionsCsv(output, map) {
+    methodsInView = output.methods;
     const lines = [["Method", "Draw", "ShotId", "MarkNo", "X_mm", "Y_mm", "ScanDir"].join(",")];
     for (const set of output.sets) {
       for (const markIndex of set.markIndices) {

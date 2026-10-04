@@ -386,8 +386,10 @@
 
   /**
    * 評価を実行する。
-   * input: { map, data, settings, manual: { shotIndices, extraMarkIndices } }
+   * input: { map, data, settings, manualPlans: [{ key, label, shotIndices, extraMarkIndices }] }
+   *   manualPlans は人が選んだ手動プラン（比較に含めるものだけ）。自動の選び方と同列に評価する
    * onProgress(done, total, label)、isCancelled() で進み具合と中止を扱う。
+   * 戻り値の methods は、結果に出す選び方の一覧（自動の選び方 → 手動プランの順）。
    */
   async function runEvaluation(input, onProgress, isCancelled) {
     const { map, data, settings } = input;
@@ -405,15 +407,14 @@
     const termSets = [settings.model.termsX, settings.model.termsY];
 
     // ---- 選ぶ ----
+    const manualPlans = (input.manualPlans || []).filter((manualPlan) => manualPlan.shotIndices.length > 0);
+    const methods = C.METHODS.filter((method) => sampling.methods[method.key])
+      .map((method) => ({ key: method.key, label: method.label, usesDraws: method.usesDraws, manual: false }))
+      .concat(manualPlans.map((manualPlan) => ({ key: manualPlan.key, label: manualPlan.label, usesDraws: false, manual: true })));
     const plan = [];
-    for (const method of C.METHODS) {
-      if (!sampling.methods[method.key]) {
-        continue;
-      }
-      if (method.key === "manual") {
-        if (input.manual && input.manual.shotIndices.length > 0) {
-          plan.push({ method: method.key, draw: 0 });
-        }
+    for (const method of methods) {
+      if (method.manual) {
+        plan.push({ method: method.key, draw: 0, manualPlan: manualPlans.find((manualPlan) => manualPlan.key === method.key) });
         continue;
       }
       const drawCount = method.usesDraws ? sampling.draws : 1;
@@ -445,8 +446,8 @@
         case "iOptimal":
           selection = ASC.sampling.selectOptimal(context, random, "I", termSets, sampling.optimalStarts);
           break;
-        case "manual":
-          selection = ASC.sampling.manualSelection(context, input.manual.shotIndices, input.manual.extraMarkIndices);
+        default:
+          selection = ASC.sampling.manualSelection(context, entry.manualPlan.shotIndices, entry.manualPlan.extraMarkIndices);
           break;
       }
       doneSteps++;
@@ -485,8 +486,9 @@
       sets,
       baselines: { uncorrected, allMarks: allMarks.results },
       variants,
+      methods: methods.filter((method) => sets.some((set) => set.method === method.key)),
       estimationKeys: estimationKeysOf(settings.model),
-      summary: summarizeResults(sets, variants, estimationKeysOf(settings.model)),
+      summary: summarizeResults(sets, variants, estimationKeysOf(settings.model), methods),
       waferCount: data.waferCount,
     };
   }
@@ -517,9 +519,11 @@
 
   /**
    * 計測Shot数を変えながら評価する（計測コストと精度のトレードオフ）。
-   * 「k個以上」のときは、Shotあたりの総Mark数の比（総Mark数 ÷ 計測Shot数）を保つ。手動選択は対象にしない。
+   * 「k個以上」のときは、Shotあたりの総Mark数の比（総Mark数 ÷ 計測Shot数）を保つ。
+   * 手動プラン（input.manualPlans）は計測Shot数が決まっているので、1回だけ評価してグラフに点として重ねる。
    * sweepSettings: { startShots, endShots, stepShots, draws }
-   * 戻り値: { points: [{ shotCount, markCounts, summary, relaxed, warnings }], variants, estimationKeys, baseline, uncorrected }
+   * 戻り値: { points: [{ shotCount, markCounts, summary, relaxed, warnings }], methods, manual, variants, estimationKeys, baseline, uncorrected }
+   *   manual: { methods, summary, shotCounts, markCounts }（手動プランがなければ null）
    */
   async function runSweep(input, sweepSettings, onProgress, isCancelled) {
     const { map, data, settings } = input;
@@ -533,6 +537,8 @@
     }
     const sampling = settings.sampling;
     const marksPerShot = sampling.markMode === "exact" ? built.context.markCountPerShot : sampling.totalMarkCount / sampling.shotCount;
+    const manualPlans = (input.manualPlans || []).filter((manualPlan) => manualPlan.shotIndices.length > 0);
+    const stepCount = values.length + (manualPlans.length > 0 ? 1 : 0);
     const points = [];
     let last = null;
     for (let index = 0; index < values.length; index++) {
@@ -541,10 +547,9 @@
       pointSettings.sampling.shotCount = shotCount;
       pointSettings.sampling.totalMarkCount = Math.max(shotCount * built.context.markCountPerShot, Math.round(shotCount * marksPerShot));
       pointSettings.sampling.draws = sweepSettings.draws;
-      pointSettings.sampling.methods.manual = false;
       const output = await runEvaluation(
-        { map, data, settings: pointSettings, manual: null },
-        (done, total, label) => onProgress(index + done / total, values.length, `計測Shot数 ${shotCount}（${index + 1}/${values.length}）: ${label}`),
+        { map, data, settings: pointSettings, manualPlans: [] },
+        (done, total, label) => onProgress(index + done / total, stepCount, `計測Shot数 ${shotCount}（${index + 1}/${values.length}）: ${label}`),
         isCancelled
       );
       if (output.cancelled) {
@@ -570,9 +575,35 @@
     if (!last) {
       return { errors: points.flatMap((point) => point.errors || []) };
     }
+    let manual = null;
+    if (manualPlans.length > 0) {
+      const manualSettings = JSON.parse(JSON.stringify(settings));
+      for (const key of Object.keys(manualSettings.sampling.methods)) {
+        manualSettings.sampling.methods[key] = false;
+      }
+      const output = await runEvaluation(
+        { map, data, settings: manualSettings, manualPlans },
+        (done, total, label) => onProgress(values.length + done / total, stepCount, `手動プラン: ${label}`),
+        isCancelled
+      );
+      if (output.cancelled) {
+        return { cancelled: true };
+      }
+      if (output.errors.length === 0) {
+        const shotCounts = {};
+        const markCounts = {};
+        for (const [methodKey, summary] of Object.entries(output.summary)) {
+          shotCounts[methodKey] = summary.shotCount.mean;
+          markCounts[methodKey] = summary.markCount.mean;
+        }
+        manual = { methods: output.methods, summary: output.summary, shotCounts, markCounts };
+      }
+    }
     return {
       errors: [],
       points,
+      methods: last.methods,
+      manual,
       variants: last.variants,
       estimationKeys: last.estimationKeys,
       baseline: summarizeStore(last.baselines.allMarks.howa),
@@ -588,7 +619,7 @@
     const markIndices = Array.from(new Set(selection.markIndices)).sort((a, b) => a - b);
     const warnings = [];
     if (selection.notEligible && selection.notEligible.length > 0) {
-      warnings.push(`必ず測るMarkが有効範囲外のShot ${selection.notEligible.length}個は、手動選択から外しました。`);
+      warnings.push(`手動プランの、必ず測るMarkが有効範囲外のShot ${selection.notEligible.length}個は、評価から外しました。`);
     }
     return {
       method: entry.method,
@@ -610,9 +641,9 @@
    * 選び方 × 補正 × 軸 × 指標ごとに、全試行・全Waferの値をまとめる。
    * ランダム系は、試行ごとの平均（Wafer平均）のばらつきも出す。
    */
-  function summarizeResults(sets, variants, estimationKeys) {
+  function summarizeResults(sets, variants, estimationKeys, methods) {
     const summary = {};
-    for (const method of C.METHODS) {
+    for (const method of methods) {
       const methodSets = sets.filter((set) => set.method === method.key && set.results);
       if (methodSets.length === 0) {
         continue;
