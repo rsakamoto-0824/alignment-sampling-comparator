@@ -13,6 +13,12 @@ Wafer高次補正（HOWA）のアライメント計測で、**計測するMark�
 
 要件は [requirements.md](requirements.md)、設計は [design.md](design.md)、課題は [issues.md](issues.md) にあります。
 
+同じ評価を **Python（Jupyterノートブック）** と **MATLAB** でも行えます。同じ設定なら、同じ点を選び、同じ残差になります（3つの版を自動テストで照合しています）。
+アプリで条件を決めて設定JSONを保存し、Python・MATLABで細かい解析や大量の条件の計算をする、という使い分けができます。
+
+- Python版: [python/README.md](python/README.md)（ノートブック `python/notebooks/alignment_sampling_evaluation.ipynb`）
+- MATLAB版: [matlab/README.md](matlab/README.md)（手順スクリプト `matlab/alignment_sampling_evaluation.m`）
+
 ## 実行方法
 
 インストールとサーバーは要りません。`index.html` をブラウザ（Microsoft Edge か Google Chrome）で開くだけで動きます。
@@ -57,6 +63,18 @@ Shotの幅と高さは画面で入れます（マップの描画に使います�
 node tests/run_tests.js
 ```
 
+Python版・MATLAB版がブラウザ版と同じ結果になるかは、ブラウザ版の計算を書き出した基準データ（`tests/reference/`）と照合します。計算の中身を変えたら、基準データを作り直してから、それぞれのテストを実行します。
+
+```bash
+node tools/export_reference.js
+```
+
+```bash
+cd python && .venv/bin/python -m unittest discover -s tests -v
+```
+
+MATLAB版は `matlab` フォルダで `runtests('tests')` を実行します。
+
 ## ファイル構成
 
 ```text
@@ -77,7 +95,11 @@ alignment-sampling-comparator/
 │   ├── ui-*.js             画面の部品（設定欄・マップ・結果・選び方ごとのマップ・スイープ）
 │   └── app.js              画面全体のまとめ役
 ├── samples/sample_map.csv  マップCSVの見本
-└── tests/run_tests.js      自動テスト（Node.js）
+├── tests/run_tests.js      自動テスト（Node.js）
+├── tests/reference/        Python版・MATLAB版の照合用の基準データ（ブラウザ版の計算結果）
+├── tools/export_reference.js  基準データを作る
+├── python/                 Python版（alignment_sampling パッケージ・ノートブック・照合テスト）
+└── matlab/                 MATLAB版（+asc パッケージ・手順スクリプト・照合テスト）
 ```
 
 ## 必要な環境変数
