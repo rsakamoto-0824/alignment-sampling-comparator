@@ -38,7 +38,11 @@
       mapChoices: {},
       estimationMapMethod: null,
       sweep: { mode: "methods", metric: "rms", axis: "x", stat: "mean", scale: "linear", target: NaN },
+      // 評価データのタブ: 表示するWafer（0始まり）・成分・表示の形・一覧のページ
+      data: { wafer: 0, component: "truth", display: "vector", page: 0 },
     },
+    // 評価データのタブで表示するデータ（マップと評価データの設定が変わったら作り直す）
+    dataView: { map: null, key: null, data: null, errors: [] },
   };
 
   function createInitialPlans() {
@@ -123,6 +127,48 @@
       renderSweepTab();
     }
     updateSweepEstimate();
+    renderDataTab();
+  }
+
+  // ---- 評価データのタブ ------------------------------------------------------
+
+  /** 評価データのタブで使うデータ。マップか評価データの設定が変わったときだけ作り直す。 */
+  function dataForView() {
+    const key = JSON.stringify(state.settings.evaluationData);
+    const cache = state.dataView;
+    if (cache.map !== state.map || cache.key !== key) {
+      const generated = state.map ? ASC.evaluationData.generateEvaluationData(state.map, state.settings.evaluationData) : { data: null, errors: state.mapErrors };
+      state.dataView = { map: state.map, key, data: generated.data, errors: generated.errors };
+    }
+    return state.dataView;
+  }
+
+  /** 評価データのタブを描く（表示中のときだけ。描き直してもフォーカスの位置を保つ）。 */
+  function renderDataTab() {
+    if (ui.byId("panel-data").hidden) {
+      return;
+    }
+    const focusedId = document.activeElement && document.activeElement.id;
+    const view = dataForView();
+    ASC.dataView.render(ui.byId("data-content"), {
+      map: state.map,
+      data: view.data,
+      errors: view.errors,
+      view: state.view.data,
+      onChange: (change) => {
+        Object.assign(state.view.data, change);
+        renderDataTab();
+      },
+      onDownload: (wafer) => {
+        ui.download(`評価データ_Wafer${wafer + 1}_${ui.timestampForFile()}.csv`, ASC.dataView.waferCsv(state.map, view.data, wafer), "text/csv");
+      },
+    });
+    if (focusedId) {
+      const element = ui.byId(focusedId);
+      if (element) {
+        element.focus();
+      }
+    }
   }
 
   // ---- マップのタブ --------------------------------------------------------
@@ -820,6 +866,7 @@
       renderMapsTab();
       renderSweepTab();
       updateSweepEstimate();
+      renderDataTab();
       ui.showMessage("success", "設定を読み込みました。", [`ファイル: ${file.name}`]);
     } catch (error) {
       ui.showMessage("error", "設定を読み込めませんでした。", [`内容: ${error.message}`, "このアプリの「設定をJSONで保存」で作ったファイルを選んでください。"]);
@@ -830,7 +877,7 @@
 
   // ---- タブ ----------------------------------------------------------------
 
-  const TAB_IDS = ["tab-map", "tab-results", "tab-maps", "tab-sweep", "tab-help"];
+  const TAB_IDS = ["tab-map", "tab-data", "tab-results", "tab-maps", "tab-sweep", "tab-help"];
 
   function selectTab(tabId) {
     for (const id of TAB_IDS) {
@@ -839,6 +886,9 @@
       tab.setAttribute("aria-selected", selected ? "true" : "false");
       tab.tabIndex = selected ? 0 : -1;
       ui.byId(tab.getAttribute("aria-controls")).hidden = !selected;
+    }
+    if (tabId === "tab-data") {
+      renderDataTab();
     }
   }
 

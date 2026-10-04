@@ -276,6 +276,23 @@ async function main() {
     assert(differs, "Scan方向のずれが反映されていません");
   });
 
+  await test("評価データの成分: 5次以下＋6次以上＋Scan方向のずれ＝真のずれ、計測値＝真のずれ＋ノイズ", () => {
+    const map = defaultMap();
+    const data = ASC.evaluationData.generateEvaluationData(map, defaultEvaluationSettings({ waferCount: 3, scanOffsetXnm: 1, scanOffsetYnm: 0.5 })).data;
+    for (let wafer = 0; wafer < data.waferCount; wafer++) {
+      const parts = ASC.evaluationData.waferComponents(data, wafer);
+      for (const axis of ["x", "y"]) {
+        for (let i = 0; i < data.markCount; i++) {
+          const sum = parts.low[axis][i] + parts.high[axis][i] + parts.scan[axis][i];
+          assertClose(sum, parts.truth[axis][i], 1e-9, `Wafer ${wafer + 1} Mark ${i} ${axis} の成分の和`);
+          assertClose(parts.measured[axis][i], parts.truth[axis][i] + parts.noise[axis][i], 1e-12, "計測値");
+          assert(Math.abs(Math.abs(parts.scan[axis][i]) - Math.abs(axis === "x" ? data.scanOffsetsX[wafer] : data.scanOffsetsY[wafer])) < 1e-12, "Scan方向のずれは ±δ");
+        }
+      }
+    }
+    assert(ASC.evaluationData.COMPONENTS.map((component) => component.key).join(",") === "truth,low,high,scan,noise,measured", "成分の並び");
+  });
+
   /** HOWAの部品（全Markの当てはめも含む）を作る。 */
   function howaPartsFor(marks, sample, terms) {
     const all = allIndices(marks.length);

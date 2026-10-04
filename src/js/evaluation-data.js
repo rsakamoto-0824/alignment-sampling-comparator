@@ -19,6 +19,16 @@
   const STREAM_NOISE = 1;
   const STREAM_SCAN = 2;
 
+  // 評価データの成分（「評価データ」タブで確かめる用。評価の計算には使わない）
+  const COMPONENTS = [
+    { key: "truth", label: "真のずれ（全体）", shortLabel: "真のずれ" },
+    { key: "low", label: "5次以下のZernike項（5次までの多項式で表せる成分）", shortLabel: "5次以下" },
+    { key: "high", label: "6次以上のZernike項（多項式で補正できない成分）", shortLabel: "6次以上" },
+    { key: "scan", label: "Scan方向のずれ", shortLabel: "Scan方向" },
+    { key: "noise", label: "計測ノイズ", shortLabel: "ノイズ" },
+    { key: "measured", label: "計測値（真のずれ＋ノイズ）", shortLabel: "計測値" },
+  ];
+
   /** Zernike各項の初期設定。5次以下と6次以上で大きさを分ける。 */
   function defaultTermSettings(lowOrderAmplitudeNm, highOrderAmplitudeNm) {
     return ASC.zernike.TERMS.map((term) => {
@@ -97,6 +107,8 @@
     const noiseY = new Float64Array(waferCount * markCount);
     const coefficientsX = new Float64Array(waferCount * termCount);
     const coefficientsY = new Float64Array(waferCount * termCount);
+    const scanOffsetsX = new Float64Array(waferCount);
+    const scanOffsetsY = new Float64Array(waferCount);
 
     for (let wafer = 0; wafer < waferCount; wafer++) {
       for (let k = 0; k < termCount; k++) {
@@ -105,6 +117,8 @@
       }
       const scanOffsetX = drawValue(scanRandom, settings.distribution, settings.scanOffsetXnm);
       const scanOffsetY = drawValue(scanRandom, settings.distribution, settings.scanOffsetYnm);
+      scanOffsetsX[wafer] = scanOffsetX;
+      scanOffsetsY[wafer] = scanOffsetY;
 
       for (let i = 0; i < markCount; i++) {
         let sumX = 0;
@@ -133,10 +147,49 @@
         fringeIndices: activeTerms.map((term) => term.fringeIndex),
         coefficientsX,
         coefficientsY,
+        // 成分に分けて確かめるための材料（Markごとの各項の値、Scanの符号、Waferごとの Scan のずれ）
+        basis,
+        scanSign,
+        scanOffsetsX,
+        scanOffsetsY,
       },
       errors: [],
     };
   }
 
-  ASC.evaluationData = { defaultTermSettings, generateEvaluationData, MAX_WAFER_COUNT };
+  /**
+   * 1枚のWaferのずれを成分に分ける（評価データの確認用。評価の計算には使わない）。
+   *   low: 5次以下のZernike項の和（5次までの多項式21項で正確に表せる）、high: 6次以上のZernike項の和、
+   *   scan: Scan方向のずれ、truth: 真のずれ（low + high + scan）、noise: 計測ノイズ、measured: 計測値（真のずれ＋ノイズ）
+   * それぞれ { x, y }（Mark数の Float64Array）。wafer は0始まり。
+   */
+  function waferComponents(data, wafer) {
+    const markCount = data.markCount;
+    const termCount = data.fringeIndices.length;
+    const expressible = data.fringeIndices.map((fringe) => ASC.zernike.termByFringe(fringe).polynomialExpressible);
+    const result = {};
+    for (const component of COMPONENTS) {
+      result[component.key] = { x: new Float64Array(markCount), y: new Float64Array(markCount) };
+    }
+    for (let i = 0; i < markCount; i++) {
+      for (let k = 0; k < termCount; k++) {
+        const value = data.basis[i * termCount + k];
+        const target = expressible[k] ? result.low : result.high;
+        target.x[i] += value * data.coefficientsX[wafer * termCount + k];
+        target.y[i] += value * data.coefficientsY[wafer * termCount + k];
+      }
+      const offset = wafer * markCount + i;
+      result.scan.x[i] = data.scanSign[i] * data.scanOffsetsX[wafer];
+      result.scan.y[i] = data.scanSign[i] * data.scanOffsetsY[wafer];
+      result.truth.x[i] = data.truthX[offset];
+      result.truth.y[i] = data.truthY[offset];
+      result.noise.x[i] = data.noiseX[offset];
+      result.noise.y[i] = data.noiseY[offset];
+      result.measured.x[i] = data.truthX[offset] + data.noiseX[offset];
+      result.measured.y[i] = data.truthY[offset] + data.noiseY[offset];
+    }
+    return result;
+  }
+
+  ASC.evaluationData = { defaultTermSettings, generateEvaluationData, waferComponents, COMPONENTS, MAX_WAFER_COUNT };
 })(typeof window !== "undefined" ? window : globalThis);
