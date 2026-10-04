@@ -380,7 +380,7 @@
           return { trend, weights: null, scale: null, scaleIndex: -1, length: NaN, noiseRatio: NaN };
         }
         const logLikelihood = -0.5 * n * Math.log(quadratic / n) - 0.5 * candidate.logDeterminant;
-        if (!best || logLikelihood > best.logLikelihood) {
+        if (!best || M.isClearlyGreater(logLikelihood, best.logLikelihood, C.TIE_TOLERANCE)) {
           best = { logLikelihood, scaleIndex, candidate };
         }
       }
