@@ -54,6 +54,12 @@
   --series-4: #eda100;
   --series-5: #e87ba4;
 
+  /* スイープで選び方を比べる線の色（推定手法の色と重ならないもの。ランダムは基準として灰色） */
+  --method-random: #6b6a65;
+  --method-poisson: #008300;
+  --method-d: #4a3aa7;
+  --method-i: #e34948;
+
   /* 一覧表と選ばれた割合の段階色（青の濃淡。値が大きいほど濃い） */
   --step-1: #e3eefc;
   --step-2: #b7d3f6;
@@ -102,6 +108,10 @@
     --series-3: #199e70;
     --series-4: #c98500;
     --series-5: #d55181;
+    --method-random: #a9a89f;
+    --method-poisson: #0ca30c;
+    --method-d: #9085e9;
+    --method-i: #e66767;
     /* 濃色表示では、値が大きいほど明るくする */
     --step-1: #16304f;
     --step-2: #184f95;
@@ -669,6 +679,31 @@ th.number {
   stroke: var(--map-mark-measured);
 }
 
+.map-mark-step {
+  stroke: var(--ink-2);
+  stroke-width: 0.4;
+}
+
+.map-mark-step.step-1 {
+  fill: var(--step-1);
+}
+
+.map-mark-step.step-2 {
+  fill: var(--step-2);
+}
+
+.map-mark-step.step-3 {
+  fill: var(--step-3);
+}
+
+.map-mark-step.step-4 {
+  fill: var(--step-4);
+}
+
+.map-mark-step.step-5 {
+  fill: var(--step-5);
+}
+
 .map-mark-hit.editable {
   cursor: pointer;
 }
@@ -847,6 +882,47 @@ th.number {
 .chart-gridline {
   stroke: var(--grid);
   stroke-width: 1;
+}
+
+.chart-axis {
+  stroke: var(--axis);
+  stroke-width: 1;
+}
+
+.chart-reference {
+  stroke: var(--ink-2);
+  stroke-width: 1.5;
+}
+
+.chart-leader {
+  stroke: var(--axis);
+  stroke-width: 1;
+}
+
+.chart-crosshair {
+  stroke: var(--ink-2);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.legend-marker {
+  width: 22px;
+  height: 16px;
+  flex: none;
+}
+
+.tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ツールチップでは系列を短い線で示す */
+.tooltip-key {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  flex: none;
 }
 
 .chart-row-label {

@@ -358,6 +358,7 @@
           <button type="button" class="tab" role="tab" id="tab-map" aria-controls="panel-map" aria-selected="true">マップと選択点</button>
           <button type="button" class="tab" role="tab" id="tab-results" aria-controls="panel-results" aria-selected="false" tabindex="-1">評価結果</button>
           <button type="button" class="tab" role="tab" id="tab-maps" aria-controls="panel-maps" aria-selected="false" tabindex="-1">選び方ごとのマップ</button>
+          <button type="button" class="tab" role="tab" id="tab-sweep" aria-controls="panel-sweep" aria-selected="false" tabindex="-1">計測点数のスイープ</button>
           <button type="button" class="tab" role="tab" id="tab-help" aria-controls="panel-help" aria-selected="false" tabindex="-1">使い方</button>
         </div>
 
@@ -403,6 +404,37 @@
           </div>
         </section>
 
+        <section class="tab-panel" role="tabpanel" id="panel-sweep" aria-labelledby="tab-sweep" hidden>
+          <p class="hint">計測Shot数を変えながら評価し、計測Mark数（計測コスト）と精度のトレードオフを見ます。マップ・評価データ・補正モデル・制約は左の設定を使います。手動選択は対象外です。「k個以上」のときは、Shotあたりの総Mark数の比を保ちます。</p>
+          <div class="toolbar">
+            <div class="field">
+              <label for="sweep-start">計測Shot数 開始</label>
+              <input type="number" id="sweep-start" step="1" data-setting="sweep.startShots" data-integer data-min="1" />
+              <p class="field-error" id="sweep-start-error"></p>
+            </div>
+            <div class="field">
+              <label for="sweep-end">計測Shot数 終了</label>
+              <input type="number" id="sweep-end" step="1" data-setting="sweep.endShots" data-integer data-min="1" />
+              <p class="field-error" id="sweep-end-error"></p>
+            </div>
+            <div class="field">
+              <label for="sweep-step">刻み</label>
+              <input type="number" id="sweep-step" step="1" data-setting="sweep.stepShots" data-integer data-min="1" />
+              <p class="field-error" id="sweep-step-error"></p>
+            </div>
+            <div class="field">
+              <label for="sweep-draws">試行回数（ランダム・ポアソン）</label>
+              <input type="number" id="sweep-draws" step="1" data-setting="sweep.draws" data-integer data-min="1" data-max="200" />
+              <p class="field-error" id="sweep-draws-error"></p>
+            </div>
+            <button type="button" class="button-secondary" id="sweep-run-button">スイープを実行</button>
+          </div>
+          <p class="hint" id="sweep-estimate"></p>
+          <div id="sweep-content">
+            <p class="empty-state">「スイープを実行」を押すと、ここにトレードオフカーブが出ます。</p>
+          </div>
+        </section>
+
         <section class="tab-panel help-content" role="tabpanel" id="panel-help" aria-labelledby="tab-help" hidden>
           <h2>このアプリでできること</h2>
           <p>Wafer高次補正（HOWA）のアライメント計測で、どのMarkを測るかの選び方を、条件制約つきで比べます。アプリの中で乱数のWafer高次傾向（評価データ）を作り、選んだMarkの計測値から補正したときの残差で評価します。</p>
@@ -414,6 +446,7 @@
             <li>「4. サンプリング」と「5. 条件制約」で、計測Shot数・必ず測るMark・制約を決める</li>
             <li>必要なら「マップと選択点」で手動選択を作る（Shotをクリック）</li>
             <li>「評価を実行」を押し、「評価結果」で選び方と補正を比べ、「選び方ごとのマップ」で選ばれた点を見比べる</li>
+            <li>計測点の数を決めたいときは「計測点数のスイープ」で、計測Mark数と精度のトレードオフを見る</li>
           </ol>
           <h2>選び方</h2>
           <ul>
@@ -470,6 +503,19 @@
             <li>「全点計測」は全Markを測ってHOWAで補正した残差です。多項式で表せない成分だけが残るので、選び方による悪化を測る物差しになります。</li>
             <li>κ は、計測ノイズ σ が補正量にどれだけ乗るかの倍率です（全Markで平均した予測誤差の標準偏差 ÷ σ、HOWAのみの場合）。小さいほど良い選び方です。</li>
           </ul>
+          <h2>推定精度</h2>
+          <ul>
+            <li>推定手法（RBF・GP）が未計測Markのずれをどれだけ当てられるかを、<strong>推定値 − 真のずれ</strong>（ノイズのない値）で評価します。計測したMarkは評価に入れません。</li>
+            <li>「HOWA（多項式の予測）」は、計測Markに当てはめた多項式で未計測Markを予測した場合です。これより悪い推定手法は、推定→HOWA で使っても補正を良くしにくいと考えられます。</li>
+            <li>「推定誤差のマップ」は、未計測Markごとに全WaferのRMSを色で示します。Wafer端など、推定を外しやすい場所が分かります。</li>
+          </ul>
+          <h2>計測点数のスイープ</h2>
+          <ul>
+            <li>計測Shot数を範囲と刻みで変えながら評価し、横軸を計測Mark数（計測コスト）、縦軸を残差や推定誤差にした折れ線グラフを描きます。</li>
+            <li>「比べるもの」で、選び方の比較、補正の比較、推定精度の比較を切り替えます。値の幅が大きいときは「縦軸」を対数にすると見やすくなります。</li>
+            <li>「目標の精度」を入れると、目標以下になる最小の計測Mark数を表で出します。</li>
+            <li>計測点が多項式の項数（初期設定では21項）より少ないと、HOWAは不安定になり残差が大きくなります。</li>
+          </ul>
           <h2>注意</h2>
           <ul>
             <li>評価データはすべて乱数です。実測データは読み込みません。</li>
@@ -496,6 +542,7 @@
     <script src="src/js/ui-map.js"></script>
     <script src="src/js/ui-results.js"></script>
     <script src="src/js/ui-sampling-maps.js"></script>
+    <script src="src/js/ui-sweep.js"></script>
     <script src="src/js/app.js"></script>
   </body>
 </html>

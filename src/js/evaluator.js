@@ -15,6 +15,9 @@
   const METRIC_KEYS = ["rms", "mean3sigma", "max"];
   const AXES = ["x", "y"];
 
+  // スイープの点の数の上限（計測時間が長くなりすぎないように）
+  const SWEEP_MAX_POINTS = 30;
+
   // 乱数列の番号（評価データとは別）
   const STREAM_METHOD_BASE = 1000;
 
@@ -140,13 +143,9 @@
   }
 
   /** 推定手法ごとの前準備（選んだ点ごとに1回、XとYで共通）。 */
-  function prepareEstimators(marks, sampleIndices, modelSettings, variants, warnings) {
+  function prepareEstimators(marks, sampleIndices, modelSettings, estimatorList, warnings) {
     const prepared = {};
-    for (const variant of variants) {
-      const estimator = variant.estimator;
-      if (!estimator || prepared[estimator.key]) {
-        continue;
-      }
+    for (const estimator of estimatorList) {
       if (estimator.type === "rbf") {
         const result = ASC.correction.rbfOperator(
           marks,
@@ -166,17 +165,42 @@
     return prepared;
   }
 
+  /** 推定精度を評価する推定手法（設定で選んだもの）。 */
+  function selectedEstimators(modelSettings) {
+    return C.ESTIMATORS.filter((estimator) => modelSettings.estimators[estimator.key]);
+  }
+
   /**
-   * 1組の計測Markについて、補正ごと（HOWAのみ、流れ × 推定手法）・軸ごとの残差の指標を求める。
-   * 戻り値の gpChoices は、ガウス過程回帰がWaferごとに選んだ相関の長さ [mm] とノイズ比。
+   * 1組の計測Markについて、次を求める。
+   *   results: 補正ごと（HOWAのみ、流れ × 推定手法）・軸ごとの残差の指標（全Mark）
+   *   estimation: 推定手法ごとの推定精度。計測値から推定した未計測Markの値と真のずれの差の指標。
+   *               "howa" は多項式で予測した場合（比べる基準）
+   *   estimationSquares: 推定誤差の2乗をWaferで足したもの（Markごと。誤差のマップに使う。計測Markは NaN）
+   *   gpChoices: ガウス過程回帰がWaferごとに選んだ相関の長さ [mm] とノイズ比
+   * options.estimation が false なら推定精度は求めない（全点計測の基準など、未計測Markがないとき）。
    */
-  function evaluateSampleSet(map, data, modelSettings, sampleIndices, variants, modelCache) {
+  function evaluateSampleSet(map, data, modelSettings, sampleIndices, variants, modelCache, options) {
     const marks = map.marks;
     const markCount = marks.length;
     const n = sampleIndices.length;
     const warnings = [];
     const getAllFit = modelCache || createModelCache(map);
-    const estimators = prepareEstimators(marks, sampleIndices, modelSettings, variants, warnings);
+    const measuredSet = new Set(sampleIndices);
+    const unmeasured = [];
+    for (let i = 0; i < markCount; i++) {
+      if (!measuredSet.has(i)) {
+        unmeasured.push(i);
+      }
+    }
+    const withEstimation = !(options && options.estimation === false) && unmeasured.length > 0;
+    // 推定精度の対象と、補正に使う推定手法を合わせて前準備する
+    const estimatorList = withEstimation ? selectedEstimators(modelSettings) : [];
+    for (const variant of variants) {
+      if (variant.estimator && !estimatorList.includes(variant.estimator)) {
+        estimatorList.push(variant.estimator);
+      }
+    }
+    const estimators = prepareEstimators(marks, sampleIndices, modelSettings, estimatorList, warnings);
 
     const results = {};
     const gpChoices = {};
@@ -186,14 +210,54 @@
         gpChoices[variant.key] = { lengthMm: [], noiseRatio: [] };
       }
     }
+    const estimationKeys = withEstimation ? ["howa"].concat(selectedEstimators(modelSettings).map((estimator) => estimator.key)) : [];
+    const estimation = {};
+    const estimationSquares = {};
+    for (const key of estimationKeys) {
+      estimation[key] = createMetricStore(data.waferCount);
+      estimationSquares[key] = {};
+      for (const axis of AXES) {
+        const squares = new Float64Array(markCount);
+        for (const markIndex of sampleIndices) {
+          squares[markIndex] = NaN;
+        }
+        estimationSquares[key][axis] = squares;
+      }
+    }
 
     const measured = new Float64Array(n);
     const howaCorrection = new Float64Array(markCount);
     const correction = new Float64Array(markCount);
     const residual = new Float64Array(markCount);
     const leftover = new Float64Array(n);
+    const estimateBuffer = new Float64Array(markCount);
+    const errorBuffer = new Float64Array(unmeasured.length);
     const howaCache = new Map();
     const gpProjectors = new Map();
+
+    /** 未計測Markでの推定誤差（推定値 − 真のずれ）を記録する。 */
+    function recordEstimation(key, axis, wafer, prediction, truth, waferOffset) {
+      if (!estimation[key]) {
+        return;
+      }
+      const squares = estimationSquares[key][axis];
+      for (let j = 0; j < unmeasured.length; j++) {
+        const markIndex = unmeasured[j];
+        const error = prediction[markIndex] - truth[waferOffset + markIndex];
+        errorBuffer[j] = error;
+        squares[markIndex] += error * error;
+      }
+      const metrics = residualMetrics(errorBuffer, unmeasured.length);
+      for (const metric of METRIC_KEYS) {
+        estimation[key][axis][metric][wafer] = metrics[metric];
+      }
+    }
+
+    function markMissing(store, axis, wafer) {
+      for (const metric of METRIC_KEYS) {
+        store[axis][metric][wafer] = NaN;
+      }
+    }
 
     for (const axis of AXES) {
       const terms = axis === "x" ? modelSettings.termsX : modelSettings.termsY;
@@ -229,6 +293,29 @@
           measured[j] = truth[waferOffset + markIndex] + noise[waferOffset + markIndex];
         }
         applyOperator(howaParts.howa, measured, n, markCount, howaCorrection);
+        recordEstimation("howa", axis, wafer, howaCorrection, truth, waferOffset);
+
+        // 計測値そのものに推定手法を当てはめる（推定精度と「推定→HOWA」で使う）。GPはここで1回だけ学習する
+        const rawFits = {};
+        for (const estimator of estimatorList) {
+          const prepared = estimators[estimator.key];
+          if (prepared.error) {
+            if (estimation[estimator.key]) {
+              markMissing(estimation[estimator.key], axis, wafer);
+            }
+            continue;
+          }
+          const needsEstimate = Boolean(estimation[estimator.key]);
+          if (prepared.type === "gp") {
+            rawFits[estimator.key] = ASC.correction.gpFit(prepared.gp, measured);
+            if (needsEstimate) {
+              recordEstimation(estimator.key, axis, wafer, ASC.correction.gpPredictAll(prepared.gp, rawFits[estimator.key]), truth, waferOffset);
+            }
+          } else if (needsEstimate) {
+            applyOperator(prepared.operator, measured, n, markCount, estimateBuffer);
+            recordEstimation(estimator.key, axis, wafer, estimateBuffer, truth, waferOffset);
+          }
+        }
 
         for (const variant of variants) {
           const store = results[variant.key];
@@ -240,16 +327,14 @@
           const estimator = estimators[variant.estimator.key];
           if (estimator.error) {
             // 推定できなかったとき。0のままだと「残差0」と誤解されるので、値なしにする
-            for (const metric of METRIC_KEYS) {
-              store[axis][metric][wafer] = NaN;
-            }
+            markMissing(store, axis, wafer);
             continue;
           }
           // ガウス過程回帰はWaferごとに調整値を学習する
           let fit;
           if (variant.flowType === "estimateThenHowa") {
             // 未計測Markを推定して全Markを埋め、全Markに多項式を当てはめる（係数を直接求める）
-            fit = ASC.correction.gpFit(estimator.gp, measured);
+            fit = rawFits[variant.estimator.key];
             const projectorKey = `${termsKey}|${variant.estimator.key}`;
             if (!gpProjectors.has(projectorKey)) {
               gpProjectors.set(projectorKey, ASC.correction.gpHowaProjector(estimator.gp, howaParts, sampleIndices));
@@ -285,7 +370,7 @@
         }
       }
     }
-    return { results, gpChoices, warnings: Array.from(new Set(warnings)) };
+    return { results, estimation, estimationSquares, gpChoices, warnings: Array.from(new Set(warnings)) };
   }
 
   /**
@@ -296,7 +381,7 @@
   function evaluateAllMarks(map, data, modelSettings, modelCache) {
     const allIndices = Array.from({ length: map.marks.length }, (_, i) => i);
     const howaOnly = [{ key: "howa", flowType: "howa", estimator: null, label: "HOWAのみ" }];
-    return evaluateSampleSet(map, data, modelSettings, allIndices, howaOnly, modelCache);
+    return evaluateSampleSet(map, data, modelSettings, allIndices, howaOnly, modelCache, { estimation: false });
   }
 
   /**
@@ -380,6 +465,8 @@
       }
       const evaluation = evaluateSampleSet(map, data, settings.model, set.markIndices, variants, modelCache);
       set.results = evaluation.results;
+      set.estimation = evaluation.estimation;
+      set.estimationSquares = evaluation.estimationSquares;
       set.gpChoices = evaluation.gpChoices;
       set.warnings.push(...evaluation.warnings);
       doneSteps++;
@@ -398,8 +485,100 @@
       sets,
       baselines: { uncorrected, allMarks: allMarks.results },
       variants,
-      summary: summarizeResults(sets, variants),
+      estimationKeys: estimationKeysOf(settings.model),
+      summary: summarizeResults(sets, variants, estimationKeysOf(settings.model)),
       waferCount: data.waferCount,
+    };
+  }
+
+  /** スイープする計測Shot数の一覧と、設定の誤り。 */
+  function sweepShotCounts(sweepSettings, eligibleCount) {
+    const { startShots, endShots, stepShots } = sweepSettings;
+    const errors = [];
+    if (![startShots, endShots, stepShots].every(Number.isInteger) || startShots < 1 || stepShots < 1 || endShots < startShots) {
+      errors.push("計測Shot数の範囲は「1 ≦ 開始 ≦ 終了」、刻みは1以上の整数にしてください。");
+    } else if (endShots > eligibleCount) {
+      errors.push(`終了の計測Shot数（${endShots}）が選べるShot数（${eligibleCount}）を超えています。${eligibleCount}以下にしてください。`);
+    }
+    if (!Number.isInteger(sweepSettings.draws) || sweepSettings.draws < 1) {
+      errors.push("スイープの試行回数は1以上の整数にしてください。");
+    }
+    const values = [];
+    if (errors.length === 0) {
+      for (let value = startShots; value <= endShots; value += stepShots) {
+        values.push(value);
+      }
+      if (values.length > SWEEP_MAX_POINTS) {
+        errors.push(`スイープの点が${values.length}個あります。刻みを大きくして${SWEEP_MAX_POINTS}個以下にしてください。`);
+      }
+    }
+    return { values, errors };
+  }
+
+  /**
+   * 計測Shot数を変えながら評価する（計測コストと精度のトレードオフ）。
+   * 「k個以上」のときは、Shotあたりの総Mark数の比（総Mark数 ÷ 計測Shot数）を保つ。手動選択は対象にしない。
+   * sweepSettings: { startShots, endShots, stepShots, draws }
+   * 戻り値: { points: [{ shotCount, markCounts, summary, relaxed, warnings }], variants, estimationKeys, baseline, uncorrected }
+   */
+  async function runSweep(input, sweepSettings, onProgress, isCancelled) {
+    const { map, data, settings } = input;
+    const built = ASC.constraints.buildContext(map, settings);
+    if (built.errors.length > 0) {
+      return { errors: built.errors };
+    }
+    const { values, errors } = sweepShotCounts(sweepSettings, built.context.items.length);
+    if (errors.length > 0) {
+      return { errors };
+    }
+    const sampling = settings.sampling;
+    const marksPerShot = sampling.markMode === "exact" ? built.context.markCountPerShot : sampling.totalMarkCount / sampling.shotCount;
+    const points = [];
+    let last = null;
+    for (let index = 0; index < values.length; index++) {
+      const shotCount = values[index];
+      const pointSettings = JSON.parse(JSON.stringify(settings));
+      pointSettings.sampling.shotCount = shotCount;
+      pointSettings.sampling.totalMarkCount = Math.max(shotCount * built.context.markCountPerShot, Math.round(shotCount * marksPerShot));
+      pointSettings.sampling.draws = sweepSettings.draws;
+      pointSettings.sampling.methods.manual = false;
+      const output = await runEvaluation(
+        { map, data, settings: pointSettings, manual: null },
+        (done, total, label) => onProgress(index + done / total, values.length, `計測Shot数 ${shotCount}（${index + 1}/${values.length}）: ${label}`),
+        isCancelled
+      );
+      if (output.cancelled) {
+        return { cancelled: true };
+      }
+      if (output.errors.length > 0) {
+        points.push({ shotCount, errors: output.errors });
+        continue;
+      }
+      const markCounts = {};
+      for (const [methodKey, summary] of Object.entries(output.summary)) {
+        markCounts[methodKey] = summary.markCount.mean;
+      }
+      points.push({
+        shotCount,
+        markCounts,
+        summary: output.summary,
+        relaxed: output.relaxed,
+        warnings: Array.from(new Set(output.sets.flatMap((set) => set.warnings))),
+      });
+      last = output;
+    }
+    if (!last) {
+      return { errors: points.flatMap((point) => point.errors || []) };
+    }
+    return {
+      errors: [],
+      points,
+      variants: last.variants,
+      estimationKeys: last.estimationKeys,
+      baseline: summarizeStore(last.baselines.allMarks.howa),
+      uncorrected: summarizeStore(last.baselines.uncorrected),
+      waferCount: data.waferCount,
+      draws: sweepSettings.draws,
     };
   }
 
@@ -431,14 +610,14 @@
    * 選び方 × 補正 × 軸 × 指標ごとに、全試行・全Waferの値をまとめる。
    * ランダム系は、試行ごとの平均（Wafer平均）のばらつきも出す。
    */
-  function summarizeResults(sets, variants) {
+  function summarizeResults(sets, variants, estimationKeys) {
     const summary = {};
     for (const method of C.METHODS) {
       const methodSets = sets.filter((set) => set.method === method.key && set.results);
       if (methodSets.length === 0) {
         continue;
       }
-      summary[method.key] = { drawCount: methodSets.length, variants: {}, gpChoices: {} };
+      summary[method.key] = { drawCount: methodSets.length, variants: {}, estimation: {}, gpChoices: {} };
       for (const variant of variants) {
         const variantSummary = {};
         for (const axis of AXES) {
@@ -461,6 +640,12 @@
           summary[method.key].gpChoices[variant.key] = { lengthMm: M.summarize(lengths), noiseRatio: M.summarize(ratios) };
         }
       }
+      for (const key of estimationKeys) {
+        if (!methodSets[0].estimation[key]) {
+          continue;
+        }
+        summary[method.key].estimation[key] = summarizeStores(methodSets.map((set) => set.estimation[key]));
+      }
       summary[method.key].kappaX = M.summarize(methodSets.map((set) => set.kappaX));
       summary[method.key].kappaY = M.summarize(methodSets.map((set) => set.kappaY));
       summary[method.key].minSpacingMm = M.summarize(methodSets.map((set) => set.minSpacingMm));
@@ -471,6 +656,37 @@
       ).length;
     }
     return summary;
+  }
+
+  /** 試行ごとの指標の箱をまとめて集計する（全試行・全Waferの分布と、試行ごとの平均の分布）。 */
+  function summarizeStores(stores) {
+    const result = {};
+    for (const axis of AXES) {
+      result[axis] = {};
+      for (const metric of METRIC_KEYS) {
+        const all = [];
+        const perDraw = [];
+        for (const store of stores) {
+          all.push(...store[axis][metric]);
+          perDraw.push(M.summarize(store[axis][metric]).mean);
+        }
+        result[axis][metric] = { all: M.summarize(all), perDraw: M.summarize(perDraw) };
+      }
+    }
+    return result;
+  }
+
+  /** 推定精度を比べる対象（多項式の予測と、選んだ推定手法）。 */
+  function estimationKeysOf(modelSettings) {
+    return ["howa"].concat(selectedEstimators(modelSettings).map((estimator) => estimator.key));
+  }
+
+  /** 推定精度の表やグラフに使う名前。 */
+  function estimationLabel(key) {
+    if (key === "howa") {
+      return "HOWA（多項式の予測）";
+    }
+    return C.ESTIMATORS.find((estimator) => estimator.key === key).label;
   }
 
   /** 1つの基準（Wafer数ぶんの値）を集計する。 */
@@ -491,6 +707,9 @@
     residualMetrics,
     evaluateSampleSet,
     runEvaluation,
+    runSweep,
+    sweepShotCounts,
     summarizeStore,
+    estimationLabel,
   };
 })(typeof window !== "undefined" ? window : globalThis);

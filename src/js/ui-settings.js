@@ -19,6 +19,7 @@
     sampling: "sampling",
     constraints: "constraints",
     zones: "constraints",
+    sweep: "sweep",
   };
 
   let state = null;

@@ -11,6 +11,7 @@
 
   const METRIC_LABELS = { rms: "RMS", mean3sigma: "|平均|+3σ", max: "最大" };
   const AXIS_LABELS = { x: "X", y: "Y" };
+  // 推定手法ごとの色。"howa" は HOWAのみ（推定精度では多項式の予測）
   const SERIES_COLORS = {
     howa: "var(--series-1)",
     rbfXY: "var(--series-2)",
@@ -76,7 +77,12 @@
     return ASC.evaluator.summarizeStore(output.baselines.allMarks.howa)[axis][metric];
   }
 
-  /** 箱ひげ図に並べる行（選び方 × 補正）。 */
+  /** 箱ひげ図の1行。group は選び方、row は補正や推定手法。 */
+  function chartRow(methodKey, rowText, fullLabel, color, stats) {
+    return { method: methodKey, rowLabel: rowText, fullLabel, color, stats };
+  }
+
+  /** 残差の箱ひげ図に並べる行（選び方 × 補正）。最後に全点計測の基準を置く。 */
   function chartGroups(output, variants, metric, axis) {
     const groups = [];
     for (const method of C.METHODS) {
@@ -86,16 +92,42 @@
       }
       groups.push({
         method: method.key,
-        rows: variants.map((variant) => ({ method: method.key, variant, stats: summary.variants[variant.key][axis][metric].all })),
+        rows: variants.map((variant) => chartRow(method.key, rowLabel(variant), variant.label, seriesColor(variant), summary.variants[variant.key][axis][metric].all)),
       });
     }
-    const howa = output.variants.find((variant) => variant.key === "howa") || { key: "howa", flowType: "howa", estimator: null, label: "HOWAのみ" };
-    groups.push({ method: BASELINE_KEY, rows: [{ method: BASELINE_KEY, variant: howa, stats: baselineStats(output, axis, metric) }] });
+    groups.push({
+      method: BASELINE_KEY,
+      rows: [chartRow(BASELINE_KEY, "HOWAのみ", "HOWAのみ", SERIES_COLORS.howa, baselineStats(output, axis, metric))],
+    });
     return groups;
   }
 
-  function renderChart(container, output, variants, view) {
-    const groups = chartGroups(output, variants, view.metric, view.axis);
+  /** 推定精度の箱ひげ図に並べる行（選び方 × 推定手法）。 */
+  function estimationGroups(output, metric, axis) {
+    const groups = [];
+    for (const method of C.METHODS) {
+      const summary = output.summary[method.key];
+      if (!summary) {
+        continue;
+      }
+      const keys = output.estimationKeys.filter((key) => summary.estimation[key]);
+      groups.push({
+        method: method.key,
+        rows: keys.map((key) => chartRow(method.key, estimationRowLabel(key), ASC.evaluator.estimationLabel(key), SERIES_COLORS[key], summary.estimation[key][axis][metric].all)),
+      });
+    }
+    return groups;
+  }
+
+  function estimationRowLabel(key) {
+    return key === "howa" ? "HOWA（多項式）" : ASC.evaluator.estimationLabel(key);
+  }
+
+  /**
+   * 横向きの箱ひげ図。groups: [{ method, rows: [{ rowLabel, fullLabel, color, stats }] }]
+   * legendItems: [{ label, color }]、axisTitle: 横軸の説明、ariaLabel: 図の説明
+   */
+  function renderChart(container, groups, legendItems, axisTitle, ariaLabel) {
     const rowCount = groups.reduce((sum, group) => sum + group.rows.length, 0);
     const height = TOP_PADDING + rowCount * ROW_HEIGHT + (groups.length - 1) * GROUP_GAP + AXIS_HEIGHT;
     let maximum = 0;
@@ -112,11 +144,7 @@
     const xOf = (value) => plotLeft + (Math.min(value, scale.max) / scale.max) * plotWidth;
     const plotBottom = height - AXIS_HEIGHT;
 
-    const svg = ui.createSvg("svg", {
-      viewBox: `0 0 ${CHART_WIDTH} ${height}`,
-      role: "img",
-      "aria-label": `選び方と補正ごとの残差${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）の箱ひげ図。数値は下の表にもあります。`,
-    });
+    const svg = ui.createSvg("svg", { viewBox: `0 0 ${CHART_WIDTH} ${height}`, role: "img", "aria-label": ariaLabel });
     for (const tick of scale.ticks) {
       const x = xOf(tick);
       svg.append(ui.createSvg("line", { className: "chart-gridline", x1: x, y1: TOP_PADDING - 8, x2: x, y2: plotBottom }));
@@ -128,7 +156,7 @@
         x: plotLeft + plotWidth / 2,
         y: plotBottom + 38,
         "text-anchor": "middle",
-        text: `Waferごとの残差 ${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）[nm]`,
+        text: axisTitle,
       })
     );
 
@@ -149,7 +177,7 @@
             y: y + ROW_HEIGHT / 2,
             "text-anchor": "end",
             "dominant-baseline": "central",
-            text: rowLabel(row.variant),
+            text: row.rowLabel,
           })
         );
         if (Number.isFinite(row.stats.median)) {
@@ -172,10 +200,8 @@
 
     const legend = ui.create(
       "ul",
-      { className: "chart-legend", "aria-label": "補正" },
-      variants.map((variant) =>
-        ui.create("li", null, [ui.create("span", { className: "chart-swatch", style: `background:${seriesColor(variant)}` }), variant.label])
-      )
+      { className: "chart-legend", "aria-label": "凡例" },
+      legendItems.map((item) => ui.create("li", null, [ui.create("span", { className: "chart-swatch", style: `background:${item.color}` }), item.label]))
     );
     container.replaceChildren(legend, ui.create("div", { className: "chart-frame" }, svg));
   }
@@ -188,8 +214,8 @@
   function drawBox(row, top, xOf, tooltip) {
     const stats = row.stats;
     const center = top + ROW_HEIGHT / 2;
-    const color = seriesColor(row.variant);
-    const label = `${methodLabel(row.method)}・${row.variant.label}`;
+    const color = row.color;
+    const label = `${methodLabel(row.method)}・${row.fullLabel}`;
     const group = ui.createSvg("g", {
       className: "chart-box",
       tabindex: "0",
@@ -255,17 +281,10 @@
   }
 
   /**
-   * 一覧表: 選び方 × 補正の平均。値が大きいほど濃い色にし、行ごとに最も小さい値に ★ を付ける。
+   * 段階色の表: 行 × 列の値。値が大きいほど濃い色にし、行ごとに最も小さい値に ★ を付ける。
+   * rows: [{ label, values }]
    */
-  function renderOverviewTable(output, view) {
-    const variants = output.variants;
-    const rows = [];
-    for (const method of C.METHODS) {
-      const summary = output.summary[method.key];
-      if (summary) {
-        rows.push({ label: method.label, values: variants.map((variant) => summary.variants[variant.key][view.axis][view.metric].all.mean) });
-      }
-    }
+  function heatTable(columnLabels, rows, firstHeader) {
     let maximum = 0;
     for (const row of rows) {
       for (const value of row.values) {
@@ -274,7 +293,7 @@
         }
       }
     }
-    const headRow = ui.create("tr", null, [ui.create("th", { text: "選び方" })].concat(variants.map((variant) => ui.create("th", { className: "number", text: variant.label }))));
+    const headRow = ui.create("tr", null, [ui.create("th", { text: firstHeader })].concat(columnLabels.map((label) => ui.create("th", { className: "number", text: label }))));
     const body = ui.create("tbody");
     for (const row of rows) {
       const finite = row.values.filter(Number.isFinite);
@@ -292,15 +311,40 @@
       });
       body.append(ui.create("tr", null, cells));
     }
+    return ui.create("div", { className: "table-scroll" }, ui.create("table", { className: "heat-table" }, [ui.create("thead", null, headRow), body]));
+  }
+
+  /** 一覧表: 選び方 × 補正の平均。 */
+  function renderOverviewTable(output, view) {
+    const rows = [];
+    for (const method of C.METHODS) {
+      const summary = output.summary[method.key];
+      if (summary) {
+        rows.push({ label: method.label, values: output.variants.map((variant) => summary.variants[variant.key][view.axis][view.metric].all.mean) });
+      }
+    }
     const baseline = baselineStats(output, view.axis, view.metric).mean;
     const uncorrected = ASC.evaluator.summarizeStore(output.baselines.uncorrected)[view.axis][view.metric].mean;
     return [
-      ui.create("div", { className: "table-scroll" }, ui.create("table", { className: "heat-table" }, [ui.create("thead", null, headRow), body])),
+      heatTable(output.variants.map((variant) => variant.label), rows, "選び方"),
       ui.create("p", {
         className: "hint",
         text: `★ はその選び方で最も小さい値です。色が濃いほど残差が大きいことを表します。参考: 全点計測（HOWAのみ）${ui.formatNumber(baseline)} nm、補正なし ${ui.formatNumber(uncorrected)} nm。`,
       }),
     ];
+  }
+
+  /** 推定精度の一覧表: 選び方 × 推定手法（と多項式の予測）の平均。 */
+  function renderEstimationTable(output, view) {
+    const keys = output.estimationKeys;
+    const rows = [];
+    for (const method of C.METHODS) {
+      const summary = output.summary[method.key];
+      if (summary) {
+        rows.push({ label: method.label, values: keys.map((key) => (summary.estimation[key] ? summary.estimation[key][view.axis][view.metric].all.mean : NaN)) });
+      }
+    }
+    return heatTable(keys.map((key) => ASC.evaluator.estimationLabel(key)), rows, "選び方");
   }
 
   function renderSummaryTable(output, variants, view) {
@@ -317,7 +361,7 @@
       for (const row of group.rows) {
         rows.push([
           methodLabel(row.method),
-          row.variant.label,
+          row.fullLabel,
           ui.formatNumber(row.stats.mean),
           ui.formatNumber(row.stats.median),
           ui.formatNumber(row.stats.p95),
@@ -480,12 +524,21 @@
       );
     }
     const chartContainer = ui.create("div");
-    renderChart(chartContainer, output, variants, view);
+    renderChart(
+      chartContainer,
+      chartGroups(output, variants, view.metric, view.axis),
+      variants.map((variant) => ({ label: variant.label, color: seriesColor(variant) })),
+      `Waferごとの残差 ${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）[nm]`,
+      `選び方と補正ごとの残差${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）の箱ひげ図。数値は下の表にもあります。`
+    );
     children.push(chartContainer);
     children.push(ui.create("p", { className: "hint", text: "箱は25〜75%点、線は5〜95%点、箱の中の縦線は中央値です。箱にポインターを合わせるか、Tabキーで選ぶと数値が出ます。" }));
 
     children.push(ui.create("h2", { className: "subheading", text: `数値の表（${METRIC_LABELS[view.metric]}・${AXIS_LABELS[view.axis]}、単位 nm）` }));
     children.push(renderSummaryTable(output, variants, view));
+    if (output.estimationKeys.length > 1) {
+      children.push(...renderEstimationSection(output, view, handlers));
+    }
     const gpTable = renderGpTable(output);
     if (gpTable) {
       children.push(ui.create("h2", { className: "subheading", text: "GPが学習した値（Waferごと・X/Yごとに学習した値の分布）" }));
@@ -507,6 +560,45 @@
       children.push(drawTable);
     }
     container.replaceChildren(...children);
+  }
+
+  /**
+   * 推定精度の節: 未計測Markでの「推定値 − 真のずれ」。一覧表、箱ひげ図、誤差のマップ。
+   */
+  function renderEstimationSection(output, view, handlers) {
+    const children = [];
+    children.push(ui.create("h2", { className: "subheading", text: `推定精度（未計測Markでの 推定値 − 真のずれ、${METRIC_LABELS[view.metric]}・${AXIS_LABELS[view.axis]}、Wafer平均、単位 nm）` }));
+    children.push(
+      ui.create("p", {
+        className: "hint",
+        text: "計測値（ノイズを含む）から推定した未計測Markの値を、ノイズのない真のずれと比べます。「HOWA（多項式の予測）」は、計測Markに当てはめた多項式で未計測Markを予測した場合で、推定手法を使う意味があるかの基準です。",
+      })
+    );
+    children.push(renderEstimationTable(output, view));
+    const keys = output.estimationKeys;
+    const chartContainer = ui.create("div");
+    renderChart(
+      chartContainer,
+      estimationGroups(output, view.metric, view.axis),
+      keys.map((key) => ({ label: ASC.evaluator.estimationLabel(key), color: SERIES_COLORS[key] })),
+      `Waferごとの推定誤差 ${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}、未計測Mark）[nm]`,
+      `選び方と推定手法ごとの推定誤差${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）の箱ひげ図。数値は上の表にもあります。`
+    );
+    children.push(chartContainer);
+
+    // 誤差のマップ: 選び方を1つ選び、推定手法ごとにMarkの誤差（Waferで2乗平均）を並べる
+    const methods = C.METHODS.filter((method) => output.summary[method.key]);
+    const methodKey = methods.some((method) => method.key === view.estimationMapMethod) ? view.estimationMapMethod : methods[0].key;
+    children.push(ui.create("h3", { className: "subheading", text: "推定誤差のマップ（Markごとに、全WaferのRMS）" }));
+    children.push(
+      ui.create("div", { className: "toolbar" }, [
+        selectField("estimation-map-method", "選び方", methods.map((method) => [method.key, method.label]), methodKey, (value) =>
+          handlers.onViewChange({ estimationMapMethod: value }, "estimation-map-method")
+        ),
+      ])
+    );
+    children.push(ASC.samplingMapsView.renderEstimationMaps(output, methodKey, view.axis));
+    return children;
   }
 
   function notice(type, icon, title, items) {
@@ -542,6 +634,22 @@
         }
       }
     }
+    for (const method of C.METHODS) {
+      const summary = output.summary[method.key];
+      if (!summary) {
+        continue;
+      }
+      for (const key of output.estimationKeys) {
+        if (!summary.estimation[key]) {
+          continue;
+        }
+        for (const axis of ASC.evaluator.AXES) {
+          for (const metric of ASC.evaluator.METRIC_KEYS) {
+            push(method.label, `推定精度: ${ASC.evaluator.estimationLabel(key)}`, axis, metric, summary.estimation[key][axis][metric].all);
+          }
+        }
+      }
+    }
     const baseline = ASC.evaluator.summarizeStore(output.baselines.allMarks.howa);
     const uncorrected = ASC.evaluator.summarizeStore(output.baselines.uncorrected);
     for (const axis of ASC.evaluator.AXES) {
@@ -565,5 +673,5 @@
     return lines.join("\r\n") + "\r\n";
   }
 
-  ASC.resultsView = { render, resultsCsv, selectionsCsv, METRIC_LABELS };
+  ASC.resultsView = { render, resultsCsv, selectionsCsv, METRIC_LABELS, AXIS_LABELS, SERIES_COLORS, niceTicks, selectField, heatTable };
 })(typeof window !== "undefined" ? window : globalThis);

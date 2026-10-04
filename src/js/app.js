@@ -21,10 +21,22 @@
     manual: { shots: new Set(), marks: new Set() },
     output: null,
     outputStale: false,
+    sweep: null,
+    sweepStale: false,
     invalidFields: new Set(),
     running: false,
     cancelRequested: false,
-    view: { selection: MANUAL_KEY, draw: 0, editing: false, metric: "rms", axis: "x", flowType: "estimateThenHowa", mapChoices: {} },
+    view: {
+      selection: MANUAL_KEY,
+      draw: 0,
+      editing: false,
+      metric: "rms",
+      axis: "x",
+      flowType: "estimateThenHowa",
+      mapChoices: {},
+      estimationMapMethod: null,
+      sweep: { mode: "methods", metric: "rms", axis: "x", stat: "mean", scale: "linear", target: NaN },
+    },
   };
 
   function createInitialSettings() {
@@ -70,6 +82,11 @@
   }
 
   function onSettingsChange(kind) {
+    if (kind === "sweep") {
+      // スイープの範囲だけの変更は、評価結果には関係しない
+      updateSweepEstimate();
+      return;
+    }
     if (kind === "map") {
       rebuildMap();
       ASC.settingsForm.renderDesignatedMarks();
@@ -83,6 +100,11 @@
     if (state.output) {
       renderResultsTab();
     }
+    if (state.sweep) {
+      state.sweepStale = true;
+      renderSweepTab();
+    }
+    updateSweepEstimate();
   }
 
   // ---- マップのタブ --------------------------------------------------------
@@ -309,7 +331,13 @@
     state.running = running;
     ui.byId("run-button").disabled = running;
     ui.byId("run-button").textContent = running ? "計算中…" : "評価を実行";
+    ui.byId("sweep-run-button").disabled = running;
     ui.byId("progress-area").hidden = !running;
+  }
+
+  function showProgress(done, total, label) {
+    ui.byId("progress-bar").value = done / total;
+    ui.byId("progress-label").textContent = `${label}（${Math.round((100 * done) / total)}%）`;
   }
 
   async function runEvaluation() {
@@ -341,10 +369,7 @@
           settings,
           manual: { shotIndices: Array.from(state.manual.shots), extraMarkIndices: Array.from(state.manual.marks) },
         },
-        (done, total, label) => {
-          ui.byId("progress-bar").value = done / total;
-          ui.byId("progress-label").textContent = `${label}（${Math.round((100 * done) / total)}%）`;
-        },
+        showProgress,
         () => state.cancelRequested
       );
       if (output.cancelled) {
@@ -402,6 +427,90 @@
         onExportSelections: () => ui.download(`選択点_${ui.timestampForFile()}.csv`, ASC.resultsView.selectionsCsv(state.output, state.output.map), "text/csv"),
       },
       state.outputStale
+    );
+  }
+
+  // ---- 計測点数のスイープ --------------------------------------------------
+
+  /** スイープで評価する量の目安を表示する。 */
+  function updateSweepEstimate() {
+    const element = ui.byId("sweep-estimate");
+    const settings = state.settings;
+    const sweep = settings.sweep;
+    const pointCount = sweep.stepShots > 0 && sweep.endShots >= sweep.startShots ? Math.floor((sweep.endShots - sweep.startShots) / sweep.stepShots) + 1 : 0;
+    const methods = C.METHODS.filter((method) => method.key !== MANUAL_KEY && settings.sampling.methods[method.key]);
+    const setsPerPoint = methods.reduce((sum, method) => sum + (method.usesDraws ? sweep.draws : 1), 0);
+    const k = settings.sampling.designatedMarkNos.length;
+    element.textContent =
+      pointCount > 0
+        ? `評価する点: ${pointCount}点（計測Mark数 ${sweep.startShots * k}〜${sweep.endShots * k} 程度）、1点あたり選択 ${setsPerPoint}組 × Wafer ${settings.evaluationData.waferCount}枚。点や試行回数が多いほど時間がかかります。`
+        : "";
+  }
+
+  async function runSweep() {
+    if (state.running) {
+      return;
+    }
+    const errors = collectRunErrors().filter((text) => !text.includes("手動選択"));
+    if (!C.METHODS.some((method) => method.key !== MANUAL_KEY && state.settings.sampling.methods[method.key])) {
+      errors.push("スイープには、手動以外の選び方を1つ以上選んでください（4. サンプリングの「比べる選び方」）。");
+    }
+    if (errors.length > 0) {
+      ui.showMessage("error", "スイープを始められません。次の点を直してください。", errors);
+      return;
+    }
+    ui.clearMessage();
+    const generated = ASC.evaluationData.generateEvaluationData(state.map, state.settings.evaluationData);
+    if (generated.errors.length > 0) {
+      ui.showMessage("error", "評価データを作れません。次の点を直してください。", generated.errors);
+      return;
+    }
+    const settings = JSON.parse(JSON.stringify(state.settings));
+    state.cancelRequested = false;
+    setRunning(true);
+    const started = performance.now();
+    try {
+      const output = await ASC.evaluator.runSweep({ map: state.map, data: generated.data, settings }, settings.sweep, showProgress, () => state.cancelRequested);
+      if (output.cancelled) {
+        ui.showMessage("warning", "スイープを中止しました。", ["前の結果はそのまま残しています。"]);
+        return;
+      }
+      if (output.errors.length > 0) {
+        ui.showMessage("error", "スイープできませんでした。次の点を直してください。", output.errors);
+        return;
+      }
+      state.sweep = output;
+      state.sweepStale = false;
+      const seconds = ((performance.now() - started) / 1000).toFixed(1);
+      ui.showMessage("success", "スイープが終わりました。", [`計測Shot数 ${output.points.length}点を、${seconds}秒で評価しました。`]);
+      renderSweepTab();
+      selectTab("tab-sweep");
+    } catch (error) {
+      ui.showMessage("error", "スイープの途中で問題が起きました。", [`内容: ${error.message}`, "計測Shot数の範囲や設定を見直して、もう一度実行してください。"]);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  function renderSweepTab() {
+    const container = ui.byId("sweep-content");
+    if (!state.sweep) {
+      container.replaceChildren(ui.create("p", { className: "empty-state", text: "「スイープを実行」を押すと、ここにトレードオフカーブが出ます。" }));
+      return;
+    }
+    ASC.sweepView.render(
+      container,
+      state.sweep,
+      state.view.sweep,
+      {
+        onViewChange: (change, focusId) => {
+          Object.assign(state.view.sweep, change);
+          renderSweepTab();
+          ui.byId(focusId).focus();
+        },
+        onExport: () => ui.download(`スイープ結果_${ui.timestampForFile()}.csv`, ASC.sweepView.sweepCsv(state.sweep), "text/csv"),
+      },
+      state.sweepStale
     );
   }
 
@@ -525,6 +634,7 @@
       ui.byId("csv-file-name").textContent = state.csvText ? "設定ファイルに含まれていたCSVを使います。" : "";
       state.manual = { shots: new Set(), marks: new Set() };
       state.output = null;
+      state.sweep = null;
       state.view.mapChoices = {};
       rebuildMap();
       restoreManual(content.manual);
@@ -534,6 +644,8 @@
       renderMapTab();
       renderResultsTab();
       renderMapsTab();
+      renderSweepTab();
+      updateSweepEstimate();
       ui.showMessage("success", "設定を読み込みました。", [`ファイル: ${file.name}`]);
     } catch (error) {
       ui.showMessage("error", "設定を読み込めませんでした。", [`内容: ${error.message}`, "このアプリの「設定をJSONで保存」で作ったファイルを選んでください。"]);
@@ -566,7 +678,7 @@
 
   // ---- タブ ----------------------------------------------------------------
 
-  const TAB_IDS = ["tab-map", "tab-results", "tab-maps", "tab-help"];
+  const TAB_IDS = ["tab-map", "tab-results", "tab-maps", "tab-sweep", "tab-help"];
 
   function selectTab(tabId) {
     for (const id of TAB_IDS) {
@@ -604,6 +716,8 @@
     setupTabs();
 
     ui.byId("run-button").addEventListener("click", runEvaluation);
+    ui.byId("sweep-run-button").addEventListener("click", runSweep);
+    updateSweepEstimate();
     ui.byId("cancel-button").addEventListener("click", () => {
       state.cancelRequested = true;
       ui.byId("progress-label").textContent = "中止しています…";
