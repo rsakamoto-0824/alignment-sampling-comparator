@@ -416,36 +416,86 @@
     return table(headers, rows);
   }
 
+  /**
+   * 選んだ点の性質: 数・間隔と、D基準・I基準（試行の平均）と効率。
+   * 効率は、この評価の中で最も良い選び方・試行を100%にした値（D効率 = (det/det最良)^(1/p)、I効率 = 最良の予測分散 ÷ 予測分散）。
+   */
   function renderMethodTable(output) {
-    const headers = [
-      { text: "選び方" },
-      { text: "選んだ回数" },
-      { text: "Shot数", number: true },
-      { text: "Mark数", number: true },
-      { text: "κ（X）", number: true },
-      { text: "κ（Y）", number: true },
-      { text: "最小間隔 [mm]", number: true },
-      { text: "制約をすべて満たした回数" },
-    ];
+    const axes = output.criteriaSameTerms ? [["", "x"]] : [["X ", "x"], ["Y ", "y"]];
+    const headers = [{ text: "選び方" }, { text: "選んだ回数" }, { text: "Shot数", number: true }, { text: "Mark数", number: true }, { text: "最小間隔 [mm]", number: true }];
+    for (const [prefix] of axes) {
+      headers.push(
+        { text: `${prefix}D基準 log₁₀det`, number: true },
+        { text: `${prefix}D効率`, number: true },
+        { text: `${prefix}I基準（κ²）`, number: true },
+        { text: `${prefix}I効率`, number: true }
+      );
+    }
     const rows = [];
     for (const method of output.methods) {
       const summary = output.summary[method.key];
       if (!summary) {
         continue;
       }
-      const all = summary.constraintsMet === summary.drawCount;
-      rows.push([
+      const cells = [
         displayName(method),
         `${summary.drawCount}回`,
         ui.formatNumber(summary.shotCount.mean, 0),
         ui.formatNumber(summary.markCount.mean, 0),
-        ui.formatNumber(summary.kappaX.mean),
-        ui.formatNumber(summary.kappaY.mean),
         ui.formatNumber(summary.minSpacingMm.mean, 1),
-        `${all ? "✓" : "✕"} ${summary.constraintsMet} / ${summary.drawCount}回`,
-      ]);
+      ];
+      for (const [, axis] of axes) {
+        const criteria = summary[`criteria${axis.toUpperCase()}`];
+        const reference = output.criteriaReference[axis];
+        if (criteria.singularCount > 0) {
+          cells.push(`計算できない（${criteria.singularCount}回。点が足りないか偏っている）`, "—", "—", "—");
+          continue;
+        }
+        // 試行の平均（log det は平均、予測分散も平均）から効率を出す
+        const mean = { logDet: criteria.logDet.mean, trace: criteria.trace.mean, p: criteriaTermCount(output, axis), singular: false };
+        const efficiency = reference ? ASC.sampling.efficiencies(mean, reference) : { d: NaN, i: NaN };
+        cells.push(
+          ui.formatNumber(ASC.mapView.log10Det(criteria.logDet.mean), 2),
+          Number.isFinite(efficiency.d) ? `${ui.formatNumber(efficiency.d, 0)}%` : "—",
+          ui.formatNumber(criteria.trace.mean, 3),
+          Number.isFinite(efficiency.i) ? `${ui.formatNumber(efficiency.i, 0)}%` : "—"
+        );
+      }
+      rows.push(cells);
     }
     return table(headers, rows);
+  }
+
+  /** 軸ごとの多項式の項数（D効率の計算に使う）。 */
+  function criteriaTermCount(output, axis) {
+    const set = output.sets.find((entry) => entry.criteria);
+    return set ? set.criteria[axis].p : 1;
+  }
+
+  /** 制約の満たし具合: 選び方 × 制約。満たした回数と、ずれ（移せば満たせるShot数）の平均。 */
+  function renderConstraintSummaryTable(output) {
+    const first = output.methods.map((method) => output.summary[method.key]).find((summary) => summary && summary.constraints.length > 0);
+    if (!first) {
+      return null;
+    }
+    const relaxedKeys = new Set(output.relaxed.map((entry) => entry.key));
+    const kindText = (entry) => (entry.hard ? "ハード" : relaxedKeys.has(entry.key) ? "ソフトに切替" : "ソフト");
+    const headRow = ui.create("tr", null, [ui.create("th", { text: "選び方" })].concat(first.constraints.map((entry) => ui.create("th", { text: `${entry.label}（${kindText(entry)}）` }))));
+    const body = ui.create("tbody");
+    for (const method of output.methods) {
+      const summary = output.summary[method.key];
+      if (!summary) {
+        continue;
+      }
+      const cells = [ui.create("th", { scope: "row", text: displayName(method) })];
+      for (const entry of summary.constraints) {
+        const ok = entry.satisfied === entry.total;
+        const text = ok ? `✓ ${entry.satisfied} / ${entry.total}回` : `✕ ${entry.satisfied} / ${entry.total}回（平均 ${ui.formatNumber(entry.meanShift, 1)}個ずれ）`;
+        cells.push(ui.create("td", null, ui.create("span", { className: ok ? "status-ok" : "status-ng", text })));
+      }
+      body.append(ui.create("tr", null, cells));
+    }
+    return ui.create("div", { className: "table-scroll" }, ui.create("table", { className: "constraint-table" }, [ui.create("thead", null, headRow), body]));
   }
 
   function renderDrawTable(output, variants, view) {
@@ -560,9 +610,20 @@
         })
       );
     }
-    children.push(ui.create("h2", { className: "subheading", text: "選んだ点の性質" }));
+    children.push(ui.create("h2", { className: "subheading", text: "選んだ点の性質（D基準・I基準）" }));
     children.push(renderMethodTable(output));
-    children.push(ui.create("p", { className: "hint", text: "κ は計測ノイズが補正量に乗る倍率（HOWAのみの場合）、最小間隔はShot中心どうしの最小距離です。値は試行の平均です。" }));
+    children.push(
+      ui.create("p", {
+        className: "hint",
+        text: "D基準 log₁₀det(XᵀX) は大きいほど多項式の係数の推定精度が良く、I基準（予測分散の平均÷σ²＝κ²）は小さいほど全Markの補正量にノイズが乗りにくい選び方です（HOWAの多項式に対して）。効率はこの評価の中で最も良い選び方・試行を100%にした値です。D基準の値そのものは座標の尺度で決まる負の数になることがあるので、選び方どうしの差や効率で比べてください。値は試行の平均です。",
+      })
+    );
+    const constraintTable = renderConstraintSummaryTable(output);
+    if (constraintTable) {
+      children.push(ui.create("h2", { className: "subheading", text: "制約の満たし具合" }));
+      children.push(constraintTable);
+      children.push(ui.create("p", { className: "hint", text: "満たした回数は試行の数のうちいくつで満たしたか、ずれは何個のShotを別の区画へ移せば満たせるかの目安です。手動プランは制約を強制しないので、外れることがあります。" }));
+    }
     const drawTable = renderDrawTable(output, variants, view);
     if (drawTable) {
       children.push(ui.create("h2", { className: "subheading", text: "試行ごとのばらつき（試行ごとのWafer平均）" }));

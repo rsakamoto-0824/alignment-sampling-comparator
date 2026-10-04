@@ -124,11 +124,13 @@
       scan: {
         classCount: 2,
         labels: ["Up", "Down"],
+        shortLabels: ["Up", "Down"],
         classOf: (item) => (item.scan === C.SCAN_UP ? 0 : 1),
       },
       quadrant: {
         classCount: 4,
         labels: QUADRANT_LABELS,
+        shortLabels: ["第1", "第2", "第3", "第4"],
         classOf: (item) => quadrantOf(item.x, item.y),
       },
       zone: {
@@ -138,6 +140,7 @@
           `中間（${zones.innerRadiusMm}〜${zones.outerRadiusMm} mm）`,
           `外側（r ≧ ${zones.outerRadiusMm} mm）`,
         ],
+        shortLabels: ["内側", "中間", "外側"],
         classOf: (item) => zoneOf(Math.hypot(item.x, item.y), zones.innerRadiusMm, zones.outerRadiusMm),
       },
     };
@@ -160,6 +163,7 @@
         label: C.CONSTRAINT_LABELS[key],
         classCount: definition.classCount,
         classLabels: definition.labels,
+        classShortLabels: definition.shortLabels,
         classOf,
         available,
         allocation: setting.allocation,
@@ -373,17 +377,21 @@
       const targets = targetsFor(constraint, total);
       const classes = constraint.classLabels.map((label, c) => ({
         label,
+        shortLabel: constraint.classShortLabels[c],
         count: counts[c],
         floor: targets.floor[c],
         ceil: targets.ceil[c],
         ok: counts[c] >= targets.floor[c] && counts[c] <= targets.ceil[c],
       }));
+      // ずれ: 目標の幅から外れた数の合計の半分（切り上げ）。何個のShotを別の区画へ移せば満たせるかの目安
+      const shift = Math.ceil(violationOf(counts, targets) / 2);
       return {
         key: constraint.key,
         label: constraint.label,
         hard: constraint.hard,
         priority: constraint.priority,
         ok: classes.every((entry) => entry.ok),
+        shift,
         classes,
       };
     });
@@ -391,7 +399,7 @@
     let centerRow = null;
     if (center.enabled) {
       const included = measuredMarks.includes(center.markIndex);
-      centerRow = { key: "center", label: C.CONSTRAINT_LABELS.center, hard: center.active, priority: center.priority, ok: included };
+      centerRow = { key: "center", label: C.CONSTRAINT_LABELS.center, hard: center.active, priority: center.priority, ok: included, shift: included ? 0 : 1 };
     }
     return { rows, center: centerRow };
   }

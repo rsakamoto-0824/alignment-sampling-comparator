@@ -211,8 +211,9 @@
           shotCount: selection.items.length,
           markCount: selection.markIndices.length,
           minSpacingMm: ASC.sampling.minimumShotSpacing(state.context, selection.items),
-          kappaX: selection.markIndices.length > 0 ? ASC.sampling.kappaOf(state.map, selection.markIndices, terms.termsX) : NaN,
-          kappaY: selection.markIndices.length > 0 ? ASC.sampling.kappaOf(state.map, selection.markIndices, terms.termsY) : NaN,
+          criteria: ASC.evaluator.criteriaOf(state.map, selection.markIndices, terms),
+          // 効率は、いまのマップで出した評価結果の中で最も良いものを100%にする（結果がなければ値だけ）
+          reference: outputMatchesMap() ? state.output.criteriaReference : null,
         },
         context: state.context,
         relaxedKeys: new Set(),
@@ -226,7 +227,13 @@
       shots: new Set(set.shotIndices),
       marks: new Set(set.markIndices),
       status: set.status,
-      stats: { shotCount: set.shotIndices.length, markCount: set.markIndices.length, minSpacingMm: set.minSpacingMm, kappaX: set.kappaX, kappaY: set.kappaY },
+      stats: {
+        shotCount: set.shotIndices.length,
+        markCount: set.markIndices.length,
+        minSpacingMm: set.minSpacingMm,
+        criteria: set.criteria,
+        reference: state.output.criteriaReference,
+      },
       context: state.output.context,
       relaxedKeys: new Set(state.output.relaxed.map((entry) => entry.key)),
     };

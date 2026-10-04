@@ -486,6 +486,8 @@
       sets,
       baselines: { uncorrected, allMarks: allMarks.results },
       variants,
+      criteriaReference: criteriaReference(sets),
+      criteriaSameTerms: settings.model.termsX.join(",") === settings.model.termsY.join(","),
       methods: methods.filter((method) => sets.some((set) => set.method === method.key)),
       estimationKeys: estimationKeysOf(settings.model),
       summary: summarizeResults(sets, variants, estimationKeysOf(settings.model), methods),
@@ -613,7 +615,40 @@
     };
   }
 
-  /** 選んだ点の情報（Shot数・Mark数・最小間隔・κ・制約の状況）をまとめる。 */
+  /** X・YのD基準・I基準。項が同じなら同じ計算を使い回す。 */
+  function criteriaOf(map, markIndices, modelSettings) {
+    const x = ASC.sampling.designCriteria(map, markIndices, modelSettings.termsX);
+    const sameTerms = modelSettings.termsX.join(",") === modelSettings.termsY.join(",");
+    return { x, y: sameTerms ? x : ASC.sampling.designCriteria(map, markIndices, modelSettings.termsY), sameTerms };
+  }
+
+  /**
+   * 効率の基準: 全部の選び方・試行の中で、D基準が最大のものとI基準が最小のもの（軸ごと）。
+   * D最適・I最適を評価していれば、ふつうはそれぞれが100%になる。
+   */
+  function criteriaReference(sets) {
+    const reference = {};
+    for (const axis of AXES) {
+      let bestLogDet = null;
+      let bestTrace = null;
+      for (const set of sets) {
+        const criteria = set.criteria[axis];
+        if (criteria.singular) {
+          continue;
+        }
+        if (!bestLogDet || criteria.logDet > bestLogDet.logDet) {
+          bestLogDet = criteria;
+        }
+        if (!bestTrace || criteria.trace < bestTrace.trace) {
+          bestTrace = criteria;
+        }
+      }
+      reference[axis] = bestLogDet ? { logDet: bestLogDet.logDet, trace: bestTrace.trace } : null;
+    }
+    return reference;
+  }
+
+  /** 選んだ点の情報（Shot数・Mark数・最小間隔・D/I基準・制約の状況）をまとめる。 */
   function describeSet(context, settings, entry, selection) {
     const map = context.map;
     const markIndices = Array.from(new Set(selection.markIndices)).sort((a, b) => a - b);
@@ -628,8 +663,13 @@
       shotIndices: selection.items.map((item) => context.items[item].shotIndex),
       markIndices,
       minSpacingMm: ASC.sampling.minimumShotSpacing(context, selection.items),
-      kappaX: ASC.sampling.kappaOf(map, markIndices, settings.model.termsX),
-      kappaY: ASC.sampling.kappaOf(map, markIndices, settings.model.termsY),
+      criteria: criteriaOf(map, markIndices, settings.model),
+      get kappaX() {
+        return this.criteria.x.kappa;
+      },
+      get kappaY() {
+        return this.criteria.y.kappa;
+      },
       status: ASC.constraints.describeStatus(context, selection.items, markIndices),
       warnings,
       results: null,
@@ -677,6 +717,14 @@
         }
         summary[method.key].estimation[key] = summarizeStores(methodSets.map((set) => set.estimation[key]));
       }
+      for (const axis of AXES) {
+        summary[method.key][`criteria${axis.toUpperCase()}`] = {
+          logDet: M.summarize(methodSets.map((set) => set.criteria[axis].logDet)),
+          trace: M.summarize(methodSets.map((set) => set.criteria[axis].trace)),
+          singularCount: methodSets.filter((set) => set.criteria[axis].singular).length,
+        };
+      }
+      summary[method.key].constraints = summarizeConstraints(methodSets);
       summary[method.key].kappaX = M.summarize(methodSets.map((set) => set.kappaX));
       summary[method.key].kappaY = M.summarize(methodSets.map((set) => set.kappaY));
       summary[method.key].minSpacingMm = M.summarize(methodSets.map((set) => set.minSpacingMm));
@@ -687,6 +735,23 @@
       ).length;
     }
     return summary;
+  }
+
+  /** 制約ごとに、満たした試行の数とずれの平均・最大をまとめる。 */
+  function summarizeConstraints(methodSets) {
+    const rows = methodSets[0].status.rows.concat(methodSets[0].status.center ? [methodSets[0].status.center] : []);
+    return rows.map((first) => {
+      const entries = methodSets.map((set) => (first.key === "center" ? set.status.center : set.status.rows.find((row) => row.key === first.key)));
+      return {
+        key: first.key,
+        label: first.label,
+        hard: first.hard,
+        satisfied: entries.filter((entry) => entry.ok).length,
+        total: entries.length,
+        meanShift: M.mean(entries.map((entry) => entry.shift)),
+        maxShift: Math.max(...entries.map((entry) => entry.shift)),
+      };
+    });
   }
 
   /** 試行ごとの指標の箱をまとめて集計する（全試行・全Waferの分布と、試行ごとの平均の分布）。 */
@@ -742,5 +807,7 @@
     sweepShotCounts,
     summarizeStore,
     estimationLabel,
+    criteriaOf,
+    criteriaReference,
   };
 })(typeof window !== "undefined" ? window : globalThis);
