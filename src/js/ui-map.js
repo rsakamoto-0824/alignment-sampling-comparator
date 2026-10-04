@@ -257,25 +257,76 @@
     list.replaceChildren(...items.map(([icon, text]) => ui.create("li", null, [icon, ui.create("span", { text })])));
   }
 
-  /** 選んだ点の数・間隔・κ。 */
+  /** log det を常用対数にした値（D基準の表示用）。 */
+  function log10Det(logDet) {
+    return logDet / Math.LN10;
+  }
+
+  /**
+   * D基準・I基準の行。criteria は { x, y, sameTerms }、reference は効率の基準（{ x, y }、なければ null）。
+   * XとYで多項式の項が同じなら1つにまとめて書く。
+   */
+  function criteriaRows(criteria, reference) {
+    if (!criteria) {
+      return [];
+    }
+    const axes = criteria.sameTerms ? [["", "x"]] : [["X ", "x"], ["Y ", "y"]];
+    const dText = axes
+      .map(([prefix, axis]) => {
+        const entry = criteria[axis];
+        if (entry.singular) {
+          return `${prefix}計算できない（${entry.reason === "tooFew" ? `点が${entry.n}個で、多項式の${entry.p}項より少ない` : "点が一部の行・列に集まっていて、多項式が決まらない"}）`;
+        }
+        const efficiency = reference && reference[axis] ? ASC.sampling.efficiencies(entry, reference[axis]).d : NaN;
+        return `${prefix}${ui.formatNumber(log10Det(entry.logDet), 2)}${Number.isFinite(efficiency) ? `（効率 ${ui.formatNumber(efficiency, 0)}%）` : ""}`;
+      })
+      .join("・");
+    const iText = axes
+      .map(([prefix, axis]) => {
+        const entry = criteria[axis];
+        if (entry.singular) {
+          return `${prefix}計算できない`;
+        }
+        const efficiency = reference && reference[axis] ? ASC.sampling.efficiencies(entry, reference[axis]).i : NaN;
+        return `${prefix}${ui.formatNumber(entry.trace, 3)}（κ ${ui.formatNumber(entry.kappa, 2)}${Number.isFinite(efficiency) ? `、効率 ${ui.formatNumber(efficiency, 0)}%` : ""}）`;
+      })
+      .join("・");
+    return [
+      ["D基準 log₁₀det(XᵀX)", dText],
+      ["I基準 予測分散の平均÷σ²", iText],
+    ];
+  }
+
+  /** 選んだ点の数・間隔・D基準・I基準。 */
   function renderStats(element, stats) {
     const rows = [
       ["Shot数", `${stats.shotCount}個`],
       ["Mark数", `${stats.markCount}個`],
       ["Shot中心の最小間隔", Number.isFinite(stats.minSpacingMm) ? `${ui.formatNumber(stats.minSpacingMm, 1)} mm` : "—"],
-      ["κ（X）", ui.formatNumber(stats.kappaX, 3)],
-      ["κ（Y）", ui.formatNumber(stats.kappaY, 3)],
-    ];
+    ].concat(criteriaRows(stats.criteria, stats.reference));
     element.replaceChildren(...rows.flatMap(([term, value]) => [ui.create("dt", { text: term }), ui.create("dd", { text: value })]));
   }
 
-  /** 制約の満たし具合の表。判定は記号と文字で示す。 */
+  /** 区画ごとの数と目標を「Up 12 / Down 8（目標 10 / 10）」の形にする。 */
+  function classCountText(row) {
+    const counts = row.classes.map((entry) => `${entry.shortLabel} ${entry.count}`).join(" / ");
+    const targets = row.classes.map((entry) => (entry.floor === entry.ceil ? `${entry.floor}` : `${entry.floor}〜${entry.ceil}`)).join(" / ");
+    return `${counts}（目標 ${targets}）`;
+  }
+
+  /**
+   * 制約の満たし具合の表（制約ごとに1行）。判定は記号と文字で示し、外れたときは何個のShotを移せば満たせるか（ずれ）を書く。
+   */
   function renderConstraintStatus(container, status, relaxedKeys) {
     if (!status) {
       container.replaceChildren(ui.create("p", { className: "hint", text: "設定に誤りがあるため判定できません。" }));
       return;
     }
-    const verdict = (ok) => ui.create("span", { className: ok ? "status-ok" : "status-ng", text: ok ? "✓ 満たす" : "✕ 外れ" });
+    container.replaceChildren(constraintTable(status, relaxedKeys || new Set()));
+  }
+
+  function constraintTable(status, relaxedKeys) {
+    const verdict = (ok, text) => ui.create("span", { className: ok ? "status-ok" : "status-ng", text: `${ok ? "✓" : "✕"} ${text}` });
     const kindText = (row) => {
       if (row.key === "center") {
         return row.hard ? "ハード" : "ソフトに切替";
@@ -286,46 +337,31 @@
     if (status.center) {
       body.append(
         ui.create("tr", null, [
-          ui.create("td", { text: `${status.center.label}（${kindText(status.center)}）` }),
+          ui.create("th", { scope: "row", text: `${status.center.label}（${kindText(status.center)}）` }),
           ui.create("td", { text: "中心に最も近いMark" }),
-          ui.create("td", { className: "number", text: status.center.ok ? "測る" : "測らない" }),
-          ui.create("td", { className: "number", text: "測る" }),
-          ui.create("td", null, verdict(status.center.ok)),
+          ui.create("td", null, verdict(status.center.ok, status.center.ok ? "測る" : "測らない")),
         ])
       );
     }
     for (const row of status.rows) {
-      row.classes.forEach((entry, index) => {
-        const target = entry.floor === entry.ceil ? `${entry.floor}` : `${entry.floor}〜${entry.ceil}`;
-        body.append(
-          ui.create("tr", null, [
-            ui.create("td", { text: index === 0 ? `${row.label}（${kindText(row)}）` : "" }),
-            ui.create("td", { text: entry.label }),
-            ui.create("td", { className: "number", text: String(entry.count) }),
-            ui.create("td", { className: "number", text: target }),
-            ui.create("td", null, verdict(entry.ok)),
-          ])
-        );
-      });
+      body.append(
+        ui.create("tr", null, [
+          ui.create("th", { scope: "row", text: `${row.label}（${kindText(row)}）` }),
+          ui.create("td", { text: classCountText(row) }),
+          ui.create("td", null, verdict(row.ok, row.ok ? "満たす" : `${row.shift}個ずれ`)),
+        ])
+      );
     }
     if (body.children.length === 0) {
-      container.replaceChildren(ui.create("p", { className: "hint", text: "オンにした制約はありません。" }));
-      return;
+      return ui.create("p", { className: "hint", text: "オンにした制約はありません。" });
     }
-    const table = ui.create("table", null, [
-      ui.create("thead", null,
-        ui.create("tr", null, [
-          ui.create("th", { text: "制約" }),
-          ui.create("th", { text: "区画" }),
-          ui.create("th", { className: "number", text: "数" }),
-          ui.create("th", { className: "number", text: "目標" }),
-          ui.create("th", { text: "判定" }),
-        ])
-      ),
-      body,
-    ]);
-    container.replaceChildren(ui.create("div", { className: "table-scroll" }, table));
+    return ui.create("div", { className: "table-scroll" },
+      ui.create("table", { className: "constraint-table" }, [
+        ui.create("thead", null, ui.create("tr", null, [ui.create("th", { text: "制約" }), ui.create("th", { text: "区画ごとの数（目標）" }), ui.create("th", { text: "判定" })])),
+        body,
+      ])
+    );
   }
 
-  ASC.mapView = { render, renderLegend, renderStats, renderConstraintStatus };
+  ASC.mapView = { render, renderLegend, renderStats, renderConstraintStatus, constraintTable, criteriaRows, log10Det };
 })(typeof window !== "undefined" ? window : globalThis);

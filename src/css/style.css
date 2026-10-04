@@ -821,7 +821,7 @@ th.number {
 
 .maps-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: var(--space-4);
 }
 
@@ -982,10 +982,31 @@ th.number {
   vertical-align: bottom;
 }
 
-.heat-table th[scope="row"] {
+/* 行の見出し（scope="row"）は列の見出しのように上に固定しない */
+th[scope="row"] {
   position: static;
   background: var(--surface-1);
   text-align: left;
+}
+
+.constraint-table td,
+.constraint-table th[scope="row"] {
+  white-space: normal;
+}
+
+.constraint-table th[scope="row"] {
+  min-width: 7.5em;
+}
+
+/* 判定（✓ 満たす / ✕ 2個ずれ）は1行で読めるようにする */
+.constraint-table td:last-child {
+  white-space: nowrap;
+}
+
+/* 選び方ごとのカードの中の表は、小さめの文字で幅に収める */
+.map-card .constraint-table,
+.map-card .stat-list {
+  font-size: var(--font-size-small);
 }
 
 .heat-cell {

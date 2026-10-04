@@ -54,6 +54,28 @@
     return steps;
   }
 
+  /** 全試行での制約の満たし具合（満たした試行の数と、ずれの平均）。 */
+  function constraintSummaryTable(constraints) {
+    const rows = constraints.map((entry) =>
+      ui.create("tr", null, [
+        ui.create("th", { scope: "row", text: entry.label }),
+        ui.create("td", null,
+          ui.create("span", {
+            className: entry.satisfied === entry.total ? "status-ok" : "status-ng",
+            text: `${entry.satisfied === entry.total ? "✓" : "✕"} ${entry.satisfied} / ${entry.total}回で満たす`,
+          })
+        ),
+        ui.create("td", { className: "number", text: `${ui.formatNumber(entry.meanShift, 1)}個` }),
+      ])
+    );
+    return ui.create("div", { className: "table-scroll" },
+      ui.create("table", { className: "constraint-table" }, [
+        ui.create("thead", null, ui.create("tr", null, [ui.create("th", { text: "制約" }), ui.create("th", { text: "全試行での判定" }), ui.create("th", { className: "number", text: "平均のずれ" })])),
+        ui.create("tbody", null, rows),
+      ])
+    );
+  }
+
   function statList(rows) {
     return ui.create("dl", { className: "stat-list" }, rows.flatMap(([term, value]) => [ui.create("dt", { text: term }), ui.create("dd", { text: value })]));
   }
@@ -115,6 +137,7 @@
         });
         card.append(frame);
         card.append(statList([["試行の数", `${sets.length}回`], ["選ばれたShotの種類", `${new Set(sets.flatMap((set) => set.shotIndices)).size}個`]]));
+        card.append(constraintSummaryTable(output.summary[method.key].constraints));
       } else {
         const entry = choice === "single" ? { set: sets[0], index: 0 } : rankedDraws(sets, rankingVariant.key)[choice];
         const set = entry.set;
@@ -133,14 +156,17 @@
         card.append(frame);
         const result = set.results[rankingVariant.key];
         card.append(
-          statList([
-            ["試行", sets.length > 1 ? `${entry.index + 1}回目` : "—"],
-            ["Shot数・Mark数", `${set.shotIndices.length}個・${set.markIndices.length}個`],
-            ["κ（X・Y）", `${ui.formatNumber(set.kappaX)}・${ui.formatNumber(set.kappaY)}`],
-            ["Shot中心の最小間隔", `${ui.formatNumber(set.minSpacingMm, 1)} mm`],
-            [`残差RMS（${rankingVariant.label}）`, `X ${ui.formatNumber(ASC.math.summarize(result.x.rms).mean)}・Y ${ui.formatNumber(ASC.math.summarize(result.y.rms).mean)} nm`],
-          ])
+          statList(
+            [
+              ["試行", sets.length > 1 ? `${entry.index + 1}回目` : "—"],
+              ["Shot数・Mark数", `${set.shotIndices.length}個・${set.markIndices.length}個`],
+              ["Shot中心の最小間隔", `${ui.formatNumber(set.minSpacingMm, 1)} mm`],
+            ]
+              .concat(ASC.mapView.criteriaRows(set.criteria, output.criteriaReference))
+              .concat([[`残差RMS（${rankingVariant.label}）`, `X ${ui.formatNumber(ASC.math.summarize(result.x.rms).mean)}・Y ${ui.formatNumber(ASC.math.summarize(result.y.rms).mean)} nm`]])
+          )
         );
+        card.append(ASC.mapView.constraintTable(set.status, new Set(output.relaxed.map((relaxedEntry) => relaxedEntry.key))));
         card.append(
           ui.create("button", {
             type: "button",
@@ -156,7 +182,7 @@
     const children = [
       ui.create("p", {
         className: "hint",
-        text: `ランダム・ポアソンの「良い・悪い」は、${rankingVariant.label}の残差RMS（XとYの平均）で決めています。記号は「マップと選択点」のタブと同じです（塗りつぶしたShotが選んだShot、黒い点が測るMark、赤い輪が中心の1点）。`,
+        text: `ランダム・ポアソンの「良い・悪い」は、${rankingVariant.label}の残差RMS（XとYの平均）で決めています。記号は「マップと選択点」のタブと同じです（塗りつぶしたShotが選んだShot、濃い点が測るMark、赤い輪が中心の1点）。D基準 log₁₀det(XᵀX) は大きいほど、I基準（予測分散の平均÷σ²）は小さいほど良く、効率はこの評価の中で最も良い選び方を100%にした値です。制約の「ずれ」は、何個のShotを別の区画へ移せば満たせるかの目安です。`,
       }),
     ];
     if (usesFrequency) {

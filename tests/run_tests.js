@@ -778,6 +778,53 @@ async function main() {
     assert(store.plans.length === ASC.constants.MAX_MANUAL_PLANS, "プランの上限が効いていません");
   });
 
+  await test("D基準・I基準: D最適はlog detが最大、I最適は予測分散が最小。効率は基準を100%とし、点が項数より少なければ計算できない扱い", () => {
+    const map = defaultMap();
+    const { context, settings } = contextFor(map);
+    const terms = settings.model.termsX;
+    const random = ASC.math.createRandom(41);
+    const dSelection = ASC.sampling.selectOptimal(context, random, "D", [terms, terms], 2);
+    const iSelection = ASC.sampling.selectOptimal(context, random, "I", [terms, terms], 2);
+    const randomSelection = ASC.sampling.selectRandom(context, random);
+    const d = ASC.sampling.designCriteria(map, dSelection.markIndices, terms);
+    const i = ASC.sampling.designCriteria(map, iSelection.markIndices, terms);
+    const r = ASC.sampling.designCriteria(map, randomSelection.markIndices, terms);
+    assert(d.logDet > r.logDet && i.trace < r.trace, "D最適・I最適の基準がランダムより良くありません");
+    assertClose(r.kappa, ASC.sampling.kappaOf(map, randomSelection.markIndices, terms), 1e-12, "κ と I基準の関係");
+    const reference = { logDet: d.logDet, trace: i.trace };
+    assertClose(ASC.sampling.efficiencies(d, reference).d, 100, 1e-9, "D最適のD効率");
+    assertClose(ASC.sampling.efficiencies(i, reference).i, 100, 1e-9, "I最適のI効率");
+    assert(ASC.sampling.efficiencies(r, reference).d < 100, "ランダムのD効率が100%未満になりません");
+    const tooFew = ASC.sampling.designCriteria(map, randomSelection.markIndices.slice(0, 10), terms);
+    assert(tooFew.singular && tooFew.logDet === -Infinity && ASC.sampling.efficiencies(tooFew, reference).d === 0, "点が項数より少ないときの扱いが違います");
+  });
+
+  await test("制約の満たし具合: ずれ（移せば満たせるShot数）と、選び方ごとの満たした回数を出す", async () => {
+    const map = defaultMap();
+    const { context } = contextFor(map);
+    const upItems = context.items.map((item, index) => ({ item, index })).filter((entry) => entry.item.scan === "Up").map((entry) => entry.index);
+    const downItems = context.items.map((item, index) => ({ item, index })).filter((entry) => entry.item.scan === "Down").map((entry) => entry.index);
+    const chosen = upItems.slice(0, 12).concat(downItems.slice(0, 8));
+    const status = ASC.constraints.describeStatus(context, chosen, []);
+    const scan = status.rows.find((row) => row.key === "scan");
+    assert(!scan.ok && scan.shift === 2, `Up 12・Down 8 のずれが2ではありません（${scan.shift}）`);
+    assert(status.center && !status.center.ok && status.center.shift === 1, "中心の1点のずれが違います");
+    const settings = ASC.defaultSettings();
+    settings.evaluationData = defaultEvaluationSettings({ waferCount: 3 });
+    settings.sampling.draws = 3;
+    settings.sampling.optimalStarts = 1;
+    settings.model.flows = { howa: true, estimateThenHowa: false, howaPlusEstimate: false };
+    const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
+    const plan = { key: "manual:1", label: "偏り", shotIndices: chosen.map((index) => context.items[index].shotIndex), extraMarkIndices: [] };
+    const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [plan] }, () => {}, () => false);
+    const manualScan = output.summary["manual:1"].constraints.find((entry) => entry.key === "scan");
+    assert(manualScan.satisfied === 0 && manualScan.meanShift === 2, "手動プランの制約の集計が違います");
+    const randomScan = output.summary.random.constraints.find((entry) => entry.key === "scan");
+    assert(randomScan.satisfied === 3 && randomScan.total === 3, "ランダム（ハード制約）の満たした回数が違います");
+    assert(output.criteriaReference.x && Number.isFinite(output.criteriaReference.x.logDet), "効率の基準がありません");
+    assert(output.summary.dOptimal.criteriaX.logDet.mean >= output.summary.random.criteriaX.logDet.max - 1e-9, "D最適のlog detがランダムの最大以上になりません");
+  });
+
   // ---- 結果の表示 ----
   let failed = 0;
   for (const result of results) {

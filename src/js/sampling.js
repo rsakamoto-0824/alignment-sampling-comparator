@@ -12,6 +12,9 @@
   const M = ASC.math;
   const K = ASC.constraints;
 
+  // コレスキー因子の対角の比がこれより小さければ、多項式が決まらない（ほぼ特異）とみなす
+  const SINGULAR_DIAGONAL_RATIO = 1e-7;
+
   // ---- 共通: 制約を満たす無作為な選択 ------------------------------------
 
   /** ソフト制約の強さを、ランダム系の「選ばれにくさ」に直した係数。 */
@@ -715,17 +718,26 @@
   }
 
   /**
-   * κ（予測誤差の倍率）= √(全Markで平均した予測分散 / σ²) = √tr(M⁻¹W)。
-   * HOWAのみで補正したとき、計測ノイズ σ が全Markの補正量にどれだけ乗るかの目安。
+   * 選んだ点のD基準とI基準（HOWAの多項式に対して）。
+   *   logDet: log det(XᵀX)。D最適が最大にする値（大きいほど係数の推定精度が良い）
+   *   trace:  全Markで平均した予測分散 ÷ σ² = tr((XᵀX)⁻¹ W)、W = 全Markで平均した xxᵀ。I最適が最小にする値
+   *   kappa:  √trace（予測誤差の倍率）
+   * XᵀX が正則でないときは singular を true にし、logDet = −∞、trace = ∞ とする。
+   * reason は "tooFew"（点が項数より少ない）か "degenerate"（点の並びが偏っていて多項式が決まらない）。
    */
-  function kappaOf(map, markIndices, terms) {
+  function designCriteria(map, markIndices, terms) {
     const marks = map.marks;
     const p = terms.length;
+    const result = { p, n: markIndices.length, logDet: -Infinity, trace: Infinity, kappa: Infinity, singular: true, reason: "tooFew" };
+    if (markIndices.length < p) {
+      return result;
+    }
+    result.reason = "degenerate";
     const sampleDesign = ASC.correction.polynomialDesign(marks, markIndices, terms);
     const information = M.gram(sampleDesign, markIndices.length, p);
     const lower = M.cholesky(information, p);
-    if (!lower || markIndices.length < p) {
-      return Infinity;
+    if (!lower || nearlySingular(lower, p)) {
+      return result;
     }
     const inverse = M.choleskySolve(lower, p, M.identity(p), p);
     const allIndices = Array.from({ length: marks.length }, (_, i) => i);
@@ -737,7 +749,46 @@
         trace += inverse[i * p + j] * weight[j * p + i];
       }
     }
-    return Math.sqrt(trace / marks.length);
+    trace /= marks.length;
+    result.logDet = M.logDetFromCholesky(lower, p);
+    result.trace = trace;
+    result.kappa = Math.sqrt(trace);
+    result.singular = false;
+    result.reason = null;
+    return result;
+  }
+
+  /** コレスキー因子の対角の比が極端（ほぼ特異）か。HOWAの最小二乗で警告を出す基準と同じ。 */
+  function nearlySingular(lower, size) {
+    let minimum = Infinity;
+    let maximum = 0;
+    for (let i = 0; i < size; i++) {
+      minimum = Math.min(minimum, lower[i * size + i]);
+      maximum = Math.max(maximum, lower[i * size + i]);
+    }
+    return minimum / maximum < SINGULAR_DIAGONAL_RATIO;
+  }
+
+  /**
+   * κ（予測誤差の倍率）= √(全Markで平均した予測分散 / σ²) = √tr(M⁻¹W)。
+   * HOWAのみで補正したとき、計測ノイズ σ が全Markの補正量にどれだけ乗るかの目安。
+   */
+  function kappaOf(map, markIndices, terms) {
+    return designCriteria(map, markIndices, terms).kappa;
+  }
+
+  /**
+   * D効率とI効率（%）。基準（reference）の選び方を100%として比べる。
+   *   D効率 = 100 × (det / det_基準)^(1/p)、I効率 = 100 × trace_基準 / trace
+   */
+  function efficiencies(criteria, reference) {
+    if (!reference || criteria.singular) {
+      return { d: criteria.singular ? 0 : NaN, i: criteria.singular ? 0 : NaN };
+    }
+    return {
+      d: 100 * Math.exp((criteria.logDet - reference.logDet) / criteria.p),
+      i: (100 * reference.trace) / criteria.trace,
+    };
   }
 
   ASC.sampling = {
@@ -749,6 +800,8 @@
     manualSelection,
     minimumShotSpacing,
     kappaOf,
+    designCriteria,
+    efficiencies,
     buildModels,
     prepareExchange,
     swapChange,
