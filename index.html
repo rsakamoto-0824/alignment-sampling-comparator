@@ -357,6 +357,7 @@
       <main>
         <div class="tab-list" role="tablist" aria-label="表示の切り替え">
           <button type="button" class="tab" role="tab" id="tab-map" aria-controls="panel-map" aria-selected="true">マップと選択点</button>
+          <button type="button" class="tab" role="tab" id="tab-data" aria-controls="panel-data" aria-selected="false" tabindex="-1">評価データ</button>
           <button type="button" class="tab" role="tab" id="tab-results" aria-controls="panel-results" aria-selected="false" tabindex="-1">評価結果</button>
           <button type="button" class="tab" role="tab" id="tab-maps" aria-controls="panel-maps" aria-selected="false" tabindex="-1">選び方ごとのマップ</button>
           <button type="button" class="tab" role="tab" id="tab-sweep" aria-controls="panel-sweep" aria-selected="false" tabindex="-1">計測点数のスイープ</button>
@@ -414,6 +415,10 @@
               <div id="constraint-status"></div>
             </div>
           </div>
+        </section>
+
+        <section class="tab-panel" role="tabpanel" id="panel-data" aria-labelledby="tab-data" hidden>
+          <div id="data-content"></div>
         </section>
 
         <section class="tab-panel" role="tabpanel" id="panel-results" aria-labelledby="tab-results" hidden>
@@ -571,6 +576,7 @@
     <script src="src/js/ui-results.js"></script>
     <script src="src/js/ui-sampling-maps.js"></script>
     <script src="src/js/ui-sweep.js"></script>
+    <script src="src/js/ui-data.js"></script>
     <script src="src/js/app.js"></script>
   </body>
 </html>
