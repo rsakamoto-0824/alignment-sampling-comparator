@@ -26,6 +26,9 @@
     iOptimal: { color: "var(--method-i)", shape: "diamond" },
   };
   const ESTIMATOR_SHAPES = { howa: "circle", rbfXY: "square", rbfXYR: "triangle", gpXY: "diamond", gpXYR: "triangleDown" };
+  // 手動プランは計測Shot数が決まっているので、線ではなく点（文字色の × や ＋）で重ねる
+  const MANUAL_SHAPES = ["cross", "plus"];
+  const MANUAL_COLOR = "var(--ink-1)";
 
   // 折れ線グラフの寸法（SVGの単位）
   const WIDTH = 880;
@@ -39,15 +42,25 @@
     return entry ? entry.all[stat === "p95" ? "p95" : "mean"] : NaN;
   }
 
+  /** スイープの選び方（線になる自動の選び方 → 点になる手動プラン）。 */
+  function allMethods(sweep) {
+    return sweep.methods.concat(sweep.manual ? sweep.manual.methods : []);
+  }
+
+  function methodLabelOf(sweep, key) {
+    const method = allMethods(sweep).find((entry) => entry.key === key);
+    return method ? method.label : key;
+  }
+
   /** 表示の選択を、結果にある選択肢に合わせて直す。 */
   function normalizeView(sweep, view) {
-    const methodKeys = C.METHODS.filter((method) => sweep.points.some((point) => point.summary && point.summary[method.key])).map((method) => method.key);
+    const methodKeys = allMethods(sweep).map((method) => method.key);
     const variantKeys = sweep.variants.map((variant) => variant.key);
     const flowTypes = C.FLOW_TYPES.filter((flow) => flow.key !== "howa" && sweep.variants.some((variant) => variant.flowType === flow.key)).map((flow) => flow.key);
     return {
       mode: MODES[view.mode] ? view.mode : "methods",
       variant: variantKeys.includes(view.variant) ? view.variant : variantKeys[0],
-      method: methodKeys.includes(view.method) ? view.method : methodKeys[methodKeys.length - 1],
+      method: methodKeys.includes(view.method) ? view.method : sweep.methods[sweep.methods.length - 1].key,
       flowType: flowTypes.includes(view.flowType) ? view.flowType : flowTypes[0] || "howa",
       metric: view.metric || "rms",
       axis: view.axis || "x",
@@ -59,26 +72,47 @@
     };
   }
 
-  /** グラフに描く系列（線）。 */
+  /**
+   * 選び方1つぶんの点の並び。自動の選び方はスイープの各点、手動プランは1点だけ。
+   * pick(summary) で、その点の値（集計）を取り出す。
+   */
+  function methodPoints(sweep, methodKey, pick) {
+    if (sweep.manual && sweep.manual.summary[methodKey]) {
+      const summary = sweep.manual.summary[methodKey];
+      return [{ x: sweep.manual.markCounts[methodKey], shotCount: sweep.manual.shotCounts[methodKey], y: pick(summary) }];
+    }
+    return sweep.points
+      .filter((point) => point.summary)
+      .map((point) => ({
+        x: point.markCounts[methodKey],
+        shotCount: point.shotCount,
+        y: point.summary[methodKey] ? pick(point.summary[methodKey]) : NaN,
+      }));
+  }
+
+  /** グラフに描く系列（線、手動プランは点）。 */
   function buildSeries(sweep, view) {
-    const points = sweep.points.filter((point) => point.summary);
     const series = [];
-    const xOf = (point, methodKey) => point.markCounts[methodKey];
     if (view.mode === "methods") {
-      for (const methodKey of view.methodKeys) {
-        const style = METHOD_STYLES[methodKey];
+      sweep.methods.forEach((method) => {
+        const style = METHOD_STYLES[method.key];
         series.push({
-          key: methodKey,
-          label: C.METHODS.find((method) => method.key === methodKey).label,
+          key: method.key,
+          label: method.label,
           color: style.color,
           shape: style.shape,
-          points: points.map((point) => ({
-            x: xOf(point, methodKey),
-            shotCount: point.shotCount,
-            y: point.summary[methodKey] ? statOf(point.summary[methodKey].variants[view.variant][view.axis][view.metric], view.stat) : NaN,
-          })),
+          points: methodPoints(sweep, method.key, (summary) => statOf(summary.variants[view.variant][view.axis][view.metric], view.stat)),
         });
-      }
+      });
+      (sweep.manual ? sweep.manual.methods : []).forEach((method, index) => {
+        series.push({
+          key: method.key,
+          label: `${method.label}（手動）`,
+          color: MANUAL_COLOR,
+          shape: MANUAL_SHAPES[index % MANUAL_SHAPES.length],
+          points: methodPoints(sweep, method.key, (summary) => statOf(summary.variants[view.variant][view.axis][view.metric], view.stat)),
+        });
+      });
     } else if (view.mode === "corrections") {
       const variants = sweep.variants.filter((variant) => variant.flowType === "howa" || variant.flowType === view.flowType);
       for (const variant of variants) {
@@ -88,11 +122,7 @@
           label: variant.label,
           color: ASC.resultsView.SERIES_COLORS[estimatorKey],
           shape: ESTIMATOR_SHAPES[estimatorKey],
-          points: points.map((point) => ({
-            x: xOf(point, view.method),
-            shotCount: point.shotCount,
-            y: point.summary[view.method] ? statOf(point.summary[view.method].variants[variant.key][view.axis][view.metric], view.stat) : NaN,
-          })),
+          points: methodPoints(sweep, view.method, (summary) => statOf(summary.variants[variant.key][view.axis][view.metric], view.stat)),
         });
       }
     } else {
@@ -102,14 +132,7 @@
           label: ASC.evaluator.estimationLabel(key),
           color: ASC.resultsView.SERIES_COLORS[key],
           shape: ESTIMATOR_SHAPES[key],
-          points: points.map((point) => {
-            const summary = point.summary[view.method];
-            return {
-              x: xOf(point, view.method),
-              shotCount: point.shotCount,
-              y: summary && summary.estimation[key] ? statOf(summary.estimation[key][view.axis][view.metric], view.stat) : NaN,
-            };
-          }),
+          points: methodPoints(sweep, view.method, (summary) => (summary.estimation[key] ? statOf(summary.estimation[key][view.axis][view.metric], view.stat) : NaN)),
         });
       }
     }
@@ -163,7 +186,12 @@
   function marker(shape, x, y, color) {
     const r = MARKER_RADIUS;
     const common = { fill: color, stroke: "var(--surface-1)", "stroke-width": 2 };
+    const stroked = { fill: "none", stroke: color, "stroke-width": 2.5, "stroke-linecap": "round" };
     switch (shape) {
+      case "cross":
+        return ui.createSvg("path", Object.assign({ d: `M ${x - r - 1} ${y - r - 1} L ${x + r + 1} ${y + r + 1} M ${x - r - 1} ${y + r + 1} L ${x + r + 1} ${y - r - 1}` }, stroked));
+      case "plus":
+        return ui.createSvg("path", Object.assign({ d: `M ${x - r - 2} ${y} L ${x + r + 2} ${y} M ${x} ${y - r - 2} L ${x} ${y + r + 2}` }, stroked));
       case "square":
         return ui.createSvg("rect", Object.assign({ x: x - r, y: y - r, width: 2 * r, height: 2 * r }, common));
       case "triangle":
@@ -231,6 +259,11 @@
         svg.append(marker(entry.shape, xOf(point.x), yOf(point.y), entry.color));
       }
       const last = valid[valid.length - 1];
+      if (valid.length === 1) {
+        // 1点だけの系列（手動プラン）は、線の端の名前欄ではなく点のすぐ横に名前を書く
+        svg.append(ui.createSvg("text", { className: "chart-row-label chart-point-label", x: xOf(last.x) + MARKER_RADIUS + 6, y: yOf(last.y), "dominant-baseline": "central", text: entry.label }));
+        continue;
+      }
       endLabels.push({ entry, x: xOf(last.x), y: yOf(last.y) });
     }
     // 線の端に名前を書く。重なるときは少しずらし、引き出し線でつなぐ
@@ -350,6 +383,21 @@
     );
   }
 
+  /** 手動プランの表（プランごとに1行）。 */
+  function manualTable(series) {
+    const headers = ["手動プラン", "計測Shot数", "計測Mark数", "値"];
+    const rows = series.map((entry) => {
+      const point = entry.points[0];
+      return [entry.label, String(Math.round(point.shotCount)), String(Math.round(point.x)), formatValue(point.y)];
+    });
+    return ui.create("div", { className: "table-scroll" },
+      ui.create("table", null, [
+        ui.create("thead", null, ui.create("tr", null, headers.map((header, index) => ui.create("th", { className: index > 0 ? "number" : null, text: header })))),
+        ui.create("tbody", null, rows.map((cells) => ui.create("tr", null, cells.map((cell, index) => ui.create("td", { className: index > 0 ? "number" : null, text: cell }))))),
+      ])
+    );
+  }
+
   /** 目標の精度に届く最小の計測Mark数。 */
   function targetTable(series, target) {
     const rows = series.map((entry) => {
@@ -399,7 +447,7 @@
         select(
           "sweep-method",
           "選び方",
-          view.methodKeys.map((key) => [key, C.METHODS.find((method) => method.key === key).label]),
+          view.methodKeys.map((key) => [key, methodLabelOf(sweep, key) + (sweep.manual && sweep.manual.summary[key] ? "（手動プラン）" : "")]),
           view.method,
           (value) => handlers.onViewChange({ method: value }, "sweep-method")
         )
@@ -452,7 +500,15 @@
       })
     );
     children.push(ui.create("h3", { className: "subheading", text: "数値の表（単位 nm）" }));
-    children.push(dataTable(series));
+    // 選び方を比べるときは、手動プラン（点）を線の表と分けて書く（計測Shot数がスイープの刻みと合わないため）
+    const isManual = (entry) => entry.key.startsWith(C.MANUAL_PREFIX);
+    const lineSeries = view.mode === "methods" ? series.filter((entry) => !isManual(entry)) : series;
+    children.push(dataTable(lineSeries));
+    const manualSeries = view.mode === "methods" ? series.filter(isManual) : [];
+    if (manualSeries.length > 0) {
+      children.push(ui.create("h3", { className: "subheading", text: "手動プラン（単位 nm）" }));
+      children.push(manualTable(manualSeries));
+    }
     if (Number.isFinite(view.target)) {
       children.push(ui.create("h3", { className: "subheading", text: "目標に届く計測Mark数" }));
       children.push(targetTable(series, view.target));
@@ -473,12 +529,23 @@
     const lines = [["ShotCount", "MarkCount", "Method", "Kind", "Name", "Axis", "Metric", "Mean", "Median", "P5", "P95", "Max"].join(",")];
     const push = (point, methodKey, kind, name, axis, metric, stats) => {
       lines.push(
-        [point.shotCount, point.markCounts[methodKey], C.METHODS.find((method) => method.key === methodKey).label, kind, name, axis.toUpperCase(), ASC.resultsView.METRIC_LABELS[metric], stats.mean, stats.median, stats.p5, stats.p95, stats.max]
+        [point.shotCount, point.markCounts[methodKey], methodLabelOf(sweep, methodKey), kind, name, axis.toUpperCase(), ASC.resultsView.METRIC_LABELS[metric], stats.mean, stats.median, stats.p5, stats.p95, stats.max]
           .map(ui.csvCell)
           .join(",")
       );
     };
-    for (const point of sweep.points.filter((entry) => entry.summary)) {
+    const allPoints = sweep.points.filter((entry) => entry.summary);
+    if (sweep.manual) {
+      // 手動プランは、そのプランの計測Shot数・Mark数の点として書く
+      for (const method of sweep.manual.methods) {
+        allPoints.push({
+          shotCount: sweep.manual.shotCounts[method.key],
+          markCounts: { [method.key]: sweep.manual.markCounts[method.key] },
+          summary: { [method.key]: sweep.manual.summary[method.key] },
+        });
+      }
+    }
+    for (const point of allPoints) {
       for (const [methodKey, summary] of Object.entries(point.summary)) {
         for (const axis of ASC.evaluator.AXES) {
           for (const metric of ASC.evaluator.METRIC_KEYS) {

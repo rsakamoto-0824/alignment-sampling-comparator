@@ -281,6 +281,7 @@
               <legend>比べる選び方</legend>
               <div id="method-choices"></div>
             </fieldset>
+            <p class="hint">人が選ぶ「手動プラン」は「マップと選択点」のタブで作り、プランごとに「評価で比べる」を選びます。</p>
             <div class="field-row">
               <div class="field">
                 <label for="draws">試行回数（ランダム・ポアソン）</label>
@@ -348,7 +349,7 @@
               <label for="settings-file">設定JSONを読み込む</label>
               <input type="file" id="settings-file" accept=".json,application/json" />
             </div>
-            <p class="hint">手動選択とCSVで読み込んだマップも一緒に保存します。</p>
+            <p class="hint">手動プランとCSVで読み込んだマップも一緒に保存します。</p>
           </div>
         </details>
       </aside>
@@ -372,11 +373,34 @@
               <label for="view-draw">試行</label>
               <select id="view-draw"></select>
             </div>
-            <button type="button" class="button-secondary" id="copy-to-manual-button" hidden>この選択を手動選択に写す</button>
+            <button type="button" class="button-secondary" id="copy-to-manual-button" hidden>この選択を新しい手動プランにする</button>
+            <button type="button" class="button-secondary" id="new-plan-button">新しい手動プラン</button>
           </div>
-          <div class="toolbar" id="manual-toolbar">
-            <label class="choice"><input type="checkbox" id="edit-manual" /> クリックで手動選択を編集する</label>
-            <button type="button" class="button-secondary button-small" id="clear-manual-button">手動選択を消す</button>
+          <div id="manual-panel" class="manual-panel">
+            <div class="toolbar">
+              <div class="field">
+                <label for="plan-name">プランの名前</label>
+                <input type="text" id="plan-name" maxlength="30" />
+                <p class="field-error" id="plan-name-error"></p>
+              </div>
+              <label class="choice"><input type="checkbox" id="plan-included" /> 評価で比べる</label>
+              <button type="button" class="button-secondary button-small" id="duplicate-plan-button">複製</button>
+              <button type="button" class="button-secondary button-small" id="delete-plan-button">このプランを削除</button>
+            </div>
+            <div class="toolbar">
+              <label class="choice"><input type="checkbox" id="edit-manual" /> マップのクリックでShotを選ぶ</label>
+              <button type="button" class="button-secondary button-small" id="clear-manual-button">選んだShotを全部外す</button>
+            </div>
+            <details class="shot-id-entry">
+              <summary>Shot番号で指定する（現行のサンプリングを取り込むとき）</summary>
+              <div class="field">
+                <label for="plan-shot-ids">Shot番号（カンマ・空白・改行で区切る。Excelの列を貼り付けても可）</label>
+                <textarea id="plan-shot-ids" rows="3"></textarea>
+                <p class="hint">「反映」を押すと、このプランのShotを入力した番号で置き換えます。Shot番号はマップのCSVの ShotId（生成したマップでは上の行から振った番号）です。</p>
+                <p class="field-error" id="plan-shot-ids-error"></p>
+              </div>
+              <button type="button" class="button-secondary button-small" id="apply-shot-ids-button">反映</button>
+            </details>
           </div>
           <p class="hint" id="map-hint"></p>
           <div class="map-layout">
@@ -405,7 +429,7 @@
         </section>
 
         <section class="tab-panel" role="tabpanel" id="panel-sweep" aria-labelledby="tab-sweep" hidden>
-          <p class="hint">計測Shot数を変えながら評価し、計測Mark数（計測コスト）と精度のトレードオフを見ます。マップ・評価データ・補正モデル・制約は左の設定を使います。手動選択は対象外です。「k個以上」のときは、Shotあたりの総Mark数の比を保ちます。</p>
+          <p class="hint">計測Shot数を変えながら評価し、計測Mark数（計測コスト）と精度のトレードオフを見ます。マップ・評価データ・補正モデル・制約は左の設定を使います。「評価で比べる」にした手動プランは、そのプランのMark数の位置に点（× や ＋）で重ねます。「k個以上」のときは、Shotあたりの総Mark数の比を保ちます。</p>
           <div class="toolbar">
             <div class="field">
               <label for="sweep-start">計測Shot数 開始</label>
@@ -444,7 +468,7 @@
             <li>「2. 評価データ」でZernike項の大きさ、計測ノイズ、Scan方向のずれを決める</li>
             <li>「3. 補正モデル」でHOWAの多項式の項、比べる補正の流れ、推定手法を選ぶ</li>
             <li>「4. サンプリング」と「5. 条件制約」で、計測Shot数・必ず測るMark・制約を決める</li>
-            <li>必要なら「マップと選択点」で手動選択を作る（Shotをクリック）</li>
+            <li>現行のサンプリングなど、人が選んだ点と比べたいときは「マップと選択点」で手動プランを作る（Shotをクリック、またはShot番号を貼り付け）</li>
             <li>「評価を実行」を押し、「評価結果」で選び方と補正を比べ、「選び方ごとのマップ」で選ばれた点を見比べる</li>
             <li>計測点の数を決めたいときは「計測点数のスイープ」で、計測Mark数と精度のトレードオフを見る</li>
           </ol>
@@ -454,7 +478,7 @@
             <li><strong>ポアソンディスク</strong>: Shot中心の最小間隔ができるだけ広くなるように、無作為に選びます。</li>
             <li><strong>D最適</strong>: 多項式の係数の推定精度（情報行列の行列式）が最も良くなるように、Shotを入れ替えて探します。</li>
             <li><strong>I最適</strong>: 全Markで平均した予測誤差が最も小さくなるように探します。</li>
-            <li><strong>手動</strong>: マップ上で選んだShot（と追加Mark）です。</li>
+            <li><strong>手動プラン</strong>: 人が選んだShot（と追加Mark）です。名前を付けて10個まで作れ、D最適などと同列に比べられます。「マップと選択点」でマップをクリックするか、Shot番号を貼り付けて作ります。評価で選ばれた点を写して手直しすることもできます。スイープでは、プランのMark数の位置に × や ＋ の点で重ねます。</li>
           </ul>
           <h2>補正の流れ</h2>
           <p>違いは、<strong>最後に掛ける補正量が「多項式だけ」か「多項式＋取り残し」か</strong>です。</p>
@@ -537,6 +561,7 @@
     <script src="src/js/constraints.js"></script>
     <script src="src/js/sampling.js"></script>
     <script src="src/js/evaluator.js"></script>
+    <script src="src/js/manual-plans.js"></script>
     <script src="src/js/ui-common.js"></script>
     <script src="src/js/ui-settings.js"></script>
     <script src="src/js/ui-map.js"></script>

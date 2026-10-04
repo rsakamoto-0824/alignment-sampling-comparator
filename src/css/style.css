@@ -585,6 +585,42 @@ th.number {
   min-width: 180px;
 }
 
+/* ---- 手動プラン ---- */
+
+.manual-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  margin-bottom: var(--space-3);
+  background: var(--surface-2);
+}
+
+.manual-panel .toolbar {
+  margin-bottom: var(--space-3);
+}
+
+.shot-id-entry summary {
+  cursor: pointer;
+  min-height: var(--touch-target);
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+}
+
+.shot-id-entry textarea {
+  width: 100%;
+  font: inherit;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--ink-1);
+}
+
+.shot-id-entry {
+  margin-bottom: var(--space-2);
+}
+
 /* ---- マップ ---- */
 
 .map-layout {
@@ -928,6 +964,15 @@ th.number {
 .chart-row-label {
   fill: var(--ink-2);
   font-size: 13px;
+}
+
+/* 線の上に重なる点の名前は、背景色の縁取りで読みやすくする */
+.chart-point-label {
+  fill: var(--ink-1);
+  paint-order: stroke;
+  stroke: var(--surface-1);
+  stroke-width: 4px;
+  stroke-linejoin: round;
 }
 
 /* 補正の名前は長いので、一覧表の見出しは折り返して列の幅を抑える */
