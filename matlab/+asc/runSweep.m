@@ -1,7 +1,8 @@
 function sweep = runSweep(waferMap, data, settings, sweepSettings, manualPlans, progress)
 %RUNSWEEP 計測Shot数を変えながら評価する（計測コストと精度のトレードオフ）。
-%   sweepSettings: startShots, endShots, stepShots, draws（省略時は settings.sweep）
-%   「k個以上」のときは、Shotあたりの総Mark数の比を保つ。手動プランは1回だけ評価して点として返す（sweep.manual）。
+%   sweepSettings: startShots, endShots, stepShots, draws, methods（省略時は settings.sweep）
+%   比べる選び方は sweepSettings.methods（なければ評価の選び方）。計測Mark数は選んだShotの有効なMarkの数の合計の
+%   試行平均（端のShotを選べば選び方ごとに少し違う）。手動プランは1回だけ評価して点として返す（sweep.manual）。
 %
 %   sweep.points(k): shotCount, methods, markCounts（methods ごとの平均Mark数）, summary（runEvaluation と同じ形）, errors
 %   sweep.manual:    手動プランの methods, summary, markCounts（なければ []）
@@ -10,19 +11,13 @@ if nargin < 4 || isempty(sweepSettings)
     sweepSettings = settings.sweep;
 end
 if nargin < 5 || isempty(manualPlans)
-    manualPlans = struct('key', {}, 'label', {}, 'shotIndices', {}, 'extraMarkIndices', {});
+    manualPlans = struct('key', {}, 'label', {}, 'shotIndices', {});
 end
 if nargin < 6
     progress = [];
 end
 context = asc.buildContext(waferMap, settings);
 values = sweepShotCounts(sweepSettings, numel(context.items));
-samplingSettings = settings.sampling;
-if strcmp(samplingSettings.markMode, 'exact')
-    perShot = context.markCountPerShot;
-else
-    perShot = samplingSettings.totalMarkCount / samplingSettings.shotCount;
-end
 plans = manualPlans(arrayfun(@(plan) ~isempty(plan.shotIndices), manualPlans));
 steps = numel(values) + double(~isempty(plans));
 points = cell(1, numel(values));
@@ -31,9 +26,10 @@ for index = 1:numel(values)
     shotCount = values(index);
     pointSettings = settings;
     pointSettings.sampling.shotCount = shotCount;
-    % 丸めはブラウザ版の Math.round と同じ（0.5 は大きい方へ）
-    pointSettings.sampling.totalMarkCount = max(shotCount * context.markCountPerShot, floor(shotCount * perShot + 0.5));
     pointSettings.sampling.draws = sweepSettings.draws;
+    if isfield(sweepSettings, 'methods') && ~isempty(sweepSettings.methods)
+        pointSettings.sampling.methods = sweepSettings.methods;
+    end
     report = [];
     if ~isempty(progress)
         report = @(done, total, label) progress(index - 1 + done / total, steps, sprintf('計測Shot数 %d: %s', shotCount, label));
@@ -45,12 +41,12 @@ for index = 1:numel(values)
             rethrow(err);
         end
         points{index} = struct('shotCount', shotCount, 'methods', [], 'markCounts', [], 'summary', [], 'relaxed', [], ...
-            'warnings', {{}}, 'errors', {{err.message}});
+            'failedMethods', {{}}, 'warnings', {{}}, 'errors', {{err.message}});
         continue
     end
     markCounts = arrayfun(@(entry) entry.markCount.mean, output.summary);
     points{index} = struct('shotCount', shotCount, 'methods', output.methods, 'markCounts', markCounts, 'summary', output.summary, ...
-        'relaxed', output.relaxed, 'warnings', {unique([output.sets.warnings], 'stable')}, 'errors', {{}});
+        'relaxed', output.relaxed, 'failedMethods', {output.failedMethods}, 'warnings', {unique([output.sets.warnings], 'stable')}, 'errors', {{}});
     last = output;
 end
 points = [points{:}];

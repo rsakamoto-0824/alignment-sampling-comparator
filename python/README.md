@@ -28,7 +28,7 @@ Windows では `.venv\Scripts\pip install -e ".[notebook]"` です。
 .venv/bin/jupyter lab notebooks/alignment_sampling_evaluation.ipynb
 ```
 
-上から順に実行すると、評価 → 表 → 図 → 計測点数のスイープ → CSV保存 まで進みます。CSVは `notebooks/output/`（Gitの管理外）に保存されます。
+上から順に実行すると、計画の作成（制約付きD・I最適）→ 評価 → 表 → 図 → 計測点数のスイープ → CSV保存 まで進みます。CSVは `notebooks/output/`（Gitの管理外）に保存されます。
 
 ### スクリプトで使う
 
@@ -40,8 +40,15 @@ wafer_map = asc.generate_wafer_map(settings["map"])
 data = asc.generate_evaluation_data(wafer_map, settings["evaluationData"])
 plan = asc.plan_from_shot_ids("現行", ["11", "13", "20"], wafer_map)
 output = asc.run_evaluation(wafer_map, data, settings, [plan])
-print(output["summary"]["dOptimal"]["variants"]["howa"]["x"]["rms"]["all"]["mean"])
+print(output["summary"]["constrainedD"]["variants"]["howa"]["x"]["rms"]["all"]["mean"])
+
+# 制約付きD最適・I最適の点だけを作り（評価データは使わない）、座標をCSVにする
+settings["constraints"]["mandatoryShotIds"] = ["46", "47"]   # 強制計測Shot（Shot番号）
+design_plan = asc.run_plan(wafer_map, settings)
+csv_text = asc.selection_to_csv(wafer_map, design_plan["sets"][0]["markIndices"])
 ```
+
+選んだShotでは、そのShotの有効なMarkをすべて測ります。選び方のキーは `random`・`poisson`・`dOptimal`・`iOptimal`（制約なし）・`constrainedD`・`constrainedI`（制約付き）です。
 
 ブラウザ版の「設定をJSONで保存」で作ったファイルは、`asc.load_settings_file(path)` で読み込めます（CSVのマップ・手動プランも入ります）。
 
@@ -54,8 +61,10 @@ print(output["summary"]["dOptimal"]["variants"]["howa"]["x"]["rms"]["all"]["mean
 | `generate_evaluation_data(wafer_map, data_settings)` | Zernikeの乱数係数とノイズで評価データを作る |
 | `plan_from_shot_ids(name, shot_ids, wafer_map)` | Shot番号の一覧から手動プランを作る |
 | `run_evaluation(wafer_map, data, settings, manual_plans)` | 選び方 × 補正の評価（ブラウザ版と同じ形の辞書を返す） |
-| `run_sweep(wafer_map, data, settings, sweep_settings, manual_plans)` | 計測Shot数を変えた評価（トレードオフカーブ） |
-| `load_settings_file(path)` | ブラウザ版で保存した設定JSONを読む |
+| `run_plan(wafer_map, settings)` | 制約付きD最適・I最適の点だけを選ぶ（アプリの「計画を作成」と同じ。評価データは使わない） |
+| `run_sweep(wafer_map, data, settings, sweep_settings, manual_plans)` | 計測Shot数を変えた評価（トレードオフカーブ。比べる選び方は `sweep_settings["methods"]`） |
+| `selection_to_csv(wafer_map, mark_indices)` | 選択点の座標のCSV（ShotId, ShotX, ShotY, ScanDir, MarkNo, MarkX, MarkY, WaferX, WaferY） |
+| `load_settings_file(path)` | ブラウザ版で保存した設定JSONを読む（版3。版1・2も読み、以前のD最適・I最適は制約付きとして読む） |
 | `plots.*` | 選んだ点のマップ・箱ひげ図・トレードオフカーブ・推定誤差マップ |
 
 ## テスト（ブラウザ版との照合）

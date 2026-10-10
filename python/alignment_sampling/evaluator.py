@@ -121,7 +121,7 @@ def evaluate_sample_set(wafer_map, data, model_settings, sample_indices, variant
                 if variant["estimator"] is None:
                     operators[variant["key"]] = parts["howa"]
                 elif prepared.get(variant["estimator"]["key"]) and prepared[variant["estimator"]["key"]]["type"] == "linear":
-                    operators[variant["key"]] = correction.linear_flow_operator(parts, prepared[variant["estimator"]["key"]]["operator"], sample, variant["flowType"])
+                    operators[variant["key"]] = correction.estimate_then_howa_operator(parts, prepared[variant["estimator"]["key"]]["operator"], sample)
             howa_cache[key] = (parts, operators)
         parts, operators = howa_cache[key]
         truth = (data["truthX"] if axis == "x" else data["truthY"]).T
@@ -160,15 +160,11 @@ def evaluate_sample_set(wafer_map, data, model_settings, sample_indices, variant
                 if entry is None:
                     results[variant["key"]][axis] = {metric: np.full(data["waferCount"], np.nan) for metric in METRIC_KEYS}
                     continue
-                if variant["flowType"] == "estimateThenHowa":
-                    values, lengths, ratios = raw_gp[variant["estimator"]["key"]]
-                    filled = values.copy()
-                    filled[sample] = measured
-                    correction_values = parts["allDesign"] @ (parts["allLeastSquares"] @ filled)
-                else:
-                    leftover = measured - parts["fitted"] @ measured
-                    values, lengths, ratios = correction.gp_predict(entry["gp"], leftover)
-                    correction_values = howa_correction + values
+                # 推定→HOWA: 未計測Markを推定値で埋め、全Markに多項式を当てはめる（GPの学習は推定精度と同じ結果を使う）
+                values, lengths, ratios = raw_gp[variant["estimator"]["key"]]
+                filled = values.copy()
+                filled[sample] = measured
+                correction_values = parts["allDesign"] @ (parts["allLeastSquares"] @ filled)
                 finite = np.isfinite(lengths)
                 gp_choices[variant["key"]]["lengthMm"].extend((lengths[finite] * C.NORMALIZATION_RADIUS_MM).tolist())
                 gp_choices[variant["key"]]["noiseRatio"].extend(ratios[finite].tolist())
@@ -196,7 +192,7 @@ def _describe_set(context, model_settings, entry, selection):
     mark_indices = sorted(set(selection["markIndices"]))
     warnings = []
     if selection.get("notEligible"):
-        warnings.append(f"手動プランの、必ず測るMarkが有効範囲外のShot {len(selection['notEligible'])}個は、評価から外しました。")
+        warnings.append(f"手動プランの、選べないShot（除外Shot・Markが揃わない端のShot）{len(selection['notEligible'])}個は、評価から外しました。")
     return {
         "method": entry["method"],
         "draw": entry["draw"],
@@ -221,11 +217,10 @@ def _summarize_stores(stores):
 
 
 def _summarize_constraints(method_sets):
-    first = method_sets[0]["status"]
-    rows = first["rows"] + ([first["center"]] if first["center"] else [])
+    rows = K.status_rows(method_sets[0]["status"])
     summary = []
     for row in rows:
-        entries = [(entry["status"]["center"] if row["key"] == "center" else next(r for r in entry["status"]["rows"] if r["key"] == row["key"])) for entry in method_sets]
+        entries = [next(r for r in K.status_rows(entry["status"]) if r["key"] == row["key"]) for entry in method_sets]
         summary.append({"key": row["key"], "label": row["label"], "hard": row["hard"], "satisfied": sum(e["ok"] for e in entries), "total": len(entries), "meanShift": float(np.mean([e["shift"] for e in entries])), "maxShift": max(e["shift"] for e in entries)})
     return summary
 
@@ -269,16 +264,40 @@ def summarize_store(store):
     return {axis: {metric: summarize(store[axis][metric]) for metric in METRIC_KEYS} for axis in AXES}
 
 
+def _method_random(seed, method_key, draw):
+    """選び方の乱数（選び方の並び順と試行の番号で決める。評価と「計画を作成」で同じ点を選ぶため共通にする）。"""
+    method_index = next(i for i, m in enumerate(C.METHODS) if m["key"] == method_key)
+    return Random(derive_seed(seed, STREAM_METHOD_BASE + method_index * 100000 + draw))
+
+
+def _select_by_method(method_key, context, free_context, settings, draw, term_sets):
+    """自動の選び方で1組の点を選ぶ。制約付きは context、制約なしは free_context を使う。選べなければ None。"""
+    method = next(m for m in C.METHODS if m["key"] == method_key)
+    random = _method_random(settings["sampling"]["seed"], method_key, draw)
+    if method_key == "random":
+        return sampling.select_random(context, random)
+    if method_key == "poisson":
+        return sampling.select_poisson(context, random)
+    target = context if method["constrained"] else free_context
+    return sampling.select_optimal(target, random, method["criterion"], term_sets, settings["sampling"]["optimalStarts"])
+
+
+def _prepare_context(wafer_map, settings):
+    """サンプリングの前提を作り、ハード制約を同時に満たせるか確かめる（評価と「計画を作成」で共通）。"""
+    context = K.build_context(wafer_map, settings)
+    relaxed = K.resolve_hard_constraints(context, settings["sampling"]["seed"], lambda ctx, random: sampling.find_feasible_state(ctx, random) is not None)
+    return context, K.unconstrained_context(context), relaxed
+
+
 def run_evaluation(wafer_map, data, settings, manual_plans=None, progress=None):
     """評価を実行する。
 
-    manual_plans: [{"key": "manual:1", "label": "現行", "shotIndices": [...], "extraMarkIndices": [...]}]
+    manual_plans: [{"key": "manual:1", "label": "現行", "shotIndices": [...]}]
     progress: progress(done, total, label) を呼ぶ関数（省略可）
     戻り値はブラウザ版と同じ形の辞書（sets・summary・methods・variants・baselines など）。
     """
-    context = K.build_context(wafer_map, settings)
+    context, free_context, relaxed = _prepare_context(wafer_map, settings)
     sampling_settings = settings["sampling"]
-    relaxed = K.resolve_hard_constraints(context, sampling_settings["seed"], lambda ctx, random: sampling.find_feasible_state(ctx, random) is not None)
     variants = correction.build_variants(settings["model"])
     cache = ModelCache(wafer_map)
     term_sets = [settings["model"]["termsX"], settings["model"]["termsY"]]
@@ -296,24 +315,19 @@ def run_evaluation(wafer_map, data, settings, manual_plans=None, progress=None):
     total_steps = len(plan_entries) * 2 + 2
     done = 0
 
-    sets = []
+    sets, failed_methods = [], []
     for entry in plan_entries:
-        method_index = next((i for i, m in enumerate(C.METHODS) if m["key"] == entry["method"]), -1)
-        random = Random(derive_seed(sampling_settings["seed"], STREAM_METHOD_BASE + method_index * 100000 + entry["draw"]))
-        if entry["method"] == "random":
-            selection = sampling.select_random(context, random)
-        elif entry["method"] == "poisson":
-            selection = sampling.select_poisson(context, random)
-        elif entry["method"] == "dOptimal":
-            selection = sampling.select_optimal(context, random, "D", term_sets, sampling_settings["optimalStarts"])
-        elif entry["method"] == "iOptimal":
-            selection = sampling.select_optimal(context, random, "I", term_sets, sampling_settings["optimalStarts"])
+        if "plan" in entry:
+            selection = sampling.manual_selection(context, entry["plan"]["shotIndices"])
         else:
-            selection = sampling.manual_selection(context, entry["plan"]["shotIndices"], entry["plan"]["extraMarkIndices"])
+            selection = _select_by_method(entry["method"], context, free_context, settings, entry["draw"], term_sets)
         done += 1
         if progress:
             progress(done, total_steps, "計測Markを選んでいます")
         if not selection or not selection["markIndices"]:
+            label = next(m["label"] for m in methods if m["key"] == entry["method"])
+            if label not in failed_methods:
+                failed_methods.append(label)
             continue
         sets.append(_describe_set(context, settings["model"], entry, selection))
 
@@ -334,6 +348,7 @@ def run_evaluation(wafer_map, data, settings, manual_plans=None, progress=None):
     return {
         "context": context,
         "relaxed": relaxed,
+        "failedMethods": failed_methods,
         "sets": sets,
         "variants": variants,
         "criteriaReference": criteria_reference(sets),
@@ -343,6 +358,35 @@ def run_evaluation(wafer_map, data, settings, manual_plans=None, progress=None):
         "summary": summarize_results(sets, variants, estimation_keys, methods),
         "baselines": {"uncorrected": uncorrected, "allMarks": all_marks["results"]},
         "waferCount": data["waferCount"],
+        "map": wafer_map,
+    }
+
+
+def run_plan(wafer_map, settings):
+    """制約付きD最適・I最適の「計画」だけを作る（評価データと補正は使わない）。
+
+    同じ設定なら、評価（run_evaluation）の制約付きD最適・I最適と同じ点を選ぶ。
+    戻り値: {"context", "relaxed", "failedMethods", "methods", "sets", "criteriaReference", "criteriaSameTerms"}
+    """
+    context, free_context, relaxed = _prepare_context(wafer_map, settings)
+    term_sets = [settings["model"]["termsX"], settings["model"]["termsY"]]
+    methods, sets, failed_methods = [], [], []
+    for key in C.PLAN_METHOD_KEYS:
+        method = next(m for m in C.METHODS if m["key"] == key)
+        selection = _select_by_method(key, context, free_context, settings, 0, term_sets)
+        if not selection or not selection["markIndices"]:
+            failed_methods.append(method["label"])
+            continue
+        methods.append({"key": key, "label": method["label"], "usesDraws": False, "manual": False})
+        sets.append(_describe_set(context, settings["model"], {"method": key, "draw": 0}, selection))
+    return {
+        "context": context,
+        "relaxed": relaxed,
+        "failedMethods": failed_methods,
+        "methods": methods,
+        "sets": sets,
+        "criteriaReference": criteria_reference(sets),
+        "criteriaSameTerms": list(settings["model"]["termsX"]) == list(settings["model"]["termsY"]),
         "map": wafer_map,
     }
 
@@ -360,23 +404,22 @@ def sweep_shot_counts(sweep_settings, eligible_count):
 def run_sweep(wafer_map, data, settings, sweep_settings=None, manual_plans=None, progress=None):
     """計測Shot数を変えながら評価する（計測コストと精度のトレードオフ）。
 
-    「k個以上」のときは、Shotあたりの総Mark数の比を保つ。手動プランは1回だけ評価して点として返す（manual）。
+    比べる選び方は sweep_settings["methods"]（なければ評価の選び方）。計測Mark数は選んだShotの有効なMarkの数の
+    合計の試行平均（端のShotを選べば選び方ごとに少し違う）。手動プランは1回だけ評価して点として返す（manual）。
     """
     import copy
 
     sweep_settings = sweep_settings or settings["sweep"]
     context = K.build_context(wafer_map, settings)
     values = sweep_shot_counts(sweep_settings, len(context["items"]))
-    sampling_settings = settings["sampling"]
-    per_shot = context["markCountPerShot"] if sampling_settings["markMode"] == "exact" else sampling_settings["totalMarkCount"] / sampling_settings["shotCount"]
     points, last = [], None
     steps = len(values) + (1 if manual_plans else 0)
     for index, shot_count in enumerate(values):
         point_settings = copy.deepcopy(settings)
         point_settings["sampling"]["shotCount"] = shot_count
-        # 丸めはブラウザ版の Math.round と同じ（0.5 は大きい方へ）
-        point_settings["sampling"]["totalMarkCount"] = max(shot_count * context["markCountPerShot"], math.floor(shot_count * per_shot + 0.5))
         point_settings["sampling"]["draws"] = sweep_settings["draws"]
+        if sweep_settings.get("methods"):
+            point_settings["sampling"]["methods"] = dict(sweep_settings["methods"])
         report = (lambda done, total, label, i=index, s=shot_count: progress(i + done / total, steps, f"計測Shot数 {s}: {label}")) if progress else None
         try:
             output = run_evaluation(wafer_map, data, point_settings, [], report)
@@ -389,6 +432,7 @@ def run_sweep(wafer_map, data, settings, sweep_settings=None, manual_plans=None,
                 "markCounts": {key: entry["markCount"]["mean"] for key, entry in output["summary"].items()},
                 "summary": output["summary"],
                 "relaxed": output["relaxed"],
+                "failedMethods": output["failedMethods"],
                 "warnings": list(dict.fromkeys(w for s in output["sets"] for w in s["warnings"])),
             }
         )

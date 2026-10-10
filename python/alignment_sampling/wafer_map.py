@@ -1,7 +1,8 @@
 """Waferマップ（Shot・Mark・Scan方向）の生成とCSVの読み書き。ブラウザ版（src/js/wafer-map.js）と同じ手順。
 
 マップは辞書で持つ。
-  shots: [{"id", "x", "y", "scan", "markIndices"}]  x, y はShot中心 [mm]
+  shots: [{"id", "x", "y", "scan", "markIndices", "definedMarkCount"}]  x, y はShot中心 [mm]
+    definedMarkCount はShotに定義したMarkの数（有効範囲外も含む）。markIndices の数より多ければ「Markが揃わない端のShot」
   marks: [{"shotIndex", "markNo", "x", "y", "u", "v"}]  x, y はWafer座標 [mm]、u, v は正規化座標
 marks には有効範囲（r < 有効半径）のMarkだけを入れる。
 """
@@ -13,6 +14,8 @@ import math
 from . import constants as C
 
 CSV_COLUMNS = ["ShotId", "ShotX", "ShotY", "ScanDir", "MarkNo", "MarkX", "MarkY"]
+# 選んだ点のCSV: マップのCSVの列に、Wafer座標（Shot中心＋Mark座標）を足す
+SELECTION_CSV_COLUMNS = CSV_COLUMNS + ["WaferX", "WaferY"]
 SCAN_ALIASES = {
     "up": C.SCAN_UP, "u": C.SCAN_UP, "上": C.SCAN_UP, "+1": C.SCAN_UP, "1": C.SCAN_UP,
     "down": C.SCAN_DOWN, "d": C.SCAN_DOWN, "下": C.SCAN_DOWN, "-1": C.SCAN_DOWN,
@@ -20,6 +23,7 @@ SCAN_ALIASES = {
 
 
 def _scan_from_pattern(pattern, column, row):
+    """格子の位置で決まる並べ方のScan方向（一筆書きは、マップを作ったあとで assign_serpentine_scan が決める）。"""
     if pattern == "column":
         return C.SCAN_UP if column % 2 == 0 else C.SCAN_DOWN
     if pattern == "row":
@@ -47,7 +51,7 @@ def build_map(shot_records, options):
             continue
         excluded_marks += len(record["marks"]) - len(valid)
         shot_index = len(shots)
-        shot = {"id": str(record["id"]), "x": record["x"], "y": record["y"], "scan": record["scan"], "markIndices": []}
+        shot = {"id": str(record["id"]), "x": record["x"], "y": record["y"], "scan": record["scan"], "markIndices": [], "definedMarkCount": len(record["marks"])}
         for mark in sorted(valid, key=lambda entry: entry["markNo"]):
             shot["markIndices"].append(len(marks))
             mark_numbers.add(mark["markNo"])
@@ -74,11 +78,40 @@ def build_map(shot_records, options):
     }
 
 
+def assign_serpentine_scan(shots, start, first_scan):
+    """一筆書き（露光順）のScan方向を付ける（ブラウザ版の assignSerpentineScan と同じ）。
+
+    開始の角の行から、行ごとに進む向きを反転しながらたどり、たどった順に first・その逆・first… と付ける。
+    shots は生成した順（上の行から下へ、各行は左から右へ）。マップにあるShotだけを道順に数える。
+    """
+    rows = []
+    for shot in shots:
+        if rows and rows[-1][0]["y"] == shot["y"]:
+            rows[-1].append(shot)
+        else:
+            rows.append([shot])
+    if start in ("bottomLeft", "bottomRight"):
+        rows.reverse()
+    first_left_to_right = start in ("topLeft", "bottomLeft")
+    other_scan = C.SCAN_DOWN if first_scan == C.SCAN_UP else C.SCAN_UP
+    order = 0
+    for row_index, row in enumerate(rows):
+        left_to_right = first_left_to_right if row_index % 2 == 0 else not first_left_to_right
+        for shot in row if left_to_right else list(reversed(row)):
+            shot["scan"] = first_scan if order % 2 == 0 else other_scan
+            order += 1
+
+
 def generate_wafer_map(settings):
     """設定からマップを生成する。Shotは上の行から下へ、各行は左から右へ番号を付ける。"""
     width, height = settings["shotWidthMm"], settings["shotHeightMm"]
     if not (width > 0 and height > 0):
         raise ValueError("Shotの幅と高さは0より大きい値にしてください。")
+    if settings["scanPattern"] == "serpentine":
+        if settings.get("serpentineStart") not in C.SERPENTINE_STARTS:
+            raise ValueError("一筆書きの開始の角を選んでください。")
+        if settings.get("serpentineFirstScan") not in (C.SCAN_UP, C.SCAN_DOWN):
+            raise ValueError("一筆書きの最初のScan方向は Up か Down にしてください。")
     reach = C.WAFER_RADIUS_MM + max(width, height)
     column_limit = math.ceil((reach + abs(settings["offsetXmm"])) / width)
     row_limit = math.ceil((reach + abs(settings["offsetYmm"])) / height)
@@ -96,6 +129,8 @@ def generate_wafer_map(settings):
             )
     wafer_map = build_map(records, settings)
     wafer_map["excludedShotCount"] = 0
+    if settings["scanPattern"] == "serpentine":
+        assign_serpentine_scan(wafer_map["shots"], settings["serpentineStart"], settings["serpentineFirstScan"])
     for index, shot in enumerate(wafer_map["shots"]):
         shot["id"] = str(index + 1)
     if not wafer_map["shots"]:
@@ -155,16 +190,37 @@ def parse_map_csv(text, options):
     return wafer_map
 
 
+def _round_for_csv(value):
+    """ブラウザ版の Math.round と同じ丸め（0.5 は大きい方へ。Python の round は偶数へ丸めるので使わない）。"""
+    return math.floor(value * 1e6 + 0.5) / 1e6
+
+
 def map_to_csv(wafer_map):
     """マップをCSV（1行1Mark）にする。読込と同じ列の並び。"""
     lines = [",".join(CSV_COLUMNS)]
     for shot in wafer_map["shots"]:
         for mark_index in shot["markIndices"]:
             mark = wafer_map["marks"][mark_index]
-            # ブラウザ版の Math.round と同じ丸め（0.5 は大きい方へ。Python の round は偶数へ丸めるので使わない）
-            local_x = math.floor((mark["x"] - shot["x"]) * 1e6 + 0.5) / 1e6
-            local_y = math.floor((mark["y"] - shot["y"]) * 1e6 + 0.5) / 1e6
+            local_x = _round_for_csv(mark["x"] - shot["x"])
+            local_y = _round_for_csv(mark["y"] - shot["y"])
             lines.append(",".join([shot["id"], _number_text(shot["x"]), _number_text(shot["y"]), shot["scan"], str(mark["markNo"]), _number_text(local_x), _number_text(local_y)]))
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _csv_text(value):
+    """カンマや引用符を含むShotIdは引用符で囲む。"""
+    text = str(value)
+    return '"' + text.replace('"', '""') + '"' if any(character in text for character in ',"\r\n') else text
+
+
+def selection_to_csv(wafer_map, mark_indices):
+    """選んだ点（測るMark）の座標をCSV（1行1Mark）にする。マップのCSVの列に Wafer座標（WaferX, WaferY）を足す。"""
+    lines = [",".join(SELECTION_CSV_COLUMNS)]
+    for mark_index in sorted(set(mark_indices)):
+        mark = wafer_map["marks"][mark_index]
+        shot = wafer_map["shots"][mark["shotIndex"]]
+        values = [_round_for_csv(mark["x"] - shot["x"]), _round_for_csv(mark["y"] - shot["y"]), _round_for_csv(mark["x"]), _round_for_csv(mark["y"])]
+        lines.append(",".join([_csv_text(shot["id"]), _number_text(shot["x"]), _number_text(shot["y"]), shot["scan"], str(mark["markNo"])] + [_number_text(value) for value in values]))
     return "\r\n".join(lines) + "\r\n"
 
 

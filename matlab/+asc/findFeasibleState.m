@@ -22,10 +22,9 @@ function state = randomFillAndRepair(context, random, C)
 % 無作為に埋めてから、入れ替えでハード制約の外れをなくす
 itemCount = numel(context.items);
 state = asc.SelectionState(context, context.shotCount);
-forced = 0;
-if context.center.active
-    forced = context.center.itemIndex;
-    state.add(forced);
+forced = asc.forcedItemsOf(context);
+for item = forced
+    state.add(item);
 end
 for item = random.shuffle(1:itemCount)
     if numel(state.List) >= context.shotCount
@@ -44,7 +43,7 @@ for iteration = 1:C.REPAIR_MAX_ITERATIONS
     swaps = zeros(0, 2);
     unselected = find(~state.Selected);
     for removed = state.List
-        if removed == forced
+        if ismember(removed, forced)
             continue
         end
         deltas = state.swapDeltaAll(removed, true);

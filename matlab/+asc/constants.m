@@ -16,6 +16,8 @@ C.NORMALIZATION_RADIUS_MM = 150;
 % ---- Scan方向 ----
 C.SCAN_UP = 'Up';
 C.SCAN_DOWN = 'Down';
+% 一筆書き（露光順）の開始の角。行ごとに蛇行し、1 Shot進むごとにUp/Downを交互にする
+C.SERPENTINE_STARTS = {'topLeft', 'topRight', 'bottomLeft', 'bottomRight'};
 
 % ---- Zernike ----
 C.MAX_FRINGE_INDEX = 36;
@@ -27,8 +29,8 @@ C.MAX_WAFER_COUNT = 5000;
 
 % ---- 補正の流れと推定手法 ----
 C.FLOW_TYPES = struct( ...
-    'key', {'howa', 'estimateThenHowa', 'howaPlusEstimate'}, ...
-    'label', {'HOWAのみ', '推定→HOWA', 'HOWA＋推定'});
+    'key', {'howa', 'estimateThenHowa'}, ...
+    'label', {'HOWAのみ', '推定→HOWA'});
 C.ESTIMATORS = struct( ...
     'key', {'rbfXY', 'rbfXYR', 'gpXY', 'gpXYR'}, ...
     'type', {'rbf', 'rbf', 'gp', 'gp'}, ...
@@ -45,17 +47,22 @@ C.GP_NOISE_RATIO_MAX = 10;
 C.GP_NOISE_RATIO_STEPS = 11;
 
 % ---- 選び方 ----
+% constrained: 条件制約を守って選ぶか。criterion: D最適・I最適の基準（ランダム・ポアソンは ''）。並び順は乱数列の番号にも使う
 C.METHODS = struct( ...
-    'key', {'random', 'poisson', 'dOptimal', 'iOptimal'}, ...
-    'label', {'ランダム', 'ポアソンディスク', 'D最適', 'I最適'}, ...
-    'usesDraws', {true, true, false, false});
+    'key', {'random', 'poisson', 'dOptimal', 'iOptimal', 'constrainedD', 'constrainedI'}, ...
+    'label', {'ランダム', 'ポアソンディスク', 'D最適（制約なし）', 'I最適（制約なし）', '制約付きD最適', '制約付きI最適'}, ...
+    'usesDraws', {true, true, false, false, false, false}, ...
+    'constrained', {true, true, false, false, true, true}, ...
+    'criterion', {'', '', 'D', 'I', 'D', 'I'});
+% 「計画を作成」で選ぶ方法（評価データを使わずに、選んだ点だけを出す）
+C.PLAN_METHOD_KEYS = {'constrainedD', 'constrainedI'};
 C.MANUAL_PREFIX = 'manual:';
 % 選び方の乱数列の番号（評価データとは別）
 C.STREAM_METHOD_BASE = 1000;
 
 % ---- 条件制約 ----
 C.CONSTRAINT_KEYS = {'center', 'scan', 'quadrant', 'zone'};
-C.CONSTRAINT_LABELS = struct('center', '中心の1点', 'scan', 'Scan方向', 'quadrant', '4象限', 'zone', '同心円の3領域');
+C.CONSTRAINT_LABELS = struct('center', '中心の1点', 'scan', 'Scan方向', 'quadrant', '4象限', 'zone', '同心円の3領域', 'mandatory', '強制計測Shot');
 C.ALLOCATION_PROPORTIONAL = 'proportional';
 % 優先度（1〜4）ごとのソフト制約の重み。優先度が1つ上がるごとに2倍にする
 C.PRIORITY_WEIGHTS = [8, 4, 2, 1];

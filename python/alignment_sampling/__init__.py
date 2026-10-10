@@ -12,10 +12,10 @@
 
 from .constants import default_settings
 from .evaluation_data import default_term_settings, generate_evaluation_data
-from .evaluator import estimation_label, run_evaluation, run_sweep, summarize, summarize_store
+from .evaluator import estimation_label, run_evaluation, run_plan, run_sweep, summarize, summarize_store
 from .sampling import design_criteria, efficiencies
 from .settings_io import copy_settings, load_settings_file, manual_plan_inputs, map_from_loaded, plan_from_shot_ids
-from .wafer_map import build_map_from_settings, generate_wafer_map, map_to_csv, parse_map_csv
+from .wafer_map import build_map_from_settings, generate_wafer_map, map_to_csv, parse_map_csv, selection_to_csv
 
 __all__ = [
     "build_map_from_settings",
@@ -34,7 +34,9 @@ __all__ = [
     "parse_map_csv",
     "plan_from_shot_ids",
     "run_evaluation",
+    "run_plan",
     "run_sweep",
+    "selection_to_csv",
     "summarize",
     "summarize_store",
 ]

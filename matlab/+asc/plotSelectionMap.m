@@ -1,10 +1,12 @@
-function ax = plotSelectionMap(waferMap, selectionSet, titleText, zones, ax)
-%PLOTSELECTIONMAP Waferマップに、選んだShot（塗り）・測るMark（濃い点）・Scan方向（▲▼）を描く。
+function ax = plotSelectionMap(waferMap, selectionSet, titleText, zones, ax, mandatoryShots)
+%PLOTSELECTIONMAP Waferマップに、選んだShot（塗り）・測るMark（濃い点）・Shot番号・Scan方向（▲▼）を描く。
 %   selectionSet は output.sets(s)（shotIndices, markIndices を持つ構造体）。zones を渡すと同心円の区切りも描く。
+%   mandatoryShots（Shotの番号。省略可）を渡すと、強制計測Shotを太い枠で示す。
 
 if nargin < 3, titleText = ''; end
 if nargin < 4, zones = []; end
 if nargin < 5 || isempty(ax), ax = gca; end
+if nargin < 6, mandatoryShots = []; end
 C = asc.constants();
 colors = asc.plotColors();
 hold(ax, 'on');
@@ -23,12 +25,18 @@ for shot = 1:numel(waferMap.shotIds)
     end
     rectangle(ax, 'Position', [waferMap.shotX(shot) - width / 2, waferMap.shotY(shot) - height / 2, width, height], ...
         'FaceColor', fill, 'EdgeColor', colors.shotEdge, 'LineWidth', 0.4);
+    if ismember(shot, mandatoryShots)
+        rectangle(ax, 'Position', [waferMap.shotX(shot) - width / 2 + 0.8, waferMap.shotY(shot) - height / 2 + 0.8, width - 1.6, height - 1.6], ...
+            'EdgeColor', [0, 0, 0], 'LineWidth', 1.4);
+    end
     if strcmp(waferMap.shotScan{shot}, C.SCAN_UP)
         arrow = '▲';
     else
         arrow = '▼';
     end
-    text(ax, waferMap.shotX(shot), waferMap.shotY(shot), arrow, 'HorizontalAlignment', 'center', 'FontSize', 5, 'Color', colors.guide);
+    % Shot番号はShot中心の上、Scan方向の記号は下に置く
+    text(ax, waferMap.shotX(shot), waferMap.shotY(shot) + 5.5, waferMap.shotIds{shot}, 'HorizontalAlignment', 'center', 'FontSize', 5);
+    text(ax, waferMap.shotX(shot), waferMap.shotY(shot) - 6.5, arrow, 'HorizontalAlignment', 'center', 'FontSize', 4, 'Color', colors.guide);
 end
 plot(ax, waferMap.markX(~measured), waferMap.markY(~measured), 'o', 'MarkerSize', 2, 'MarkerEdgeColor', colors.guide, 'MarkerFaceColor', 'w');
 plot(ax, waferMap.markX(measured), waferMap.markY(measured), 'o', 'MarkerSize', 3.5, 'MarkerEdgeColor', colors.measured, 'MarkerFaceColor', colors.measured);

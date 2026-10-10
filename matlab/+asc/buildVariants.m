@@ -1,5 +1,5 @@
 function variants = buildVariants(modelSettings)
-%BUILDVARIANTS 比べる補正の一覧（HOWAのみ ＋ 補正の流れ × 推定手法）。
+%BUILDVARIANTS 比べる補正の一覧（HOWAのみ ＋ 推定→HOWA × 推定手法）。
 %   key は 'howa' か '流れ:推定手法'（例 'estimateThenHowa:gpXYR'）。estimator は推定手法の情報（HOWAのみは []）。
 
 C = asc.constants();
@@ -15,13 +15,8 @@ for flow = C.FLOW_TYPES
         if ~isfield(modelSettings.estimators, estimator.key) || ~modelSettings.estimators.(estimator.key)
             continue
         end
-        if strcmp(flow.key, 'estimateThenHowa')
-            label = [estimator.label '→HOWA'];
-        else
-            label = ['HOWA＋' estimator.label];
-        end
         variants(end + 1) = struct('key', [flow.key ':' estimator.key], 'flowType', flow.key, ...
-            'estimator', estimator, 'label', label); %#ok<AGROW>
+            'estimator', estimator, 'label', [estimator.label '→HOWA']); %#ok<AGROW>
     end
 end
 end

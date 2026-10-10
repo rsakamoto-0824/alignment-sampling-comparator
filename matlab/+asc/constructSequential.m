@@ -1,13 +1,14 @@
 function state = constructSequential(context, random, minDistanceMm)
 %CONSTRUCTSEQUENTIAL 1つずつ無作為に加えて選ぶ。行き詰まったら []。
-%   候補の少ない区画を優先し、ハード制約を守れない候補と、選んだShotに minDistanceMm より近い候補は選ばない。
+%   必ず選ぶ候補（中心の1点・強制計測Shot）を先に入れ、候補の少ない区画を優先し、ハード制約を守れない候補と、
+%   選んだShotに minDistanceMm より近い候補は選ばない。
 
 C = asc.constants();
 state = asc.SelectionState(context, context.shotCount);
 positions = context.itemXY;
 nearest = Inf(size(positions, 1), 1);
-if context.center.active
-    addItem(context.center.itemIndex);
+for item = asc.forcedItemsOf(context)
+    addItem(item);
 end
 penaltyScale = context.softStrength * C.SOFT_PENALTY_SELECTION;
 while numel(state.List) < context.shotCount
@@ -41,6 +42,10 @@ while numel(state.List) < context.shotCount
         return
     end
     addItem(picked);
+end
+% 強制計測Shotだけで区画の上限を超えるときは、ハード制約を満たせていない
+if state.violation(true) ~= 0
+    state = [];
 end
 
     function addItem(item)

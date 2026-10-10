@@ -1,13 +1,12 @@
-function ax = plotResidualBoxes(output, flowType, axisName, metric, ax)
-%PLOTRESIDUALBOXES 選び方ごとに、HOWAのみ と選んだ流れの推定手法の残差を箱ひげ図で並べる（箱 25〜75%、ひげ 5〜95%）。
-%   flowType は 'estimateThenHowa' か 'howaPlusEstimate'。統計の追加機能は使わずに描く。
+function ax = plotResidualBoxes(output, axisName, metric, ax)
+%PLOTRESIDUALBOXES 選び方ごとに、HOWAのみ と推定→HOWA（推定手法ごと）の残差を箱ひげ図で並べる（箱 25〜75%、ひげ 5〜95%）。
+%   統計の追加機能は使わずに描く。
 
-if nargin < 2, flowType = 'estimateThenHowa'; end
-if nargin < 3, axisName = 'x'; end
-if nargin < 4, metric = 'rms'; end
-if nargin < 5 || isempty(ax), ax = gca; end
+if nargin < 2, axisName = 'x'; end
+if nargin < 3, metric = 'rms'; end
+if nargin < 4 || isempty(ax), ax = gca; end
 colors = asc.plotColors();
-chosen = find(arrayfun(@(v) any(strcmp(v.flowType, {'howa', flowType})), output.variants));
+chosen = 1:numel(output.variants);
 hold(ax, 'on');
 position = 0;
 ticks = [];

@@ -1,22 +1,25 @@
 function context = buildContext(waferMap, settings)
-%BUILDCONTEXT 候補・区画・中心の1点をまとめた「サンプリングの前提」。設定の誤りはエラーで知らせる。
-%   候補（item）: 選べるShot（必ず測るMarkがすべて有効範囲にあるShot）
+%BUILDCONTEXT 候補・区画・中心の1点・強制計測Shotをまとめた「サンプリングの前提」。設定の誤りはエラーで知らせる。
+%   候補（item）: 選べるShot（除外Shotと、設定によってはMarkが揃わない端のShotを除いたもの）。
+%                 選んだShotでは、そのShotの有効なMarkをすべて測る（items(k).marks）
 %   区画（class）: 制約ごとの分け方。制約は「選んだShotの数」で数え、区画はShot中心で判定する
+%   強制計測Shot: 必ず選ぶShot（常にハード。context.mandatoryItems）。中心の1点のShotとあわせて入れ替えの対象にしない
 %   番号（item・Mark・Shot・区画）はすべて1始まり。
 
 C = asc.constants();
 sampling = settings.sampling;
 zones = settings.zones;
+constraintSettings = settings.constraints;
 errors = {};
 if ~(zones.innerRadiusMm > 0 && zones.outerRadiusMm > zones.innerRadiusMm && zones.outerRadiusMm < waferMap.validRadiusMm)
     errors{end + 1} = sprintf('同心円の区切りは 0 < 内側 < 外側 < 有効半径（%g mm）にしてください。', waferMap.validRadiusMm);
 end
-if isempty(sampling.designatedMarkNos)
-    errors{end + 1} = '必ず測るMarkを1つ以上選んでください。';
+if ~(isscalar(sampling.shotCount) && sampling.shotCount >= 1 && sampling.shotCount == floor(sampling.shotCount))
+    errors{end + 1} = '計測Shot数は1以上の整数にしてください。';
 end
 priorities = [];
 for k = 1:numel(C.CONSTRAINT_KEYS)
-    setting = settings.constraints.(C.CONSTRAINT_KEYS{k});
+    setting = constraintSettings.(C.CONSTRAINT_KEYS{k});
     if setting.enabled
         priorities(end + 1) = setting.priority; %#ok<AGROW>
     end
@@ -26,52 +29,81 @@ if numel(unique(priorities)) ~= numel(priorities)
 end
 raiseIfAny(errors);
 
-designatedNos = unique(sampling.designatedMarkNos(:))';
-items = struct('shotIndex', {}, 'x', {}, 'y', {}, 'scan', {}, 'designatedMarks', {}, 'otherMarks', {});
+mandatoryIds = asc.shotIdList(fieldOr(constraintSettings, 'mandatoryShotIds', []));
+excludedIds = asc.shotIdList(fieldOr(constraintSettings, 'excludedShotIds', []));
+labels = {'強制計測Shot', '除外Shot'};
+idLists = {mandatoryIds, excludedIds};
+for k = 1:2
+    unknown = idLists{k}(~ismember(idLists{k}, waferMap.shotIds));
+    if ~isempty(unknown)
+        errors{end + 1} = sprintf('%sの番号 %s がマップにありません。', labels{k}, strjoin(unknown(1:min(8, end)), ', ')); %#ok<AGROW>
+    end
+end
+[~, excludedShots] = ismember(excludedIds, waferMap.shotIds);
+excludedShots = excludedShots(excludedShots > 0);
+incomplete = cellfun(@numel, waferMap.shotMarkIndices) < waferMap.shotDefinedMarkCount;
+
+items = struct('shotIndex', {}, 'x', {}, 'y', {}, 'scan', {}, 'marks', {});
+itemOfShot = zeros(numel(waferMap.shotIds), 1);
 for shot = 1:numel(waferMap.shotIds)
-    shotMarks = waferMap.shotMarkIndices{shot};
-    [present, location] = ismember(designatedNos, waferMap.markNo(shotMarks));
-    if ~all(present)
+    if ismember(shot, excludedShots) || (sampling.excludeIncompleteShots && incomplete(shot))
         continue
     end
-    designated = shotMarks(location);
-    others = shotMarks(~ismember(shotMarks, designated));
     items(end + 1) = struct('shotIndex', shot, 'x', waferMap.shotX(shot), 'y', waferMap.shotY(shot), ...
-        'scan', waferMap.shotScan{shot}, 'designatedMarks', designated, 'otherMarks', others); %#ok<AGROW>
+        'scan', waferMap.shotScan{shot}, 'marks', waferMap.shotMarkIndices{shot}); %#ok<AGROW>
+    itemOfShot(shot) = numel(items);
 end
 
-shotCount = sampling.shotCount;
-exact = strcmp(sampling.markMode, 'exact');
-perShot = numel(designatedNos);
-if exact
-    total = shotCount * perShot;
-else
-    total = sampling.totalMarkCount;
+mandatoryItems = zeros(1, 0);
+for k = 1:numel(mandatoryIds)
+    shot = find(strcmp(waferMap.shotIds, mandatoryIds{k}), 1);
+    if isempty(shot)
+        continue
+    end
+    if ismember(shot, excludedShots)
+        errors{end + 1} = sprintf('Shot %s が強制計測Shotと除外Shotの両方に入っています。', mandatoryIds{k}); %#ok<AGROW>
+    elseif itemOfShot(shot) == 0
+        errors{end + 1} = sprintf('強制計測Shot %s はMarkが揃わない端のShotなので選べません。', mandatoryIds{k}); %#ok<AGROW>
+    else
+        mandatoryItems(end + 1) = itemOfShot(shot); %#ok<AGROW>
+    end
 end
-extra = total - shotCount * perShot;
+mandatoryItems = sort(mandatoryItems);
+
+shotCount = sampling.shotCount;
 if isempty(items)
-    errors{end + 1} = '必ず測るMarkがすべて有効範囲にあるShotがありません。';
+    errors{end + 1} = '選べるShotがありません。除外Shotや有効半径を見直してください。';
 elseif shotCount > numel(items)
     errors{end + 1} = sprintf('計測Shot数（%d）が選べるShot数（%d）を超えています。', shotCount, numel(items));
 end
-if ~exact && extra < 0
-    errors{end + 1} = sprintf('総Mark数は「計測Shot数 × 必ず測るMarkの数」（%d）以上にしてください。', shotCount * perShot);
-end
 raiseIfAny(errors);
+
+center = buildCenter(waferMap, items, constraintSettings.center);
+forced = mandatoryItems;
+if center.active
+    forced = union(forced, center.itemIndex);
+end
+if numel(forced) > shotCount
+    error('asc:invalidSettings', '強制計測Shot（中心の1点のShotを含む）が%d個あり、計測Shot数（%d）を超えています。', numel(forced), shotCount);
+end
 
 context = struct();
 context.map = waferMap;
 context.items = items;
 context.itemXY = [[items.x]', [items.y]'];
-context.designatedNos = designatedNos;
-context.markCountPerShot = perShot;
 context.shotCount = shotCount;
-context.totalMarkCount = total;
-context.extraMarkCount = extra;
-context.exactMode = exact;
 context.constraints = buildBalanceConstraints(items, settings, C);
-context.center = buildCenter(waferMap, items, settings.constraints.center, extra > 0);
-context.softStrength = settings.constraints.softStrength;
+context.center = center;
+context.mandatoryItems = mandatoryItems;
+context.softStrength = constraintSettings.softStrength;
+end
+
+function value = fieldOr(entry, name, fallback)
+if isfield(entry, name)
+    value = entry.(name);
+else
+    value = fallback;
+end
 end
 
 function raiseIfAny(errors)
@@ -127,26 +159,21 @@ for key = {'scan', 'quadrant', 'zone'}
 end
 end
 
-function center = buildCenter(waferMap, items, setting, allowExtra)
-% 中心に最も近いMark（追加のMarkを測らないときは必ず測るMarkの中から）
+function center = buildCenter(waferMap, items, setting)
+% 中心に最も近いMark（選べるShotの全Markから探す）。そのMarkのShotを必ず選ぶ
 center = struct('enabled', logical(setting.enabled), 'active', logical(setting.enabled), 'hard', true, ...
-    'priority', setting.priority, 'itemIndex', 0, 'markIndex', 0, 'isDesignated', false);
+    'priority', setting.priority, 'itemIndex', 0, 'markIndex', 0);
 if ~setting.enabled
     return
 end
 bestDistance = Inf;
 for itemIndex = 1:numel(items)
-    candidates = items(itemIndex).designatedMarks;
-    if allowExtra
-        candidates = [candidates, items(itemIndex).otherMarks]; %#ok<AGROW>
-    end
-    for markIndex = candidates
+    for markIndex = items(itemIndex).marks
         distance = hypot(waferMap.markX(markIndex), waferMap.markY(markIndex));
         if distance < bestDistance
             bestDistance = distance;
             center.itemIndex = itemIndex;
             center.markIndex = markIndex;
-            center.isDesignated = ismember(markIndex, items(itemIndex).designatedMarks);
         end
     end
 end

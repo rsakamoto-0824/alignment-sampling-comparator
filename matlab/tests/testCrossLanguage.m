@@ -50,6 +50,18 @@ function testScenarioASweep(testCase)
 checkSweep(testCase, testCase.TestData.a);
 end
 
+function testScenarioAPlan(testCase)
+checkPlan(testCase, testCase.TestData.a);
+end
+
+function testScenarioBPlan(testCase)
+checkPlan(testCase, testCase.TestData.b);
+end
+
+function testScenarioCPlan(testCase)
+checkPlan(testCase, testCase.TestData.c);
+end
+
 function testScenarioBMapAndData(testCase)
 checkMapAndData(testCase, testCase.TestData.b);
 end
@@ -75,7 +87,7 @@ checkSelections(testCase, testCase.TestData.c);
 end
 
 function testScenarioCSweep(testCase)
-% 「k個以上」でShotあたり2.5個（総Mark数の四捨五入で 0.5 が出る）
+% 一筆書きを右下から・強制計測Shot・スイープで選ぶ選び方を絞る（端のShotでMark数が選び方ごとに違う）
 checkSweep(testCase, testCase.TestData.c);
 end
 
@@ -86,6 +98,27 @@ for section = {'map', 'zones', 'model', 'constraints'}
     verifyEqual(testCase, settings.(section{1}), reference.(section{1}), [section{1} ' の初期設定が違います']);
 end
 verifyEqual(testCase, settings.evaluationData.terms, reference.evaluationData.terms);
+verifyEqual(testCase, settings.sweep.methods, reference.sweep.methods);
+verifyEqual(testCase, sort(fieldnames(settings.sampling)), sort(fieldnames(reference.sampling)));
+end
+
+function testOldSettingsFile(testCase)
+% 版2の設定ファイル: D最適・I最適は制約付きとして読み、なくなった項目（必ず測るMark・HOWA＋推定）は使わない
+old = struct('version', 2, 'settings', struct( ...
+    'sampling', struct('shotCount', 12, 'designatedMarkNos', [1, 4], 'markMode', 'atLeast', ...
+        'methods', struct('random', false, 'poisson', true, 'dOptimal', true, 'iOptimal', false)), ...
+    'model', struct('flows', struct('howa', true, 'estimateThenHowa', false, 'howaPlusEstimate', true))));
+path = [tempname '.json'];
+cleanup = onCleanup(@() delete(path));
+fid = fopen(path, 'w', 'n', 'UTF-8');
+fwrite(fid, jsonencode(old), 'char');
+fclose(fid);
+loaded = asc.loadSettingsFile(path);
+verifyEqual(testCase, loaded.settings.sampling.shotCount, 12);
+verifyFalse(testCase, isfield(loaded.settings.sampling, 'designatedMarkNos'));
+verifyEqual(testCase, loaded.settings.sampling.methods, struct('random', false, 'poisson', true, 'dOptimal', false, 'iOptimal', false, ...
+    'constrainedD', true, 'constrainedI', false));
+verifyEqual(testCase, loaded.settings.model.flows, struct('howa', true, 'estimateThenHowa', false));
 end
 
 function testCsvRoundTrip(testCase)
@@ -105,6 +138,7 @@ data = scenario.data;
 verifyEqual(testCase, numel(waferMap.shotIds), reference.map.shotCount);
 verifyEqual(testCase, waferMap.shotIds, reference.map.shotIds);
 verifyEqual(testCase, waferMap.shotScan, reference.map.scans);
+verifyEqual(testCase, waferMap.shotDefinedMarkCount, reference.map.definedMarkCounts);
 marks = [waferMap.markX, waferMap.markY, waferMap.markShot - 1, waferMap.markNo];
 verifyLessThanOrEqual(testCase, max(abs(marks(:) - reshape(reference.map.marks, [], 1))), 1e-12);
 checkVector(testCase, data.truthX(1, :)', reference.data.truthX0, 1e-9, 'truthX 1枚目');
@@ -118,15 +152,36 @@ output = scenario.output;
 reference = scenario.reference;
 verifyEqual(testCase, {output.methods.key}', reference.methods);
 verifyEqual(testCase, {output.variants.key}', reference.variants);
-if isempty(reference.relaxed)
-    verifyEmpty(testCase, output.relaxed);
-else
-    verifyEqual(testCase, {output.relaxed.key}', cellstr(reference.relaxed));
+verifyRelaxed(testCase, output.relaxed, reference.relaxed);
+verifyEqual(testCase, numel(output.failedMethods), numel(reference.failedMethods), '選べなかった選び方の数が違います');
+verifyEqual(testCase, [output.context.items.shotIndex]' - 1, reference.eligibleShots(:), '選べるShotが違います');
+verifyEqual(testCase, output.context.mandatoryItems(:) - 1, reshape(reference.mandatoryItems, [], 1), '強制計測Shotの候補番号が違います');
+checkSets(testCase, output.sets, reference.sets);
 end
-verifyEqual(testCase, numel(output.sets), numel(reference.sets));
-for s = 1:numel(reference.sets)
-    actual = output.sets(s);
-    expected = reference.sets(s);
+
+function checkPlan(testCase, scenario)
+% 「計画を作成」の点（制約付きD最適・I最適）と、選択点のCSVの文字が同じ
+reference = scenario.reference;
+plan = asc.runPlan(scenario.map, reference.settings);
+verifyRelaxed(testCase, plan.relaxed, reference.plan.relaxed);
+checkSets(testCase, plan.sets, reference.plan.sets);
+verifyEqual(testCase, asc.selectionToCsv(scenario.map, plan.sets(1).markIndices), reference.selectionCsv, '選択点のCSVが違います');
+end
+
+function verifyRelaxed(testCase, actual, expected)
+if isempty(expected)
+    verifyEmpty(testCase, actual);
+else
+    verifyEqual(testCase, {actual.key}', cellstr(expected));
+end
+end
+
+function checkSets(testCase, actualSets, expectedSets)
+% 選んだ点（Shot・Mark の完全一致）と、D・I基準・制約の満たし具合を照合する
+verifyEqual(testCase, numel(actualSets), numel(expectedSets));
+for s = 1:numel(expectedSets)
+    actual = actualSets(s);
+    expected = expectedSets(s);
     label = sprintf('%s 試行%d', expected.method, expected.draw + 1);
     verifyEqual(testCase, actual.method, expected.method);
     verifyEqual(testCase, actual.shotIndices - 1, expected.shotIndices(:)', [label ': 選んだShotが違います']);
@@ -139,18 +194,10 @@ for s = 1:numel(reference.sets)
         assertClose(testCase, actualCriteria.logDet, expectedCriteria.logDet, [label ' D基準 ' axisName{1}]);
         assertClose(testCase, actualCriteria.trace, expectedCriteria.trace, [label ' I基準 ' axisName{1}]);
     end
-    rows = actual.status.rows;
-    keys = {rows.key};
-    shifts = [rows.shift];
-    oks = [rows.ok];
-    if ~isempty(actual.status.center)
-        keys{end + 1} = 'center'; %#ok<AGROW>
-        shifts(end + 1) = actual.status.center.shift; %#ok<AGROW>
-        oks(end + 1) = actual.status.center.ok; %#ok<AGROW>
-    end
-    verifyEqual(testCase, keys', {expected.shifts.key}', [label ': 制約の並びが違います']);
-    verifyEqual(testCase, shifts', [expected.shifts.shift]', [label ': 制約のずれが違います']);
-    verifyEqual(testCase, oks', [expected.shifts.ok]', [label ': 制約の満たし具合が違います']);
+    rows = asc.statusRows(actual.status);
+    verifyEqual(testCase, {rows.key}', {expected.shifts.key}', [label ': 制約の並びが違います']);
+    verifyEqual(testCase, [rows.shift]', [expected.shifts.shift]', [label ': 制約のずれが違います']);
+    verifyEqual(testCase, [rows.ok]', [expected.shifts.ok]', [label ': 制約の満たし具合が違います']);
 end
 end
 

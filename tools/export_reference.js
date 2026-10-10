@@ -1,13 +1,14 @@
 /**
  * ブラウザ版（JavaScript）の計算結果を、Python版・MATLAB版の照合用の基準データ（JSON）として書き出す。
  * 実行: node tools/export_reference.js
- * 出力: tests/reference/scenario_a.json, scenario_b.json
+ * 出力: tests/reference/scenario_a.json, scenario_b.json, scenario_c.json
  *
- * 3つの場面を用意する。
- *   A: 初期設定を小さくしたもの（手動プランとスイープを含む）
- *   B: 「k個以上」・ソフト制約・比例配分・ガウス基底のRBF・Matérn のGP・正規分布・RMS正規化・Scanのずれ・
- *      XとYで違う多項式の項 を入れたもの
- *   C: 「k個以上」でShotあたり2.5個のスイープ（総Mark数の四捨五入で 0.5 が出る。言語ごとの丸めの違いを確かめる）
+ * 3つの場面を用意する。どの場面も、制約なし・制約付きのD最適・I最適を含む6つの選び方と手動プランを評価し、
+ * 「計画を作成」（制約付きD最適・I最適）の点と、選択点のCSVも書き出す。
+ *   A: 初期設定を小さくしたもの（一筆書きのScan方向、端のShotも選ぶ。スイープを含む）
+ *   B: 市松のScan方向・端のShotを選ばない・強制計測Shot・除外Shot（手動プランに除外Shotを入れる）・ソフト制約・
+ *      比例配分・ガウス基底のRBF・Matérn のGP・正規分布・RMS正規化・Scanのずれ・XとYで違う多項式の項
+ *   C: 一筆書きを右下から・最初はDown、強制計測Shot、スイープで選ぶ選び方を絞る（端のShotでMark数が選び方ごとに違う）
  */
 "use strict";
 
@@ -34,7 +35,7 @@ function scenarioA() {
   settings.evaluationData.waferCount = 6;
   settings.sampling.draws = 3;
   settings.sampling.optimalStarts = 2;
-  settings.sweep = { startShots: 10, endShots: 30, stepShots: 10, draws: 2 };
+  settings.sweep = Object.assign({}, settings.sweep, { startShots: 10, endShots: 30, stepShots: 10, draws: 2 });
   return { name: "A", settings, manualShotIds: ["12", "23", "32", "39", "48", "57", "66", "73", "82", "93", "20", "41", "60", "70", "85", "99"] };
 }
 
@@ -54,8 +55,8 @@ function scenarioB() {
   settings.model.rbfKernel = "gaussian";
   settings.model.rbfLambda = 0.01;
   settings.model.gpKernel = "matern52";
-  settings.sampling.markMode = "atLeast";
-  settings.sampling.totalMarkCount = 46;
+  settings.map.scanPattern = "checker";
+  settings.sampling.excludeIncompleteShots = true;
   settings.sampling.shotCount = 18;
   settings.sampling.draws = 2;
   settings.sampling.optimalStarts = 2;
@@ -63,19 +64,28 @@ function scenarioB() {
   settings.constraints.scan.hard = false;
   settings.constraints.zone.allocation = "proportional";
   settings.constraints.softStrength = 0.7;
-  return { name: "B", settings, manualShotIds: ["5", "16", "27", "38", "49", "60", "71", "82", "93", "14", "35", "56", "77", "88"] };
+  settings.constraints.mandatoryShotIds = ["30", "45", "70"];
+  settings.constraints.excludedShotIds = ["46", "47"];
+  return { name: "B", settings, manualShotIds: ["5", "16", "27", "38", "49", "60", "71", "82", "93", "14", "35", "46", "56", "77", "88"] };
 }
 
 function scenarioC() {
   const settings = baseSettings();
   settings.evaluationData.waferCount = 3;
-  settings.sampling.markMode = "atLeast";
-  settings.sampling.shotCount = 18;
-  settings.sampling.totalMarkCount = 45;
+  settings.map.serpentineStart = "bottomRight";
+  settings.map.serpentineFirstScan = "Down";
+  settings.sampling.shotCount = 14;
   settings.sampling.draws = 1;
   settings.sampling.optimalStarts = 1;
-  settings.sweep = { startShots: 11, endShots: 13, stepShots: 2, draws: 1 };
-  return { name: "C", settings, manualShotIds: ["5", "16", "27", "38", "49", "60", "71", "82", "93", "14", "35", "56", "77", "88"] };
+  settings.constraints.mandatoryShotIds = ["58"];
+  settings.sweep = {
+    startShots: 11,
+    endShots: 13,
+    stepShots: 2,
+    draws: 1,
+    methods: { random: true, poisson: false, dOptimal: true, iOptimal: false, constrainedD: true, constrainedI: false },
+  };
+  return { name: "C", settings, manualShotIds: ["1", "5", "16", "27", "38", "49", "60", "71", "82", "93", "14", "35", "56", "77", "88", "104"] };
 }
 
 function round(value) {
@@ -131,7 +141,7 @@ function setsOf(output) {
       x: { logDet: round(set.criteria.x.logDet), trace: round(set.criteria.x.trace), singular: set.criteria.x.singular },
       y: { logDet: round(set.criteria.y.logDet), trace: round(set.criteria.y.trace), singular: set.criteria.y.singular },
     },
-    shifts: set.status.rows.map((row) => ({ key: row.key, shift: row.shift, ok: row.ok })).concat(set.status.center ? [{ key: "center", shift: set.status.center.shift, ok: set.status.center.ok }] : []),
+    shifts: ASC.constraints.statusRows(set.status).map((row) => ({ key: row.key, shift: row.shift, ok: row.ok })),
   }));
 }
 
@@ -139,7 +149,7 @@ async function exportScenario(scenario, withSweep) {
   const map = ASC.waferMap.generateWaferMap(scenario.settings.map).map;
   const data = ASC.evaluationData.generateEvaluationData(map, scenario.settings.evaluationData).data;
   const shotIndexById = new Map(map.shots.map((shot, index) => [shot.id, index]));
-  const manualPlans = [{ key: "manual:1", label: "手動の例", shotIndices: scenario.manualShotIds.map((id) => shotIndexById.get(id)), extraMarkIndices: [] }];
+  const manualPlans = [{ key: "manual:1", label: "手動の例", shotIndices: scenario.manualShotIds.map((id) => shotIndexById.get(id)) }];
   const output = await ASC.evaluator.runEvaluation({ map, data, settings: scenario.settings, manualPlans }, () => {}, () => false);
   if (output.errors.length > 0) {
     throw new Error(output.errors.join(" / "));
@@ -149,7 +159,14 @@ async function exportScenario(scenario, withSweep) {
     generatedBy: "tools/export_reference.js",
     settings: scenario.settings,
     manualShotIds: scenario.manualShotIds,
-    map: { shotCount: map.shots.length, markCount: map.marks.length, marks: map.marks.map((mark) => [mark.x, mark.y, mark.shotIndex, mark.markNo]), shotIds: map.shots.map((shot) => shot.id), scans: map.shots.map((shot) => shot.scan) },
+    map: {
+      shotCount: map.shots.length,
+      markCount: map.marks.length,
+      marks: map.marks.map((mark) => [mark.x, mark.y, mark.shotIndex, mark.markNo]),
+      shotIds: map.shots.map((shot) => shot.id),
+      scans: map.shots.map((shot) => shot.scan),
+      definedMarkCounts: map.shots.map((shot) => shot.definedMarkCount),
+    },
     data: {
       truthX0: Array.from(data.truthX.subarray(0, data.markCount)),
       truthYLast: Array.from(data.truthY.subarray((data.waferCount - 1) * data.markCount)),
@@ -157,6 +174,9 @@ async function exportScenario(scenario, withSweep) {
       noiseYLast: Array.from(data.noiseY.subarray((data.waferCount - 1) * data.markCount)),
     },
     relaxed: output.relaxed.map((entry) => entry.key),
+    failedMethods: output.failedMethods,
+    eligibleShots: output.context.items.map((item) => item.shotIndex),
+    mandatoryItems: output.context.mandatoryItems,
     methods: output.methods.map((method) => method.key),
     variants: output.variants.map((variant) => variant.key),
     sets: setsOf(output),
@@ -164,6 +184,13 @@ async function exportScenario(scenario, withSweep) {
     criteriaReference: output.criteriaReference,
     baseline: ASC.evaluator.summarizeStore(output.baselines.allMarks.howa).x.rms.mean,
   };
+  // 「計画を作成」の点（評価の制約付きD最適・I最適と同じになる）と、選択点のCSV（計画の制約付きD最適）
+  const plan = ASC.evaluator.runPlan({ map, settings: scenario.settings });
+  if (plan.errors.length > 0) {
+    throw new Error(plan.errors.join(" / "));
+  }
+  result.plan = { relaxed: plan.relaxed.map((entry) => entry.key), sets: setsOf(plan) };
+  result.selectionCsv = ASC.waferMap.selectionToCsv(map, plan.sets[0].markIndices);
   if (withSweep) {
     const sweep = await ASC.evaluator.runSweep({ map, data, settings: scenario.settings, manualPlans }, scenario.settings.sweep, () => {}, () => false);
     result.sweep = {

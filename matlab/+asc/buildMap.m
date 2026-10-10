@@ -5,6 +5,7 @@ function waferMap = buildMap(records, options)
 %
 %   waferMap のおもな項目
 %     shotIds（cell）, shotX, shotY, shotScan（cell, 'Up'/'Down'）, shotMarkIndices（cell）  … Shotごと
+%     shotDefinedMarkCount  … Shotに定義したMarkの数（有効範囲外も含む）。有効なMarkより多ければ「Markが揃わない端のShot」
 %     markX, markY（Wafer座標 [mm]）, markU, markV（正規化座標）, markShot, markNo  … Markごと
 
 C = asc.constants();
@@ -14,6 +15,7 @@ shotX = [];
 shotY = [];
 shotScan = {};
 shotMarkIndices = {};
+shotDefinedMarkCount = [];
 markX = [];
 markY = [];
 markShot = [];
@@ -42,6 +44,7 @@ for k = 1:numel(records)
     shotY(end + 1, 1) = record.y; %#ok<AGROW>
     shotScan{end + 1, 1} = record.scan; %#ok<AGROW>
     shotMarkIndices{end + 1, 1} = first:first + numel(numbers) - 1; %#ok<AGROW>
+    shotDefinedMarkCount(end + 1, 1) = numel(record.marks); %#ok<AGROW>
     markX = [markX; x(order)']; %#ok<AGROW>
     markY = [markY; y(order)']; %#ok<AGROW>
     markShot = [markShot; repmat(shotIndex, numel(numbers), 1)]; %#ok<AGROW>
@@ -53,6 +56,7 @@ waferMap.shotX = shotX;
 waferMap.shotY = shotY;
 waferMap.shotScan = shotScan;
 waferMap.shotMarkIndices = shotMarkIndices;
+waferMap.shotDefinedMarkCount = shotDefinedMarkCount;
 waferMap.markX = markX;
 waferMap.markY = markY;
 waferMap.markU = markX / C.NORMALIZATION_RADIUS_MM;

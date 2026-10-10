@@ -1,6 +1,7 @@
 function status = describeStatus(context, selectedItems, measuredMarks)
 %DESCRIBESTATUS 選択の制約の満たし具合。ずれ = 外れた数の合計 ÷ 2（切り上げ。何個のShotを移せば満たせるか）。
-%   status.rows（制約ごと: key, label, hard, priority, ok, shift, classes）と status.center（中心の1点。オフなら []）。
+%   status.rows（制約ごと: key, label, hard, priority, ok, shift, classes）、status.center（中心の1点。オフなら []）、
+%   status.mandatory（強制計測Shot。指定がなければ []）。表に出す順の行は asc.statusRows(status)。
 
 C = asc.constants();
 total = numel(selectedItems);
@@ -27,5 +28,13 @@ if center.enabled
     centerRow = struct('key', 'center', 'label', C.CONSTRAINT_LABELS.center, 'hard', center.active, ...
         'priority', center.priority, 'ok', included, 'shift', double(~included));
 end
-status = struct('rows', rows, 'center', centerRow);
+% 強制計測Shot: ずれは選ばれていない強制計測Shotの数
+mandatoryRow = [];
+if ~isempty(context.mandatoryItems)
+    included = nnz(ismember(context.mandatoryItems, selectedItems));
+    total = numel(context.mandatoryItems);
+    mandatoryRow = struct('key', 'mandatory', 'label', C.CONSTRAINT_LABELS.mandatory, 'hard', true, 'priority', 0, ...
+        'ok', included == total, 'shift', total - included, 'included', included, 'total', total);
+end
+status = struct('rows', rows, 'center', centerRow, 'mandatory', mandatoryRow);
 end

@@ -3,7 +3,6 @@
 補正の流れ:
   HOWAのみ     計測したMarkに多項式を当てはめる
   推定→HOWA    未計測Markのずれを推定して全Markを埋め、全Markに多項式を当てはめる（補正量は多項式だけ）
-  HOWA＋推定   多項式で補正し、計測Markでの取り残しを推定手法で全Markに広げて足す
 Python版は numpy で全Waferをまとめて計算する（Wafer数×Mark数の行列を一度に扱う）。
 """
 
@@ -228,7 +227,7 @@ def gp_predict(prepared, measured):
 
 
 def build_variants(model_settings):
-    """比べる補正の一覧（HOWAのみ ＋ 補正の流れ × 推定手法）。key は "howa" か "流れ:推定手法"。"""
+    """比べる補正の一覧（HOWAのみ ＋ 推定→HOWA × 推定手法）。key は "howa" か "流れ:推定手法"。"""
     variants = []
     if model_settings["flows"]["howa"]:
         variants.append({"key": "howa", "flowType": "howa", "estimator": None, "label": "HOWAのみ"})
@@ -238,13 +237,12 @@ def build_variants(model_settings):
         for estimator in C.ESTIMATORS:
             if not model_settings["estimators"].get(estimator["key"]):
                 continue
-            label = f"{estimator['label']}→HOWA" if flow["key"] == "estimateThenHowa" else f"HOWA＋{estimator['label']}"
-            variants.append({"key": f"{flow['key']}:{estimator['key']}", "flowType": flow["key"], "estimator": estimator, "label": label})
+            variants.append({"key": f"{flow['key']}:{estimator['key']}", "flowType": flow["key"], "estimator": estimator, "label": f"{estimator['label']}→HOWA"})
     return variants
 
 
 def prepare_howa(uv, sample_indices, term_indices, all_design, all_least_squares):
-    """1つの軸のHOWAの部品。howa: 計測値 → 全Markの補正量、fitted: 計測値 → 計測点での当てはめ値。"""
+    """1つの軸のHOWAの部品。howa: 計測値 → 全Markの補正量、allLeastSquares: 全Markの値 → 多項式の係数（推定→HOWA で使う）。"""
     sample_design = polynomial_design(uv[sample_indices], term_indices)
     operator, rank_deficient = least_squares_operator(sample_design)
     warnings = []
@@ -254,17 +252,17 @@ def prepare_howa(uv, sample_indices, term_indices, all_design, all_least_squares
         "allDesign": all_design,
         "allLeastSquares": all_least_squares,
         "howa": all_design @ operator,
-        "fitted": sample_design @ operator,
         "warnings": warnings,
     }
 
 
-def linear_flow_operator(howa_parts, estimate, sample_indices, flow_type):
-    """線形の推定手法（RBF）を使う流れの演算子（全Mark数×計測点数）。"""
+def estimate_then_howa_operator(howa_parts, estimate, sample_indices):
+    """線形の推定手法（RBF）を使う「推定→HOWA」の演算子（全Mark数×計測点数）。
+
+    未計測Markを推定値で埋め（計測Markは計測値のまま）、全Markに多項式を当てはめる。
+    """
     n = len(sample_indices)
-    if flow_type == "estimateThenHowa":
-        filled = estimate.copy()
-        filled[sample_indices, :] = 0
-        filled[sample_indices, np.arange(n)] = 1
-        return howa_parts["allDesign"] @ (howa_parts["allLeastSquares"] @ filled)
-    return howa_parts["howa"] + estimate @ (np.eye(n) - howa_parts["fitted"])
+    filled = estimate.copy()
+    filled[sample_indices, :] = 0
+    filled[sample_indices, np.arange(n)] = 1
+    return howa_parts["allDesign"] @ (howa_parts["allLeastSquares"] @ filled)
