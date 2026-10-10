@@ -1,8 +1,9 @@
 """サンプリングの前提（選べるShot・区画分け）と条件制約の判定。ブラウザ版（src/js/constraints.js）と同じ手順。
 
-候補（item）: 選べるShot（必ず測るMarkがすべて有効範囲にあるShot）
+候補（item）: 選べるShot（除外Shotと、設定によってはMarkが揃わない端のShotを除いたもの）。選んだShotの有効なMarkはすべて測る
 区画（class）: 制約ごとの分け方。制約は「選んだShotの数」で数え、区画はShot中心で判定する
 目標の幅: 各区画の選択数が入るべき範囲 [floor, ceil]（同数配分なら差1以内と同じ）
+強制計測Shot: 必ず選ぶShot（常にハード）。中心の1点のShotとあわせて、入れ替えの対象にしない
 """
 
 import math
@@ -27,58 +28,107 @@ def zone_of(radius, inner, outer):
     return 1 if radius < outer else 2
 
 
+def shot_id_list(values):
+    """Shot番号の並び（数でも文字でもよい）を、重複のない文字の並びにする（順番は入力のまま）。"""
+    if not isinstance(values, (list, tuple)):
+        return []
+    result = []
+    for value in values:
+        text = _shot_id_text(value).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _shot_id_text(value):
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def is_incomplete_shot(shot):
+    """Markが揃わない端のShot（定義したMarkの一部が有効範囲の外にあるShot）か。"""
+    return len(shot["markIndices"]) < shot["definedMarkCount"]
+
+
 def build_context(wafer_map, settings):
-    """候補・区画・中心の1点をまとめた「サンプリングの前提」。設定の誤りは ValueError で知らせる。"""
-    sampling, zones = settings["sampling"], settings["zones"]
+    """候補・区画・中心の1点・強制計測Shotをまとめた「サンプリングの前提」。設定の誤りは ValueError で知らせる。"""
+    sampling, zones, constraint_settings = settings["sampling"], settings["zones"], settings["constraints"]
     errors = []
     if not (zones["innerRadiusMm"] > 0 and zones["outerRadiusMm"] > zones["innerRadiusMm"] and zones["outerRadiusMm"] < wafer_map["validRadiusMm"]):
         errors.append(f"同心円の区切りは 0 < 内側 < 外側 < 有効半径（{wafer_map['validRadiusMm']} mm）にしてください。")
-    if not sampling["designatedMarkNos"]:
-        errors.append("必ず測るMarkを1つ以上選んでください。")
-    priorities = [settings["constraints"][key]["priority"] for key in C.CONSTRAINT_KEYS if settings["constraints"][key]["enabled"]]
+    if not (isinstance(sampling["shotCount"], int) and sampling["shotCount"] >= 1):
+        errors.append("計測Shot数は1以上の整数にしてください。")
+    priorities = [constraint_settings[key]["priority"] for key in C.CONSTRAINT_KEYS if constraint_settings[key]["enabled"]]
     if len(set(priorities)) != len(priorities):
         errors.append("オンにした制約の優先度が重複しています。")
     if errors:
         raise ValueError("\n".join(errors))
 
-    designated_nos = sorted(set(sampling["designatedMarkNos"]))
-    marks = wafer_map["marks"]
-    items = []
+    shot_index_by_id = {shot["id"]: index for index, shot in enumerate(wafer_map["shots"])}
+    mandatory_ids = shot_id_list(constraint_settings.get("mandatoryShotIds", []))
+    excluded_ids = shot_id_list(constraint_settings.get("excludedShotIds", []))
+    for ids, label in [(mandatory_ids, "強制計測Shot"), (excluded_ids, "除外Shot")]:
+        unknown = [shot_id for shot_id in ids if shot_id not in shot_index_by_id]
+        if unknown:
+            errors.append(f"{label}の番号 {', '.join(unknown[:8])} がマップにありません。")
+    excluded_shots = {shot_index_by_id[shot_id] for shot_id in excluded_ids if shot_id in shot_index_by_id}
+
+    items, item_by_shot = [], {}
     for shot_index, shot in enumerate(wafer_map["shots"]):
-        by_no = {marks[index]["markNo"]: index for index in shot["markIndices"]}
-        if not all(no in by_no for no in designated_nos):
+        if shot_index in excluded_shots or (sampling["excludeIncompleteShots"] and is_incomplete_shot(shot)):
             continue
-        designated = [by_no[no] for no in designated_nos]
-        others = [index for index in shot["markIndices"] if index not in designated]
-        items.append({"shotIndex": shot_index, "x": shot["x"], "y": shot["y"], "scan": shot["scan"], "designatedMarks": designated, "otherMarks": others})
+        item_by_shot[shot_index] = len(items)
+        items.append({"shotIndex": shot_index, "x": shot["x"], "y": shot["y"], "scan": shot["scan"], "marks": list(shot["markIndices"])})
+
+    mandatory_items = []
+    for shot_id in mandatory_ids:
+        if shot_id not in shot_index_by_id:
+            continue
+        shot_index = shot_index_by_id[shot_id]
+        if shot_index in excluded_shots:
+            errors.append(f"Shot {shot_id} が強制計測Shotと除外Shotの両方に入っています。")
+        elif shot_index not in item_by_shot:
+            errors.append(f"強制計測Shot {shot_id} はMarkが揃わない端のShotなので選べません。")
+        else:
+            mandatory_items.append(item_by_shot[shot_index])
+    mandatory_items.sort()
 
     shot_count = sampling["shotCount"]
-    exact = sampling["markMode"] == "exact"
-    per_shot = len(designated_nos)
-    total = shot_count * per_shot if exact else sampling["totalMarkCount"]
-    extra = total - shot_count * per_shot
     if not items:
-        errors.append("必ず測るMarkがすべて有効範囲にあるShotがありません。")
+        errors.append("選べるShotがありません。除外Shotや有効半径を見直してください。")
     elif shot_count > len(items):
         errors.append(f"計測Shot数（{shot_count}）が選べるShot数（{len(items)}）を超えています。")
-    if not exact and extra < 0:
-        errors.append(f"総Mark数は「計測Shot数 × 必ず測るMarkの数」（{shot_count * per_shot}）以上にしてください。")
     if errors:
         raise ValueError("\n".join(errors))
 
+    center = _build_center(wafer_map, items, constraint_settings["center"])
+    forced_count = len(set(mandatory_items) | ({center["itemIndex"]} if center["active"] else set()))
+    if forced_count > shot_count:
+        raise ValueError(f"強制計測Shot（中心の1点のShotを含む）が{forced_count}個あり、計測Shot数（{shot_count}）を超えています。")
     return {
         "map": wafer_map,
         "items": items,
-        "designatedNos": designated_nos,
-        "markCountPerShot": per_shot,
         "shotCount": shot_count,
-        "totalMarkCount": total,
-        "extraMarkCount": extra,
-        "exactMode": exact,
         "constraints": _build_balance_constraints(items, settings),
-        "center": _build_center(wafer_map, items, settings["constraints"]["center"], extra > 0),
-        "softStrength": settings["constraints"]["softStrength"],
+        "center": center,
+        "mandatoryItems": mandatory_items,
+        "softStrength": constraint_settings["softStrength"],
     }
+
+
+def forced_items_of(context):
+    """必ず選ぶ候補（中心の1点のShot → 強制計測Shot の順。入れ替えの対象にしない）。"""
+    forced = [context["center"]["itemIndex"]] if context["center"]["active"] else []
+    for item in context["mandatoryItems"]:
+        if item not in forced:
+            forced.append(item)
+    return forced
+
+
+def unconstrained_context(context):
+    """条件制約を使わない選び方（D最適・I最適の制約なし）の前提。候補は同じで、制約・中心の1点・強制計測Shotを外す。"""
+    return {**context, "constraints": [], "center": {"enabled": False, "active": False}, "mandatoryItems": []}
 
 
 def _build_balance_constraints(items, settings):
@@ -118,27 +168,18 @@ def _build_balance_constraints(items, settings):
     return constraints
 
 
-def _build_center(wafer_map, items, setting, allow_extra):
-    """中心に最も近いMark（追加のMarkを測らないときは必ず測るMarkの中から）。"""
+def _build_center(wafer_map, items, setting):
+    """中心に最も近いMark（選べるShotの全Markから探す）。そのMarkのShotを必ず選ぶ。"""
     if not setting["enabled"]:
         return {"enabled": False, "active": False}
     best = None
     for item_index, item in enumerate(items):
-        candidates = item["designatedMarks"] + item["otherMarks"] if allow_extra else item["designatedMarks"]
-        for mark_index in candidates:
+        for mark_index in item["marks"]:
             mark = wafer_map["marks"][mark_index]
             distance = math.hypot(mark["x"], mark["y"])
             if best is None or distance < best["distance"]:
-                best = {"itemIndex": item_index, "markIndex": mark_index, "distance": distance, "isDesignated": mark_index in item["designatedMarks"]}
-    return {
-        "enabled": True,
-        "active": True,
-        "hard": True,
-        "priority": setting["priority"],
-        "itemIndex": best["itemIndex"],
-        "markIndex": best["markIndex"],
-        "isDesignated": best["isDesignated"],
-    }
+                best = {"itemIndex": item_index, "markIndex": mark_index, "distance": distance}
+    return {"enabled": True, "active": True, "hard": True, "priority": setting["priority"], "itemIndex": best["itemIndex"], "markIndex": best["markIndex"]}
 
 
 def targets_for(constraint, total):
@@ -283,7 +324,19 @@ def describe_status(context, selected_items, measured_marks):
     if center["enabled"]:
         included = center["markIndex"] in measured_marks
         center_row = {"key": "center", "label": C.CONSTRAINT_LABELS["center"], "hard": center["active"], "priority": center["priority"], "ok": included, "shift": 0 if included else 1}
-    return {"rows": rows, "center": center_row}
+    # 強制計測Shot: ずれは選ばれていない強制計測Shotの数
+    mandatory_row = None
+    if context["mandatoryItems"]:
+        selected = set(selected_items)
+        included = sum(1 for item in context["mandatoryItems"] if item in selected)
+        total = len(context["mandatoryItems"])
+        mandatory_row = {"key": "mandatory", "label": C.CONSTRAINT_LABELS["mandatory"], "hard": True, "priority": 0, "ok": included == total, "shift": total - included, "included": included, "total": total}
+    return {"rows": rows, "center": center_row, "mandatory": mandatory_row}
+
+
+def status_rows(status):
+    """満たし具合の行を、表に出す順（区画の制約 → 中心の1点 → 強制計測Shot）に並べる。"""
+    return status["rows"] + ([status["center"]] if status["center"] else []) + ([status["mandatory"]] if status.get("mandatory") else [])
 
 
 def resolve_hard_constraints(context, seed, find_feasible):

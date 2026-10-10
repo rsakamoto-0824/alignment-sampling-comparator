@@ -1,9 +1,9 @@
 /**
  * 計測Markの選び方（ランダム・ポアソンディスク・D最適・I最適・手動）。
  *
- * どの選び方も2段階で選ぶ。
- *   1. Shotを選ぶ（条件制約はここで反映する）。選んだShotでは必ず測るMarkを測る
- *   2. 「k個以上」のときは、選んだShotの残りのMarkから追加のMarkを選び、総Mark数にそろえる
+ * どの選び方もShotを選び（条件制約はここで反映する）、選んだShotではそのShotの有効なMarkをすべて測る。
+ * Markが揃わない端のShotは、有効範囲にあるMarkだけを測る（Shotに紐づくMark以外は測らない）。
+ * 制約なしのD最適・I最適には、制約を外した前提（constraints.unconstrainedContext）を渡す。
  */
 (function (root) {
   "use strict";
@@ -44,8 +44,8 @@
       }
     }
 
-    if (context.center.active) {
-      addItem(context.center.itemIndex);
+    for (const item of K.forcedItemsOf(context)) {
+      addItem(item);
     }
     const penaltyScale = selectionPenaltyScale(context);
     const weights = new Float64Array(items.length);
@@ -77,7 +77,8 @@
       }
       addItem(picked);
     }
-    return state;
+    // 強制計測Shotだけで区画の上限を超えるときは、ハード制約を満たせていない
+    return state.violation(true) === 0 ? state : null;
   }
 
   /**
@@ -114,9 +115,9 @@
   /** 無作為に埋めてから、入れ替えでハード制約の外れをなくす（1つずつ加える方法で行き詰まったとき用）。 */
   function randomFillAndRepair(context, random) {
     const state = K.createState(context, context.shotCount);
-    const forced = context.center.active ? context.center.itemIndex : -1;
-    if (forced >= 0) {
-      state.add(forced);
+    const forced = new Set(K.forcedItemsOf(context));
+    for (const item of forced) {
+      state.add(item);
     }
     const order = random.shuffle(Array.from({ length: context.items.length }, (_, i) => i));
     for (const item of order) {
@@ -134,7 +135,7 @@
       let bestDelta = 0;
       let bestSwaps = [];
       for (const removed of state.list) {
-        if (removed === forced) {
+        if (forced.has(removed)) {
           continue;
         }
         for (let added = 0; added < context.items.length; added++) {
@@ -184,9 +185,7 @@
     if (!state) {
       return null;
     }
-    const measured = measuredMarksOf(context, state.list);
-    const extras = pickExtrasRandom(context, state.list, measured, random);
-    return { items: state.list.slice(), markIndices: measured.concat(extras) };
+    return { items: state.list.slice(), markIndices: measuredMarksOf(context, state.list) };
   }
 
   // ---- ポアソンディスク --------------------------------------------------
@@ -221,16 +220,14 @@
         return null;
       }
     }
-    const measured = measuredMarksOf(context, best.list);
-    const extras = pickExtrasFarthest(context, best.list, measured, random);
-    return { items: best.list.slice(), markIndices: measured.concat(extras) };
+    return { items: best.list.slice(), markIndices: measuredMarksOf(context, best.list) };
   }
 
   // ---- D最適・I最適 ------------------------------------------------------
 
   /**
    * 補正多項式ごとの計算材料。XとYで項が同じなら1つにまとめる。
-   * 各候補の「必ず測るMark」での多項式の値（k×p）と、全Markで平均した W = XᵀX / Mark数 を持つ。
+   * 各候補（Shot）の測るMarkでの多項式の値（k×p。k はShotの有効なMarkの数）と、全Markで平均した W = XᵀX / Mark数 を持つ。
    */
   function buildModels(context, termSets) {
     const unique = [];
@@ -248,7 +245,7 @@
       for (let i = 0; i < weight.length; i++) {
         weight[i] /= marks.length;
       }
-      const blocks = context.items.map((item) => ASC.correction.polynomialDesign(marks, item.designatedMarks, terms));
+      const blocks = context.items.map((item) => ASC.correction.polynomialDesign(marks, item.marks, terms));
       return { terms, p, weight, blocks };
     });
   }
@@ -424,7 +421,7 @@
     const totalTerms = models.reduce((sum, model) => sum + model.p, 0);
     const penaltyScale = context.softStrength * C.SOFT_PENALTY_LOG_EFFICIENCY;
     const state = startState;
-    const forced = context.center.active ? context.center.itemIndex : -1;
+    const forced = new Set(K.forcedItemsOf(context));
 
     for (let pass = 0; pass < C.OPTIMAL_MAX_PASSES; pass++) {
       const prepared = models.map((model) => prepareExchange(model, state.list, useWeight));
@@ -432,7 +429,7 @@
       let bestGain = 1e-9;
       let bestSwap = null;
       for (const removed of state.list) {
-        if (removed === forced) {
+        if (forced.has(removed)) {
           continue;
         }
         for (let added = 0; added < context.items.length; added++) {
@@ -522,161 +519,25 @@
     if (!best) {
       return null;
     }
-    const measured = measuredMarksOf(context, best.list);
-    const extras = pickExtrasOptimal(context, best.list, measured, models, criterion);
-    return { items: best.list.slice(), markIndices: measured.concat(extras) };
+    return { items: best.list.slice(), markIndices: measuredMarksOf(context, best.list) };
   }
 
-  // ---- 追加のMark（k個以上のとき）---------------------------------------
-
+  /** 選んだShot（候補番号）で測るMark（Shotの有効なMarkすべて。選んだ順）。 */
   function measuredMarksOf(context, selectedItems) {
     const marks = [];
     for (const item of selectedItems) {
-      marks.push(...context.items[item].designatedMarks);
+      marks.push(...context.items[item].marks);
     }
     return marks;
-  }
-
-  /** 追加の候補と、中心の1点のために必ず入れる追加Mark。 */
-  function extraCandidates(context, selectedItems) {
-    const candidates = [];
-    for (const item of selectedItems) {
-      candidates.push(...context.items[item].otherMarks);
-    }
-    const forced = [];
-    const center = context.center;
-    if (center.active && !center.isDesignated && candidates.includes(center.markIndex)) {
-      forced.push(center.markIndex);
-    }
-    return { candidates: candidates.filter((markIndex) => !forced.includes(markIndex)), forced };
-  }
-
-  function pickExtrasRandom(context, selectedItems, measured, random) {
-    if (context.extraMarkCount <= 0) {
-      return [];
-    }
-    const { candidates, forced } = extraCandidates(context, selectedItems);
-    random.shuffle(candidates);
-    return forced.concat(candidates).slice(0, context.extraMarkCount);
-  }
-
-  /** すでに測るMarkから最も遠いMarkを順に選ぶ（ポアソンディスクの考え方をMarkに広げたもの）。 */
-  function pickExtrasFarthest(context, selectedItems, measured, random) {
-    if (context.extraMarkCount <= 0) {
-      return [];
-    }
-    const marks = context.map.marks;
-    const { candidates, forced } = extraCandidates(context, selectedItems);
-    const chosen = forced.slice();
-    const current = measured.concat(forced);
-    const remaining = candidates.slice();
-    while (chosen.length < context.extraMarkCount && remaining.length > 0) {
-      let bestIndex = 0;
-      let bestDistance = -1;
-      remaining.forEach((markIndex, index) => {
-        let nearest = Infinity;
-        for (const other of current) {
-          nearest = Math.min(nearest, Math.hypot(marks[markIndex].x - marks[other].x, marks[markIndex].y - marks[other].y));
-        }
-        // 同じ距離が並んだときに偏らないよう、ごく小さな乱数を足す
-        nearest += random.next() * 1e-6;
-        if (nearest > bestDistance) {
-          bestDistance = nearest;
-          bestIndex = index;
-        }
-      });
-      const picked = remaining.splice(bestIndex, 1)[0];
-      chosen.push(picked);
-      current.push(picked);
-    }
-    return chosen.slice(0, context.extraMarkCount);
-  }
-
-  /** D・I最適の基準が最も良くなるMarkを1つずつ加える（Sherman-Morrisonで更新）。 */
-  function pickExtrasOptimal(context, selectedItems, measured, models, criterion) {
-    if (context.extraMarkCount <= 0) {
-      return [];
-    }
-    const marks = context.map.marks;
-    const { candidates, forced } = extraCandidates(context, selectedItems);
-    const chosen = forced.slice();
-    const current = measured.concat(forced);
-    const inverses = models.map((model) => {
-      const rows = ASC.correction.polynomialDesign(marks, current, model.terms);
-      return M.inverseSymmetric(informationMatrix(model, [rows]), model.p);
-    });
-    const vectors = models.map((model) => ASC.correction.polynomialDesign(marks, candidates, model.terms));
-    const remaining = candidates.map((_, index) => index);
-
-    while (chosen.length < context.extraMarkCount && remaining.length > 0) {
-      let bestPosition = 0;
-      let bestGain = -Infinity;
-      remaining.forEach((candidateIndex, position) => {
-        let gain = 0;
-        models.forEach((model, modelIndex) => {
-          const f = vectors[modelIndex].subarray(candidateIndex * model.p, (candidateIndex + 1) * model.p);
-          const af = matrixVector(inverses[modelIndex], f, model.p);
-          const leverage = dot(f, af, model.p);
-          if (criterion === "I") {
-            const waf = matrixVector(model.weight, af, model.p);
-            gain += dot(af, waf, model.p) / (1 + leverage);
-          } else {
-            gain += Math.log(1 + leverage);
-          }
-        });
-        if (M.isClearlyGreater(gain, bestGain, C.TIE_TOLERANCE)) {
-          bestGain = gain;
-          bestPosition = position;
-        }
-      });
-      const candidateIndex = remaining.splice(bestPosition, 1)[0];
-      models.forEach((model, modelIndex) => {
-        const f = vectors[modelIndex].subarray(candidateIndex * model.p, (candidateIndex + 1) * model.p);
-        shermanMorrisonUpdate(inverses[modelIndex], f, model.p);
-      });
-      chosen.push(candidates[candidateIndex]);
-    }
-    return chosen.slice(0, context.extraMarkCount);
-  }
-
-  function matrixVector(matrix, vector, size) {
-    const result = new Float64Array(size);
-    for (let i = 0; i < size; i++) {
-      let sum = 0;
-      for (let j = 0; j < size; j++) {
-        sum += matrix[i * size + j] * vector[j];
-      }
-      result[i] = sum;
-    }
-    return result;
-  }
-
-  function dot(left, right, size) {
-    let sum = 0;
-    for (let i = 0; i < size; i++) {
-      sum += left[i] * right[i];
-    }
-    return sum;
-  }
-
-  /** (A⁻¹ + f fᵀ)⁻¹ ではなく、M に f fᵀ を足したときの逆行列 A を更新する。 */
-  function shermanMorrisonUpdate(inverse, f, size) {
-    const af = matrixVector(inverse, f, size);
-    const denominator = 1 + dot(f, af, size);
-    for (let i = 0; i < size; i++) {
-      for (let j = 0; j < size; j++) {
-        inverse[i * size + j] -= (af[i] * af[j]) / denominator;
-      }
-    }
   }
 
   // ---- 手動 --------------------------------------------------------------
 
   /**
-   * 手動選択（Shot番号と追加Markの集合）から、測るMarkの一覧を作る。
-   * 選べないShot（必ず測るMarkが有効範囲外）は items に入れず、notEligible で知らせる。
+   * 手動選択（Shotの並び番号）から、測るMarkの一覧を作る。
+   * 選べないShot（除外Shot、設定によってはMarkが揃わない端のShot）は items に入れず、notEligible で知らせる。
    */
-  function manualSelection(context, selectedShotIndices, extraMarkIndices) {
+  function manualSelection(context, selectedShotIndices) {
     const itemByShot = new Map(context.items.map((item, index) => [item.shotIndex, index]));
     const items = [];
     const notEligible = [];
@@ -687,19 +548,7 @@
         notEligible.push(shotIndex);
       }
     }
-    const markIndices = measuredMarksOf(context, items);
-    if (!context.exactMode) {
-      const allowed = new Set();
-      for (const item of items) {
-        context.items[item].otherMarks.forEach((markIndex) => allowed.add(markIndex));
-      }
-      for (const markIndex of extraMarkIndices) {
-        if (allowed.has(markIndex)) {
-          markIndices.push(markIndex);
-        }
-      }
-    }
-    return { items, markIndices, notEligible };
+    return { items, markIndices: measuredMarksOf(context, items), notEligible };
   }
 
   // ---- 選んだ点の性質 ----------------------------------------------------
@@ -797,6 +646,7 @@
     selectRandom,
     selectPoisson,
     selectOptimal,
+    measuredMarksOf,
     manualSelection,
     minimumShotSpacing,
     kappaOf,

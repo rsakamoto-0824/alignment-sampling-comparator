@@ -1,6 +1,6 @@
 /**
  * 評価結果の表示（一覧表・箱ひげ図・表）とCSVの書き出し。
- * 比べる補正は「HOWAのみ」と「補正の流れ × 推定手法」。色は推定手法ごとに固定する
+ * 比べる補正は「HOWAのみ」と「推定→HOWA × 推定手法」。色は推定手法ごとに固定する
  * （推定手法を減らしても、残った手法の色は変えない）。
  */
 (function (root) {
@@ -55,7 +55,7 @@
     return SERIES_COLORS[variant.estimator ? variant.estimator.key : "howa"];
   }
 
-  /** 箱ひげ図の行に添える短い名前（同じ流れの中で推定手法を見分ける）。 */
+  /** 箱ひげ図の行に添える短い名前（推定手法を見分ける）。 */
   function rowLabel(variant) {
     return variant.estimator ? variant.estimator.label : "HOWAのみ";
   }
@@ -74,11 +74,6 @@
       ticks.push(Math.round(value / step) * step);
     }
     return { max, ticks };
-  }
-
-  /** 箱ひげ図で比べる補正（HOWAのみ ＋ 選んだ流れの推定手法）。 */
-  function chartVariants(output, flowType) {
-    return output.variants.filter((variant) => variant.flowType === "howa" || variant.flowType === flowType);
   }
 
   function baselineStats(output, axis, metric) {
@@ -520,11 +515,6 @@
     return rows.length > 0 ? table(headers, rows) : null;
   }
 
-  /** 推定を使う流れのうち、結果にあるもの。 */
-  function availableFlowTypes(output) {
-    return C.FLOW_TYPES.filter((flow) => flow.key !== "howa" && output.variants.some((variant) => variant.flowType === flow.key));
-  }
-
   function selectField(id, label, options, value, onChange) {
     const select = ui.create("select", { id }, options.map(([optionValue, text]) => ui.create("option", { value: optionValue, text })));
     select.value = value;
@@ -552,6 +542,11 @@
         )
       );
     }
+    if (output.failedMethods && output.failedMethods.length > 0) {
+      children.push(
+        notice("warning", "⚠", "次の選び方は、制約（強制計測Shotを含む）を満たす点を選べなかったため、結果にありません。計測Shot数や制約を見直してください。", output.failedMethods)
+      );
+    }
     const warnings = Array.from(new Set(output.sets.flatMap((set) => set.warnings)));
     if (warnings.length > 0) {
       children.push(notice("warning", "⚠", "計算の注意", warnings));
@@ -569,19 +564,8 @@
     children.push(ui.create("h2", { className: "subheading", text: `一覧（${METRIC_LABELS[view.metric]}・${AXIS_LABELS[view.axis]} のWafer平均、単位 nm）` }));
     children.push(...renderOverviewTable(output, view));
 
-    const flowTypes = availableFlowTypes(output);
-    const flowType = flowTypes.some((flow) => flow.key === view.flowType) ? view.flowType : flowTypes.length > 0 ? flowTypes[0].key : "howa";
-    const variants = chartVariants(output, flowType);
+    const variants = output.variants;
     children.push(ui.create("h2", { className: "subheading", text: `残差の分布（Wafer ${output.waferCount}枚、ランダム系は全試行をまとめたもの）` }));
-    if (flowTypes.length > 1) {
-      children.push(
-        ui.create("div", { className: "toolbar" }, [
-          selectField("result-flow", "推定手法を比べる流れ", flowTypes.map((flow) => [flow.key, flow.label]), flowType, (value) =>
-            handlers.onViewChange({ flowType: value }, "result-flow")
-          ),
-        ])
-      );
-    }
     const chartContainer = ui.create("div");
     renderChart(
       chartContainer,
@@ -622,7 +606,7 @@
     if (constraintTable) {
       children.push(ui.create("h2", { className: "subheading", text: "制約の満たし具合" }));
       children.push(constraintTable);
-      children.push(ui.create("p", { className: "hint", text: "満たした回数は試行の数のうちいくつで満たしたか、ずれは何個のShotを別の区画へ移せば満たせるかの目安です。手動プランは制約を強制しないので、外れることがあります。" }));
+      children.push(ui.create("p", { className: "hint", text: "満たした回数は試行の数のうちいくつで満たしたか、ずれは何個のShotを別の区画へ移せば満たせるかの目安です（強制計測Shotは選ばれていない数）。制約なしのD最適・I最適と手動プランは制約を守らないので、外れることがあります。" }));
     }
     const drawTable = renderDrawTable(output, variants, view);
     if (drawTable) {

@@ -15,5 +15,5 @@ if ~all(found)
     unknown = shotIds(~found);
     error('asc:invalidPlan', 'マップにないShot番号があります: %s', strjoin(unknown(1:min(10, end)), ', '));
 end
-plan = struct('key', key, 'label', name, 'shotIndices', shotIndices, 'extraMarkIndices', zeros(1, 0));
+plan = struct('key', key, 'label', name, 'shotIndices', shotIndices);
 end

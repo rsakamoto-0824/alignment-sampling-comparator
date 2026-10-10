@@ -1,8 +1,7 @@
 """計測Markの選び方（ランダム・ポアソンディスク・D最適・I最適・手動）。ブラウザ版（src/js/sampling.js）と同じ手順。
 
-どの選び方も2段階で選ぶ。
-  1. Shotを選ぶ（条件制約はここで反映する）。選んだShotでは必ず測るMarkを測る
-  2. 「k個以上」のときは、選んだShotの残りのMarkから追加のMarkを選び、総Mark数にそろえる
+どの選び方もShotを選び（条件制約はここで反映する）、選んだShotではそのShotの有効なMarkをすべて測る。
+制約なしのD最適・I最適には、制約を外した前提（constraints.unconstrained_context）を渡す。
 乱数を使う順番はブラウザ版と同じにしてあるので、同じシードなら同じ点を選ぶ。
 """
 
@@ -12,7 +11,7 @@ import numpy as np
 
 from . import constants as C
 from . import correction
-from .constraints import SelectionState
+from .constraints import SelectionState, forced_items_of
 from .rng import Random, derive_seed
 
 # コレスキー因子の対角の比がこれより小さければ、多項式が決まらない（ほぼ特異）とみなす
@@ -43,8 +42,8 @@ def construct_sequential(context, random, min_distance_mm):
         state.add(item)
         np.minimum(nearest, np.hypot(positions[:, 0] - positions[item, 0], positions[:, 1] - positions[item, 1]), out=nearest)
 
-    if context["center"]["active"]:
-        add_item(context["center"]["itemIndex"])
+    for item in forced_items_of(context):
+        add_item(item)
     penalty_scale = context["softStrength"] * C.SOFT_PENALTY_SELECTION
     while len(state.list) < context["shotCount"]:
         feasible = ~state.selected & (nearest >= min_distance_mm) & state.can_add_hard_all()
@@ -63,15 +62,16 @@ def construct_sequential(context, random, min_distance_mm):
         if picked < 0:
             return None
         add_item(picked)
-    return state
+    # 強制計測Shotだけで区画の上限を超えるときは、ハード制約を満たせていない
+    return state if state.violation(True) == 0 else None
 
 
 def random_fill_and_repair(context, random):
     """無作為に埋めてから、入れ替えでハード制約の外れをなくす（1つずつ加える方法で行き詰まったとき用）。"""
     state = SelectionState(context, context["shotCount"])
-    forced = context["center"]["itemIndex"] if context["center"]["active"] else -1
-    if forced >= 0:
-        state.add(forced)
+    forced = set(forced_items_of(context))
+    for item in forced_items_of(context):
+        state.add(item)
     for item in random.shuffle(list(range(len(context["items"])))):
         if len(state.list) >= context["shotCount"]:
             break
@@ -82,7 +82,7 @@ def random_fill_and_repair(context, random):
             return state
         best_delta, best_swaps = 0, []
         for removed in list(state.list):
-            if removed == forced:
+            if removed in forced:
                 continue
             for added in range(len(context["items"])):
                 if state.selected[added]:
@@ -120,8 +120,7 @@ def select_random(context, random):
     state = find_feasible_state(context, random)
     if state is None:
         return None
-    measured = _measured_marks(context, state.list)
-    return {"items": list(state.list), "markIndices": measured + _extras_random(context, state.list, random)}
+    return {"items": list(state.list), "markIndices": measured_marks(context, state.list)}
 
 
 def select_poisson(context, random):
@@ -145,25 +144,32 @@ def select_poisson(context, random):
         best = find_feasible_state(context, random)
         if best is None:
             return None
-    measured = _measured_marks(context, best.list)
-    return {"items": list(best.list), "markIndices": measured + _extras_farthest(context, best.list, measured, random)}
+    return {"items": list(best.list), "markIndices": measured_marks(context, best.list)}
 
 
 # ---- D最適・I最適 -----------------------------------------------------------
 
 
 def build_models(context, term_sets):
-    """補正多項式ごとの計算材料（XとYで項が同じなら1つにまとめる）。"""
+    """補正多項式ごとの計算材料（XとYで項が同じなら1つにまとめる）。
+
+    blocks は候補（Shot）ごとの、測るMarkでの多項式の値（候補数 × k × p）。Shotごとに有効なMarkの数が違う
+    （Markが揃わない端のShot）ので、最も多いMark数 k まで0の行で埋める。0の行は情報行列に何も足さず、
+    入れ替えの計算（Woodbury）でも結果を変えないので、まとめて計算できる。
+    """
     unique = []
     for terms in term_sets:
         if not any(list(entry) == list(terms) for entry in unique):
             unique.append(list(terms))
     uv = correction.mark_coordinates(context["map"])
+    most = max(len(item["marks"]) for item in context["items"])
     models = []
     for terms in unique:
         all_design = correction.polynomial_design(uv, terms)
         weight = all_design.T @ all_design / len(uv)
-        blocks = np.stack([correction.polynomial_design(uv[item["designatedMarks"]], terms) for item in context["items"]])
+        blocks = np.zeros((len(context["items"]), most, len(terms)))
+        for index, item in enumerate(context["items"]):
+            blocks[index, : len(item["marks"])] = correction.polynomial_design(uv[item["marks"]], terms)
         models.append({"terms": terms, "p": len(terms), "weight": weight, "blocks": blocks})
     return models
 
@@ -238,14 +244,14 @@ def exchange_optimize(context, models, criterion, state):
     use_weight = criterion == "I"
     total_terms = sum(model["p"] for model in models)
     penalty_scale = context["softStrength"] * C.SOFT_PENALTY_LOG_EFFICIENCY
-    forced = context["center"]["itemIndex"] if context["center"]["active"] else -1
+    forced = set(forced_items_of(context))
     item_count = len(context["items"])
     for _ in range(C.OPTIMAL_MAX_PASSES):
         prepared = [prepare_exchange(model, state.list, use_weight) for model in models]
         trace_total = sum(entry["traceWeighted"] for entry in prepared)
         best_gain, best_swap = 1e-9, None
         for removed in list(state.list):
-            if removed == forced:
+            if removed in forced:
                 continue
             hard_delta = np.array([state.swap_delta(removed, added, True) for added in range(item_count)])
             changes = [swap_changes(model, prepared[index], removed, use_weight) for index, model in enumerate(models)]
@@ -294,102 +300,22 @@ def select_optimal(context, random, criterion, term_sets, start_count):
             best, best_objective = state, objective
     if best is None:
         return None
-    measured = _measured_marks(context, best.list)
-    return {"items": list(best.list), "markIndices": measured + _extras_optimal(context, best.list, measured, models, criterion)}
+    return {"items": list(best.list), "markIndices": measured_marks(context, best.list)}
 
 
-# ---- 追加のMark（k個以上のとき）-----------------------------------------------
-
-
-def _measured_marks(context, selected_items):
+def measured_marks(context, selected_items):
+    """選んだShot（候補番号）で測るMark（Shotの有効なMarkすべて。選んだ順）。"""
     marks = []
     for item in selected_items:
-        marks.extend(context["items"][item]["designatedMarks"])
+        marks.extend(context["items"][item]["marks"])
     return marks
-
-
-def _extra_candidates(context, selected_items):
-    candidates = []
-    for item in selected_items:
-        candidates.extend(context["items"][item]["otherMarks"])
-    forced = []
-    center = context["center"]
-    if center["active"] and not center["isDesignated"] and center["markIndex"] in candidates:
-        forced.append(center["markIndex"])
-    return [index for index in candidates if index not in forced], forced
-
-
-def _extras_random(context, selected_items, random):
-    if context["extraMarkCount"] <= 0:
-        return []
-    candidates, forced = _extra_candidates(context, selected_items)
-    random.shuffle(candidates)
-    return (forced + candidates)[: context["extraMarkCount"]]
-
-
-def _extras_farthest(context, selected_items, measured, random):
-    """すでに測るMarkから最も遠いMarkを順に選ぶ（同じ距離はごく小さな乱数で崩す）。"""
-    if context["extraMarkCount"] <= 0:
-        return []
-    marks = context["map"]["marks"]
-    candidates, forced = _extra_candidates(context, selected_items)
-    chosen, current, remaining = list(forced), measured + forced, list(candidates)
-    while len(chosen) < context["extraMarkCount"] and remaining:
-        best_index, best_distance = 0, -1.0
-        for index, mark_index in enumerate(remaining):
-            nearest = math.inf
-            for other in current:
-                nearest = min(nearest, math.hypot(marks[mark_index]["x"] - marks[other]["x"], marks[mark_index]["y"] - marks[other]["y"]))
-            nearest += random.next() * 1e-6
-            if nearest > best_distance:
-                best_distance, best_index = nearest, index
-        picked = remaining.pop(best_index)
-        chosen.append(picked)
-        current.append(picked)
-    return chosen[: context["extraMarkCount"]]
-
-
-def _extras_optimal(context, selected_items, measured, models, criterion):
-    """D・I最適の基準が最も良くなるMarkを1つずつ加える（Sherman-Morrisonで更新）。"""
-    if context["extraMarkCount"] <= 0:
-        return []
-    uv = correction.mark_coordinates(context["map"])
-    candidates, forced = _extra_candidates(context, selected_items)
-    chosen, current = list(forced), measured + forced
-    inverses = []
-    for model in models:
-        rows = correction.polynomial_design(uv[current], model["terms"])
-        inverses.append(np.linalg.inv(rows.T @ rows + C.INFORMATION_RIDGE * np.eye(model["p"])))
-    vectors = [correction.polynomial_design(uv[candidates], model["terms"]) if candidates else None for model in models]
-    remaining = list(range(len(candidates)))
-    while len(chosen) < context["extraMarkCount"] and remaining:
-        best_position, best_gain = 0, -math.inf
-        for position, candidate in enumerate(remaining):
-            gain = 0.0
-            for model_index, model in enumerate(models):
-                f = vectors[model_index][candidate]
-                af = inverses[model_index] @ f
-                leverage = float(f @ af)
-                if criterion == "I":
-                    gain += float(af @ (model["weight"] @ af)) / (1 + leverage)
-                else:
-                    gain += math.log(1 + leverage)
-            if is_clearly_greater(gain, best_gain):
-                best_gain, best_position = gain, position
-        candidate = remaining.pop(best_position)
-        for model_index, model in enumerate(models):
-            f = vectors[model_index][candidate]
-            af = inverses[model_index] @ f
-            inverses[model_index] = inverses[model_index] - np.outer(af, af) / (1 + float(f @ af))
-        chosen.append(candidates[candidate])
-    return chosen[: context["extraMarkCount"]]
 
 
 # ---- 手動 ------------------------------------------------------------------
 
 
-def manual_selection(context, shot_indices, extra_mark_indices):
-    """手動の選択（Shotの並び番号と追加Mark）から、測るMarkの一覧を作る。選べないShotは not_eligible で返す。"""
+def manual_selection(context, shot_indices):
+    """手動の選択（Shotの並び番号）から、測るMarkの一覧を作る。選べないShot（除外Shot・端のShot）は not_eligible で返す。"""
     item_by_shot = {item["shotIndex"]: index for index, item in enumerate(context["items"])}
     items, not_eligible = [], []
     for shot_index in shot_indices:
@@ -397,11 +323,7 @@ def manual_selection(context, shot_indices, extra_mark_indices):
             items.append(item_by_shot[shot_index])
         else:
             not_eligible.append(shot_index)
-    marks = _measured_marks(context, items)
-    if not context["exactMode"]:
-        allowed = {mark for item in items for mark in context["items"][item]["otherMarks"]}
-        marks.extend(index for index in extra_mark_indices if index in allowed)
-    return {"items": items, "markIndices": marks, "notEligible": not_eligible}
+    return {"items": items, "markIndices": measured_marks(context, items), "notEligible": not_eligible}
 
 
 # ---- 選んだ点の性質 ----------------------------------------------------------

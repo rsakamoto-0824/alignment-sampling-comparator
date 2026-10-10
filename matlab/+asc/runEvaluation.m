@@ -5,7 +5,7 @@ function output = runEvaluation(waferMap, data, settings, manualPlans, progress)
 %   3. 選んだ点ごとに全Waferを補正し、全Markの残差と、未計測Markの推定誤差を求める
 %   4. 選び方 × 補正 × 軸 × 指標で集計する
 %
-%   manualPlans: 手動プランの構造体配列（key, label, shotIndices, extraMarkIndices）。asc.planFromShotIds で作れる
+%   manualPlans: 手動プランの構造体配列（key, label, shotIndices）。asc.planFromShotIds で作れる
 %   progress:    progress(done, total, label) を呼ぶ関数ハンドル（省略可）
 %
 %   おもな戻り値（番号はすべて1始まり）
@@ -15,18 +15,18 @@ function output = runEvaluation(waferMap, data, settings, manualPlans, progress)
 %     output.summary(m).estimation(e)     推定精度（output.estimationKeys{e}）
 %     output.summary(m).criteriaX / constraints      D・I基準と制約の満たし具合
 %     output.sets(s)                      選んだ点（method, draw, shotIndices, markIndices, results など）
+%     output.failedMethods                制約を満たす点を選べなかった選び方の名前（cell）
 
 if nargin < 4 || isempty(manualPlans)
-    manualPlans = struct('key', {}, 'label', {}, 'shotIndices', {}, 'extraMarkIndices', {});
+    manualPlans = struct('key', {}, 'label', {}, 'shotIndices', {});
 end
 if nargin < 5
     progress = [];
 end
 C = asc.constants();
 axisNames = {'x', 'y'};
-context = asc.buildContext(waferMap, settings);
 samplingSettings = settings.sampling;
-[context, relaxed] = asc.resolveHardConstraints(context, samplingSettings.seed);
+[context, freeContext, relaxed] = asc.prepareContext(waferMap, settings);
 variants = asc.buildVariants(settings.model);
 cache = asc.modelCache(waferMap);
 termSets = {settings.model.termsX(:)', settings.model.termsY(:)'};
@@ -59,30 +59,23 @@ totalSteps = numel(entries) * 2 + 2;
 done = 0;
 
 sets = {};
+failedMethods = cell(1, 0);
 for entry = entries
-    methodIndex = find(strcmp({C.METHODS.key}, entry.method), 1) - 1;  % 0始まり（手動は −1）
-    if isempty(methodIndex)
-        methodIndex = -1;
-    end
-    random = asc.Random(asc.Random.deriveSeed(samplingSettings.seed, C.STREAM_METHOD_BASE + methodIndex * 100000 + entry.draw));
-    switch entry.method
-        case 'random'
-            selection = asc.selectRandom(context, random);
-        case 'poisson'
-            selection = asc.selectPoisson(context, random);
-        case 'dOptimal'
-            selection = asc.selectOptimal(context, random, 'D', termSets, samplingSettings.optimalStarts);
-        case 'iOptimal'
-            selection = asc.selectOptimal(context, random, 'I', termSets, samplingSettings.optimalStarts);
-        otherwise
-            selection = asc.manualSelection(context, entry.plan.shotIndices, entry.plan.extraMarkIndices);
+    if isempty(entry.plan)
+        selection = asc.selectByMethod(entry.method, context, freeContext, settings, entry.draw, termSets);
+    else
+        selection = asc.manualSelection(context, entry.plan.shotIndices);
     end
     done = done + 1;
     report('計測Markを選んでいます');
     if isempty(selection) || isempty(selection.markIndices)
+        label = methodList(strcmp({methodList.key}, entry.method)).label;
+        if ~ismember(label, failedMethods)
+            failedMethods{end + 1} = label; %#ok<AGROW>
+        end
         continue
     end
-    sets{end + 1} = describeSet(context, settings.model, entry, selection); %#ok<AGROW>
+    sets{end + 1} = asc.describeSet(context, settings.model, entry, selection); %#ok<AGROW>
 end
 
 for s = 1:numel(sets)
@@ -112,9 +105,10 @@ usedMethods = methodList(arrayfun(@(method) any(strcmp({sets.method}, method.key
 output = struct();
 output.context = context;
 output.relaxed = relaxed;
+output.failedMethods = failedMethods;
 output.sets = sets;
 output.variants = variants;
-output.criteriaReference = criteriaReference(sets, axisNames);
+output.criteriaReference = asc.criteriaReference(sets);
 output.criteriaSameTerms = isequal(settings.model.termsX(:), settings.model.termsY(:));
 output.methods = usedMethods;
 output.estimationKeys = estimationKeys;
@@ -139,52 +133,6 @@ for estimator = C.ESTIMATORS
 end
 end
 
-function entry = describeSet(context, modelSettings, plan, selection)
-markIndices = unique(selection.markIndices);
-warnings = {};
-if isfield(selection, 'notEligible') && ~isempty(selection.notEligible)
-    warnings{end + 1} = sprintf('手動プランの、必ず測るMarkが有効範囲外のShot %d個は、評価から外しました。', numel(selection.notEligible));
-end
-shotIndices = [context.items(selection.items).shotIndex];
-entry = struct('method', plan.method, 'draw', plan.draw, 'items', selection.items, 'shotIndices', shotIndices, ...
-    'markIndices', markIndices(:)', 'minSpacingMm', asc.minimumShotSpacing(context, selection.items), ...
-    'criteria', criteriaOf(context.map, markIndices, modelSettings), ...
-    'status', asc.describeStatus(context, selection.items, markIndices), ...
-    'results', [], 'estimation', [], 'estimationSquares', [], 'gpChoices', []);
-entry.warnings = warnings;
-end
-
-function criteria = criteriaOf(waferMap, markIndices, modelSettings)
-% X・YのD基準・I基準（項が同じなら同じ計算を使い回す）
-x = asc.designCriteria(waferMap, markIndices, modelSettings.termsX(:)');
-same = isequal(modelSettings.termsX(:), modelSettings.termsY(:));
-if same
-    y = x;
-else
-    y = asc.designCriteria(waferMap, markIndices, modelSettings.termsY(:)');
-end
-criteria = struct('x', x, 'y', y, 'sameTerms', same);
-end
-
-function reference = criteriaReference(sets, axisNames)
-% 効率の基準: 全部の選び方・試行の中で、D基準が最大のものとI基準が最小のもの（軸ごと。なければ []）
-reference = struct();
-for k = 1:numel(axisNames)
-    usable = [];
-    for s = 1:numel(sets)
-        criteria = sets(s).criteria.(axisNames{k});
-        if ~criteria.singular
-            usable = [usable; criteria.logDet, criteria.trace]; %#ok<AGROW>
-        end
-    end
-    if isempty(usable)
-        reference.(axisNames{k}) = [];
-    else
-        reference.(axisNames{k}) = struct('logDet', max(usable(:, 1)), 'trace', min(usable(:, 2)));
-    end
-end
-end
-
 function result = summarizeStores(stores, axisNames)
 % 複数の試行の指標（Wafer数×1）をまとめる。all は全試行・全Wafer、perDraw は試行ごとの平均の分布
 metricKeys = {'rms', 'mean3sigma', 'max'};
@@ -205,26 +153,17 @@ end
 
 function summary = summarizeConstraints(methodSets)
 % 制約ごとに、満たした試行の数とずれ（何個のShotを移せば満たせるか）の平均・最大
-first = methodSets(1).status;
-keys = {first.rows.key};
-labels = {first.rows.label};
-hards = [first.rows.hard];
-if ~isempty(first.center)
-    keys{end + 1} = 'center';
-    labels{end + 1} = first.center.label;
-    hards(end + 1) = first.center.hard;
-end
+first = asc.statusRows(methodSets(1).status);
+keys = {first.key};
+labels = {first.label};
+hards = [first.hard];
 summary = struct('key', {}, 'label', {}, 'hard', {}, 'satisfied', {}, 'total', {}, 'meanShift', {}, 'maxShift', {});
 for k = 1:numel(keys)
     ok = zeros(numel(methodSets), 1);
     shift = zeros(numel(methodSets), 1);
     for s = 1:numel(methodSets)
-        status = methodSets(s).status;
-        if strcmp(keys{k}, 'center')
-            entry = status.center;
-        else
-            entry = status.rows(strcmp({status.rows.key}, keys{k}));
-        end
+        rows = asc.statusRows(methodSets(s).status);
+        entry = rows(strcmp({rows.key}, keys{k}));
         ok(s) = entry.ok;
         shift(s) = entry.shift;
     end

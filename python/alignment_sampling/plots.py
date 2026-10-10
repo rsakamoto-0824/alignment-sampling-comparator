@@ -1,8 +1,8 @@
 """ノートブック用の図（matplotlib）。ブラウザ版の図に合わせた見た目にする。
 
-  plot_selection_map   Waferマップに選んだShot・測るMarkを描く
-  plot_residual_boxes  選び方 × 補正の残差の箱ひげ図
-  plot_sweep           計測Mark数と精度のトレードオフカーブ
+  plot_selection_map   Waferマップに選んだShot・測るMark・Shot番号を描く
+  plot_residual_boxes  選び方 × 補正（HOWAのみ・推定→HOWA）の残差の箱ひげ図
+  plot_sweep           計測Mark数（または計測Shot数）と精度のトレードオフカーブ
   plot_estimation_error_map  未計測Markごとの推定誤差（全WaferのRMS）
 """
 
@@ -20,8 +20,16 @@ from .evaluator import estimation_label
 JAPANESE_FONTS = ["Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "BIZ UDGothic", "Noto Sans CJK JP", "IPAexGothic"]
 # 推定手法ごとの色（ブラウザ版と同じ）
 SERIES_COLORS = {"howa": "#2a78d6", "rbfXY": "#eb6834", "rbfXYR": "#1baf7a", "gpXY": "#eda100", "gpXYR": "#e87ba4"}
-# 選び方ごとの線の色と形（ブラウザ版のスイープと同じ。ランダムは基準として灰色）
-METHOD_STYLES = {"random": ("#6b6a65", "o"), "poisson": ("#008300", "s"), "dOptimal": ("#4a3aa7", "^"), "iOptimal": ("#e34948", "D")}
+# 選び方ごとの線の色・印・線の種類（ブラウザ版のスイープと同じ。ランダムは基準として灰色）。
+# D最適・I最適は、制約なしを破線と中抜きの印、制約付きを実線と塗りの印にする
+METHOD_STYLES = {
+    "random": ("#6b6a65", "o", "-"),
+    "poisson": ("#008300", "s", "-"),
+    "dOptimal": ("#4a3aa7", "^", "--"),
+    "iOptimal": ("#e34948", "D", "--"),
+    "constrainedD": ("#4a3aa7", "^", "-"),
+    "constrainedI": ("#e34948", "D", "-"),
+}
 SELECTED_FILL = "#cfe0f7"
 MEASURED_COLOR = "#0d366b"
 STEP_COLORS = ["#e3eefc", "#b7d3f6", "#86b6ef", "#3987e5", "#1c5cab"]
@@ -53,16 +61,23 @@ def _draw_wafer(ax, wafer_map, zones=None):
     ax.set_ylabel("Y [mm]")
 
 
-def plot_selection_map(wafer_map, selection_set, title="", zones=None, ax=None):
-    """Waferマップに、選んだShot（塗り）・測るMark（濃い点）・Scan方向（▲▼）を描く。"""
+def plot_selection_map(wafer_map, selection_set, title="", zones=None, ax=None, show_shot_ids=True, mandatory_shot_indices=()):
+    """Waferマップに、選んだShot（塗り）・測るMark（濃い点）・Shot番号・Scan方向（▲▼）・強制計測Shot（太枠）を描く。"""
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 6))
     width, height = wafer_map["shotWidthMm"], wafer_map["shotHeightMm"]
     selected = set(selection_set["shotIndices"]) if selection_set else set()
     measured = set(selection_set["markIndices"]) if selection_set else set()
+    mandatory = set(mandatory_shot_indices)
     for index, shot in enumerate(wafer_map["shots"]):
         ax.add_patch(Rectangle((shot["x"] - width / 2, shot["y"] - height / 2), width, height, facecolor=SELECTED_FILL if index in selected else "white", edgecolor="#a3a29a", linewidth=0.4))
-        ax.text(shot["x"], shot["y"], "▲" if shot["scan"] == C.SCAN_UP else "▼", ha="center", va="center", fontsize=5, color="#6b6a65")
+        if index in mandatory:
+            ax.add_patch(Rectangle((shot["x"] - width / 2 + 0.8, shot["y"] - height / 2 + 0.8), width - 1.6, height - 1.6, fill=False, edgecolor="#0b0b0b", linewidth=1.4))
+        glyph_y = shot["y"]
+        if show_shot_ids:
+            ax.text(shot["x"], shot["y"] + 5.5, shot["id"], ha="center", va="center", fontsize=5, color="#0b0b0b")
+            glyph_y = shot["y"] - 6.5
+        ax.text(shot["x"], glyph_y, "▲" if shot["scan"] == C.SCAN_UP else "▼", ha="center", va="center", fontsize=4, color="#6b6a65")
     marks = np.array([[mark["x"], mark["y"]] for mark in wafer_map["marks"]])
     is_measured = np.array([index in measured for index in range(len(marks))])
     ax.scatter(marks[~is_measured, 0], marks[~is_measured, 1], s=4, facecolors="white", edgecolors="#6b6a65", linewidths=0.4)
@@ -79,9 +94,9 @@ def _method_label(output, key):
     return f"{method['label']}（手動）" if method.get("manual") else method["label"]
 
 
-def plot_residual_boxes(output, flow_type="estimateThenHowa", axis="x", metric="rms", ax=None):
-    """選び方ごとに、HOWAのみ と選んだ流れの推定手法の残差を箱ひげ図で並べる（箱 25〜75%、ひげ 5〜95%）。"""
-    variants = [variant for variant in output["variants"] if variant["flowType"] in ("howa", flow_type)]
+def plot_residual_boxes(output, axis="x", metric="rms", ax=None):
+    """選び方ごとに、HOWAのみ と推定→HOWA（推定手法ごと）の残差を箱ひげ図で並べる（箱 25〜75%、ひげ 5〜95%）。"""
+    variants = output["variants"]
     methods = output["methods"]
     if ax is None:
         _, ax = plt.subplots(figsize=(9, 0.35 * len(methods) * len(variants) + 1.5))
@@ -107,19 +122,23 @@ def plot_residual_boxes(output, flow_type="estimateThenHowa", axis="x", metric="
     return ax
 
 
-def plot_sweep(sweep, variant_key="howa", axis="x", metric="rms", stat="mean", log_scale=False, target=None, ax=None):
-    """計測Mark数（横軸）と残差（縦軸）のトレードオフカーブ。手動プランは × の点で重ねる。"""
+def plot_sweep(sweep, variant_key="howa", axis="x", metric="rms", stat="mean", log_scale=False, target=None, ax=None, x_axis="marks"):
+    """計測Mark数（x_axis="marks"）か計測Shot数（"shots"）を横軸、残差を縦軸にしたトレードオフカーブ。
+
+    計測Mark数は選び方ごとの試行平均（端のShotを選べば選び方ごとに少し違う）。手動プランは × の点で重ねる。
+    """
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 5))
     points = [point for point in sweep["points"] if "summary" in point]
     for method in sweep["methods"]:
-        color, marker = METHOD_STYLES.get(method["key"], ("#000000", "o"))
-        xs = [point["markCounts"][method["key"]] for point in points]
+        color, marker, line_style = METHOD_STYLES.get(method["key"], ("#000000", "o", "-"))
+        xs = [point["markCounts"][method["key"]] if x_axis == "marks" else point["shotCount"] for point in points]
         ys = [point["summary"][method["key"]]["variants"][variant_key][axis][metric]["all"][stat] for point in points]
-        ax.plot(xs, ys, marker=marker, color=color, linewidth=2, label=method["label"])
+        hollow = line_style == "--"
+        ax.plot(xs, ys, marker=marker, color=color, linestyle=line_style, linewidth=2, markerfacecolor="white" if hollow else color, label=method["label"])
     if sweep.get("manual"):
         for method in sweep["manual"]["methods"]:
-            x = sweep["manual"]["markCounts"][method["key"]]
+            x = sweep["manual"]["markCounts" if x_axis == "marks" else "shotCounts"][method["key"]]
             y = sweep["manual"]["summary"][method["key"]]["variants"][variant_key][axis][metric]["all"][stat]
             ax.scatter([x], [y], marker="x", s=60, color="black", zorder=5)
             ax.annotate(f"{method['label']}（手動）", (x, y), xytext=(6, 0), textcoords="offset points", va="center", fontsize=8)
@@ -129,7 +148,7 @@ def plot_sweep(sweep, variant_key="howa", axis="x", metric="rms", stat="mean", l
         ax.axhline(target, color="#4a4945", linewidth=1, linestyle=":", label=f"目標 {target}")
     if log_scale:
         ax.set_yscale("log")
-    ax.set_xlabel("計測Mark数（計測コスト）")
+    ax.set_xlabel("計測Mark数（計測コスト）" if x_axis == "marks" else "計測Shot数")
     ax.set_ylabel(f"残差 {metric}（{axis.upper()}、{'95%点' if stat == 'p95' else 'Wafer平均'}）[nm]")
     ax.grid(color="#e1e0d9")
     ax.legend(fontsize=8)

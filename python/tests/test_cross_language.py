@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import alignment_sampling as asc  # noqa: E402
 from alignment_sampling import constants as C  # noqa: E402
+from alignment_sampling import constraints as K  # noqa: E402
 from alignment_sampling.rng import Random, derive_seed  # noqa: E402
 
 REFERENCE_DIRECTORY = Path(__file__).resolve().parents[2] / "tests" / "reference"
@@ -44,8 +45,28 @@ class RandomTest(unittest.TestCase):
         self.assertEqual([derive_seed(1, 0), derive_seed(1, 1000), derive_seed(4294967295, 7919)], [2980047484, 2214279594, 1482834068])
 
 
+def shift_rows(status):
+    return [{"key": row["key"], "shift": row["shift"], "ok": row["ok"]} for row in K.status_rows(status)]
+
+
+def check_sets(test, actual_sets, expected_sets):
+    """選んだ点（Shot・Mark の完全一致）と、D・I基準・制約の満たし具合を照合する。"""
+    test.assertEqual(len(actual_sets), len(expected_sets))
+    for actual, expected in zip(actual_sets, expected_sets):
+        label = f"{expected['method']} 試行{expected['draw'] + 1}"
+        test.assertEqual(actual["method"], expected["method"])
+        test.assertEqual(actual["shotIndices"], expected["shotIndices"], f"{label}: 選んだShotが違います")
+        test.assertEqual(actual["markIndices"], expected["markIndices"], f"{label}: 測るMarkが違います")
+        assert_close(test, actual["minSpacingMm"], expected["minSpacingMm"], f"{label} 最小間隔")
+        for axis in ["x", "y"]:
+            test.assertEqual(actual["criteria"][axis]["singular"], expected["criteria"][axis]["singular"])
+            assert_close(test, actual["criteria"][axis]["logDet"], expected["criteria"][axis]["logDet"], f"{label} D基準 {axis}")
+            assert_close(test, actual["criteria"][axis]["trace"], expected["criteria"][axis]["trace"], f"{label} I基準 {axis}")
+        test.assertEqual(shift_rows(actual["status"]), expected["shifts"], f"{label}: 制約の満たし具合が違います")
+
+
 class ScenarioTest:
-    """場面ごとの照合（A・Bで共通）。"""
+    """場面ごとの照合（A・B・Cで共通）。"""
 
     name = None
 
@@ -64,6 +85,7 @@ class ScenarioTest:
         self.assertEqual(len(self.map["shots"]), reference["map"]["shotCount"])
         self.assertEqual([shot["id"] for shot in self.map["shots"]], reference["map"]["shotIds"])
         self.assertEqual([shot["scan"] for shot in self.map["shots"]], reference["map"]["scans"])
+        self.assertEqual([shot["definedMarkCount"] for shot in self.map["shots"]], reference["map"]["definedMarkCounts"])
         marks = np.array([[mark["x"], mark["y"], mark["shotIndex"], mark["markNo"]] for mark in self.map["marks"]])
         np.testing.assert_allclose(marks, np.array(reference["map"]["marks"]), atol=1e-12)
         np.testing.assert_allclose(self.data["truthX"][0], reference["data"]["truthX0"], rtol=1e-9, atol=1e-12)
@@ -75,20 +97,17 @@ class ScenarioTest:
         self.assertEqual([method["key"] for method in self.output["methods"]], self.reference["methods"])
         self.assertEqual([variant["key"] for variant in self.output["variants"]], self.reference["variants"])
         self.assertEqual([entry["key"] for entry in self.output["relaxed"]], self.reference["relaxed"])
-        self.assertEqual(len(self.output["sets"]), len(self.reference["sets"]))
-        for actual, expected in zip(self.output["sets"], self.reference["sets"]):
-            label = f"{expected['method']} 試行{expected['draw'] + 1}"
-            self.assertEqual(actual["shotIndices"], expected["shotIndices"], f"{label}: 選んだShotが違います")
-            self.assertEqual(actual["markIndices"], expected["markIndices"], f"{label}: 測るMarkが違います")
-            assert_close(self, actual["minSpacingMm"], expected["minSpacingMm"], f"{label} 最小間隔")
-            for axis in ["x", "y"]:
-                self.assertEqual(actual["criteria"][axis]["singular"], expected["criteria"][axis]["singular"])
-                assert_close(self, actual["criteria"][axis]["logDet"], expected["criteria"][axis]["logDet"], f"{label} D基準 {axis}")
-                assert_close(self, actual["criteria"][axis]["trace"], expected["criteria"][axis]["trace"], f"{label} I基準 {axis}")
-            shifts = [{"key": row["key"], "shift": row["shift"], "ok": row["ok"]} for row in actual["status"]["rows"]]
-            if actual["status"]["center"]:
-                shifts.append({"key": "center", "shift": actual["status"]["center"]["shift"], "ok": actual["status"]["center"]["ok"]})
-            self.assertEqual(shifts, expected["shifts"], f"{label}: 制約の満たし具合が違います")
+        self.assertEqual(self.output["failedMethods"], self.reference["failedMethods"])
+        self.assertEqual([item["shotIndex"] for item in self.output["context"]["items"]], self.reference["eligibleShots"])
+        self.assertEqual(self.output["context"]["mandatoryItems"], self.reference["mandatoryItems"])
+        check_sets(self, self.output["sets"], self.reference["sets"])
+
+    def test_plan_and_selection_csv(self):
+        """「計画を作成」の点（制約付きD最適・I最適）と、選択点のCSVの文字が同じ。"""
+        plan = asc.run_plan(self.map, self.reference["settings"])
+        self.assertEqual([entry["key"] for entry in plan["relaxed"]], self.reference["plan"]["relaxed"])
+        check_sets(self, plan["sets"], self.reference["plan"]["sets"])
+        self.assertEqual(asc.selection_to_csv(self.map, plan["sets"][0]["markIndices"]), self.reference["selectionCsv"])
 
     def test_summary_values(self):
         for method_key, expected in self.reference["summary"].items():
@@ -142,7 +161,7 @@ class ScenarioBTest(ScenarioTest, unittest.TestCase):
 
 
 class ScenarioCTest(ScenarioTest, unittest.TestCase):
-    """「k個以上」でShotあたり2.5個のスイープ（総Mark数の四捨五入で 0.5 が出る）。"""
+    """一筆書きを右下から・強制計測Shot・スイープで選ぶ選び方を絞る（端のShotでMark数が選び方ごとに違う）。"""
 
     name = "c"
 
@@ -154,7 +173,25 @@ class SettingsTest(unittest.TestCase):
         settings = C.default_settings()
         for section in ["map", "zones", "model", "constraints"]:
             self.assertEqual(settings[section], reference[section], f"{section} の初期設定が違います")
+        self.assertEqual(settings["sweep"]["methods"], reference["sweep"]["methods"])
+        self.assertEqual(sorted(settings["sampling"]), sorted(reference["sampling"]), "sampling の項目が違います")
         self.assertEqual(settings["evaluationData"]["terms"], reference["evaluationData"]["terms"])
+
+    def test_old_settings_file(self):
+        """版2の設定ファイル: D最適・I最適は制約付きとして読み、なくなった項目は使わない。"""
+        import json
+        import tempfile
+
+        old = {"version": 2, "settings": {"sampling": {"shotCount": 12, "designatedMarkNos": [1, 4], "markMode": "atLeast", "methods": {"random": False, "poisson": True, "dOptimal": True, "iOptimal": False}}, "model": {"flows": {"howa": True, "estimateThenHowa": False, "howaPlusEstimate": True}}}}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "old.json"
+            path.write_text(json.dumps(old), encoding="utf-8")
+            loaded = asc.load_settings_file(path)
+        sampling_settings = loaded["settings"]["sampling"]
+        self.assertEqual(sampling_settings["shotCount"], 12)
+        self.assertNotIn("designatedMarkNos", sampling_settings)
+        self.assertEqual(sampling_settings["methods"], {"random": False, "poisson": True, "dOptimal": False, "iOptimal": False, "constrainedD": True, "constrainedI": False})
+        self.assertEqual(loaded["settings"]["model"]["flows"], {"howa": True, "estimateThenHowa": False})
 
     def test_csv_round_trip(self):
         settings = C.default_settings()

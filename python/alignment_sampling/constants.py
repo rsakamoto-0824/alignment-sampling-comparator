@@ -14,6 +14,8 @@ NORMALIZATION_RADIUS_MM = 150
 # ---- Scan方向 ----
 SCAN_UP = "Up"
 SCAN_DOWN = "Down"
+# 一筆書き（露光順）の開始の角。行ごとに蛇行し、1 Shot進むごとにUp/Downを交互にする
+SERPENTINE_STARTS = ["topLeft", "topRight", "bottomLeft", "bottomRight"]
 
 # ---- Zernike ----
 MAX_FRINGE_INDEX = 36
@@ -26,7 +28,6 @@ DISTRIBUTION_NORMAL = "normal"
 FLOW_TYPES = [
     {"key": "howa", "label": "HOWAのみ"},
     {"key": "estimateThenHowa", "label": "推定→HOWA"},
-    {"key": "howaPlusEstimate", "label": "HOWA＋推定"},
 ]
 ESTIMATORS = [
     {"key": "rbfXY", "type": "rbf", "features": "xy", "label": "RBF（X,Y）", "longLabel": "RBF（説明変数 X,Y）"},
@@ -44,17 +45,22 @@ GP_NOISE_RATIO_MAX = 10
 GP_NOISE_RATIO_STEPS = 11
 
 # ---- 選び方 ----
+# constrained: 条件制約を守って選ぶか。criterion: D最適・I最適の基準。並び順は乱数列の番号にも使う
 METHODS = [
-    {"key": "random", "label": "ランダム", "usesDraws": True},
-    {"key": "poisson", "label": "ポアソンディスク", "usesDraws": True},
-    {"key": "dOptimal", "label": "D最適", "usesDraws": False},
-    {"key": "iOptimal", "label": "I最適", "usesDraws": False},
+    {"key": "random", "label": "ランダム", "usesDraws": True, "constrained": True, "criterion": None},
+    {"key": "poisson", "label": "ポアソンディスク", "usesDraws": True, "constrained": True, "criterion": None},
+    {"key": "dOptimal", "label": "D最適（制約なし）", "usesDraws": False, "constrained": False, "criterion": "D"},
+    {"key": "iOptimal", "label": "I最適（制約なし）", "usesDraws": False, "constrained": False, "criterion": "I"},
+    {"key": "constrainedD", "label": "制約付きD最適", "usesDraws": False, "constrained": True, "criterion": "D"},
+    {"key": "constrainedI", "label": "制約付きI最適", "usesDraws": False, "constrained": True, "criterion": "I"},
 ]
+# 「計画を作成」で選ぶ方法（評価データを使わずに、選んだ点だけを出す）
+PLAN_METHOD_KEYS = ["constrainedD", "constrainedI"]
 MANUAL_PREFIX = "manual:"
 
 # ---- 条件制約 ----
 CONSTRAINT_KEYS = ["center", "scan", "quadrant", "zone"]
-CONSTRAINT_LABELS = {"center": "中心の1点", "scan": "Scan方向", "quadrant": "4象限", "zone": "同心円の3領域"}
+CONSTRAINT_LABELS = {"center": "中心の1点", "scan": "Scan方向", "quadrant": "4象限", "zone": "同心円の3領域", "mandatory": "強制計測Shot"}
 ALLOCATION_PROPORTIONAL = "proportional"
 # 優先度ごとのソフト制約の重み。優先度が1つ上がるごとに2倍にする
 PRIORITY_WEIGHTS = {1: 8, 2: 4, 3: 2, 4: 1}
@@ -85,7 +91,9 @@ _DEFAULT_SETTINGS = {
         "offsetXmm": 13,
         "offsetYmm": 16.5,
         "validRadiusMm": 150,
-        "scanPattern": "checker",
+        "scanPattern": "serpentine",
+        "serpentineStart": "topLeft",
+        "serpentineFirstScan": "Up",
         "marks": [
             {"markNo": 1, "x": -12, "y": 15.5},
             {"markNo": 2, "x": 12, "y": 15.5},
@@ -93,8 +101,8 @@ _DEFAULT_SETTINGS = {
             {"markNo": 4, "x": 12, "y": -15.5},
         ],
     },
-    # 初期のマップで、選べるShotの数が3領域でほぼそろう値（20・24・24個）
-    "zones": {"innerRadiusMm": 80, "outerRadiusMm": 115},
+    # 初期のマップで、選べるShotの数が3領域でほぼそろう値（36・32・36個）
+    "zones": {"innerRadiusMm": 95, "outerRadiusMm": 135},
     "evaluationData": {
         "waferCount": 100,
         "seed": 1,
@@ -111,7 +119,7 @@ _DEFAULT_SETTINGS = {
     "model": {
         "termsX": list(range(21)),
         "termsY": list(range(21)),
-        "flows": {"howa": True, "estimateThenHowa": True, "howaPlusEstimate": True},
+        "flows": {"howa": True, "estimateThenHowa": True},
         "estimators": {"rbfXY": True, "rbfXYR": True, "gpXY": True, "gpXYR": True},
         "rbfKernel": "tps",
         "rbfLambda": 0,
@@ -119,22 +127,31 @@ _DEFAULT_SETTINGS = {
         "gpKernel": "squaredExponential",
     },
     "sampling": {
+        # 選んだShotでは、そのShotの有効なMarkをすべて測る
         "shotCount": 20,
-        "designatedMarkNos": [1, 4],
-        "markMode": "exact",
-        "totalMarkCount": 48,
+        # True なら、Markが揃わない端のShot（有効半径の外にMarkがはみ出すShot）は選ばない
+        "excludeIncompleteShots": False,
         "draws": 30,
         "optimalStarts": 5,
         "seed": 1,
-        "methods": {"random": True, "poisson": True, "dOptimal": True, "iOptimal": True},
+        "methods": {"random": True, "poisson": True, "dOptimal": True, "iOptimal": True, "constrainedD": True, "constrainedI": True},
     },
-    "sweep": {"startShots": 10, "endShots": 60, "stepShots": 10, "draws": 10},
+    "sweep": {
+        "startShots": 10,
+        "endShots": 60,
+        "stepShots": 10,
+        "draws": 10,
+        "methods": {"random": True, "poisson": True, "dOptimal": True, "iOptimal": True, "constrainedD": True, "constrainedI": True},
+    },
     "constraints": {
         "center": {"enabled": True, "priority": 1},
         "scan": {"enabled": True, "hard": True, "priority": 2, "allocation": "equal"},
         "quadrant": {"enabled": True, "hard": True, "priority": 3, "allocation": "equal"},
         "zone": {"enabled": True, "hard": True, "priority": 4, "allocation": "equal"},
         "softStrength": 0.5,
+        # 必ず測るShot（強制計測Shot）と、選ばないShot（除外Shot）。Shot番号（ShotId）の文字で持つ
+        "mandatoryShotIds": [],
+        "excludedShotIds": [],
     },
 }
 

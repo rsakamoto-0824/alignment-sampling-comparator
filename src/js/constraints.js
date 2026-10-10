@@ -2,9 +2,11 @@
  * サンプリングの前提（選べるShot・区画分け）と条件制約の判定。
  *
  * 用語:
- *   候補（item）: 選べるShot。必ず測るMarkがすべて有効範囲にあるShot
+ *   候補（item）: 選べるShot。除外Shotと、（設定によっては）Markが揃わない端のShotを除いたもの。
+ *                 選んだShotでは、そのShotの有効なMarkをすべて測る
  *   区画（class）: 制約ごとの分け方（Scan方向は2つ、4象限は4つ、同心円は3つ）
  *   目標の幅: 各区画の選択数が入るべき範囲 [floor, ceil]。同数配分なら差1以内と同じ意味
+ *   強制計測Shot: 必ず選ぶShot（常にハード）。中心の1点のShotとあわせて、入れ替えの対象にしない
  * 制約は「選んだShotの数」で数え、区画はShot中心の座標で判定する。
  */
 (function (root) {
@@ -37,9 +39,6 @@
     if (!(zones.innerRadiusMm > 0) || !(zones.outerRadiusMm > zones.innerRadiusMm) || !(zones.outerRadiusMm < map.validRadiusMm)) {
       errors.push(`同心円の区切りは 0 < 内側 < 外側 < 有効半径（${map.validRadiusMm} mm）にしてください。`);
     }
-    if (sampling.designatedMarkNos.length === 0) {
-      errors.push("必ず測るMarkを1つ以上選んでください。");
-    }
     if (!Number.isInteger(sampling.shotCount) || sampling.shotCount < 1) {
       errors.push("計測Shot数は1以上の整数にしてください。");
     }
@@ -52,8 +51,18 @@
     return errors;
   }
 
+  /** Shot番号の並び（数でも文字でもよい）を、重複のない文字の並びにする。 */
+  function shotIdList(values) {
+    return Array.isArray(values) ? Array.from(new Set(values.map((value) => String(value).trim()).filter((value) => value !== ""))) : [];
+  }
+
+  /** Markが揃わない端のShot（定義したMarkの一部が有効範囲の外にあるShot）か。 */
+  function isIncompleteShot(shot) {
+    return shot.markIndices.length < shot.definedMarkCount;
+  }
+
   /**
-   * 候補・区画・中心の1点をまとめた「サンプリングの前提」を作る。
+   * 候補・区画・中心の1点・強制計測Shotをまとめた「サンプリングの前提」を作る。
    */
   function buildContext(map, settings) {
     const errors = validateSettings(map, settings);
@@ -61,61 +70,93 @@
       return { context: null, errors };
     }
     const sampling = settings.sampling;
-    const designatedNos = Array.from(new Set(sampling.designatedMarkNos)).sort((a, b) => a - b);
-    const markCountPerShot = designatedNos.length;
+    const constraintSettings = settings.constraints;
+    const shotIndexById = new Map(map.shots.map((shot, index) => [shot.id, index]));
+    const mandatoryIds = shotIdList(constraintSettings.mandatoryShotIds);
+    const excludedIds = shotIdList(constraintSettings.excludedShotIds);
+    for (const [ids, label] of [[mandatoryIds, "強制計測Shot"], [excludedIds, "除外Shot"]]) {
+      const unknown = ids.filter((id) => !shotIndexById.has(id));
+      if (unknown.length > 0) {
+        errors.push(`${label}の番号 ${unknown.slice(0, 8).join(", ")}${unknown.length > 8 ? " ほか" : ""} がマップにありません。マップのShot番号を確かめてください。`);
+      }
+    }
+    const excludedShots = new Set(excludedIds.filter((id) => shotIndexById.has(id)).map((id) => shotIndexById.get(id)));
 
     const items = [];
+    const itemByShot = new Map();
     map.shots.forEach((shot, shotIndex) => {
-      const markByNo = new Map(shot.markIndices.map((markIndex) => [map.marks[markIndex].markNo, markIndex]));
-      if (!designatedNos.every((markNo) => markByNo.has(markNo))) {
+      if (excludedShots.has(shotIndex) || (sampling.excludeIncompleteShots && isIncompleteShot(shot))) {
         return;
       }
-      const designatedMarks = designatedNos.map((markNo) => markByNo.get(markNo));
-      const otherMarks = shot.markIndices.filter((markIndex) => !designatedMarks.includes(markIndex));
-      items.push({ shotIndex, x: shot.x, y: shot.y, scan: shot.scan, designatedMarks, otherMarks });
+      itemByShot.set(shotIndex, items.length);
+      items.push({ shotIndex, x: shot.x, y: shot.y, scan: shot.scan, marks: shot.markIndices.slice() });
     });
 
-    const shotCount = sampling.shotCount;
-    const exactMode = sampling.markMode === "exact";
-    const totalMarkCount = exactMode ? shotCount * markCountPerShot : sampling.totalMarkCount;
-    const extraMarkCount = totalMarkCount - shotCount * markCountPerShot;
+    const mandatoryItems = [];
+    for (const id of mandatoryIds) {
+      if (!shotIndexById.has(id)) {
+        continue;
+      }
+      const shotIndex = shotIndexById.get(id);
+      if (excludedShots.has(shotIndex)) {
+        errors.push(`Shot ${id} が強制計測Shotと除外Shotの両方に入っています。どちらかから外してください。`);
+      } else if (!itemByShot.has(shotIndex)) {
+        errors.push(`強制計測Shot ${id} はMarkが揃わない端のShotなので選べません。番号を外すか、「Markが揃わない端のShotは選ばない」をオフにしてください。`);
+      } else {
+        mandatoryItems.push(itemByShot.get(shotIndex));
+      }
+    }
+    mandatoryItems.sort((a, b) => a - b);
 
+    const shotCount = sampling.shotCount;
     if (items.length === 0) {
-      errors.push("必ず測るMarkがすべて有効範囲にあるShotがありません。Markの指定か有効半径を見直してください。");
+      errors.push("選べるShotがありません。除外Shotや有効半径を見直してください。");
     } else if (shotCount > items.length) {
       errors.push(`計測Shot数（${shotCount}）が選べるShot数（${items.length}）を超えています。数を減らしてください。`);
-    }
-    if (!exactMode) {
-      const maxExtra = items.reduce((sum, item) => sum + item.otherMarks.length, 0);
-      if (!Number.isInteger(totalMarkCount) || extraMarkCount < 0) {
-        errors.push(`総Mark数は「計測Shot数 × 必ず測るMarkの数」（${shotCount * markCountPerShot}）以上の整数にしてください。`);
-      } else if (maxExtra === 0 && extraMarkCount > 0) {
-        errors.push("選べるShotに追加で測れるMarkがありません。「ちょうどk個」にするか、Markを増やしてください。");
-      }
     }
     if (errors.length > 0) {
       return { context: null, errors };
     }
 
-    const constraints = buildBalanceConstraints(items, settings);
-    const center = buildCenter(map, items, settings.constraints.center, extraMarkCount > 0);
+    const center = buildCenter(map, items, constraintSettings.center);
+    const forcedCount = new Set(mandatoryItems.concat(center.active ? [center.itemIndex] : [])).size;
+    if (forcedCount > shotCount) {
+      errors.push(`強制計測Shot（中心の1点のShotを含む）が${forcedCount}個あり、計測Shot数（${shotCount}）を超えています。計測Shot数を増やすか、強制計測Shotを減らしてください。`);
+      return { context: null, errors };
+    }
 
     return {
       context: {
         map,
         items,
-        designatedNos,
-        markCountPerShot,
         shotCount,
-        totalMarkCount,
-        extraMarkCount,
-        exactMode,
-        constraints,
+        constraints: buildBalanceConstraints(items, settings),
         center,
-        softStrength: settings.constraints.softStrength,
+        mandatoryItems,
+        softStrength: constraintSettings.softStrength,
       },
       errors: [],
     };
+  }
+
+  /** 必ず選ぶ候補（中心の1点のShot → 強制計測Shot の順。入れ替えの対象にしない）。 */
+  function forcedItemsOf(context) {
+    const forced = context.center.active ? [context.center.itemIndex] : [];
+    for (const item of context.mandatoryItems) {
+      if (!forced.includes(item)) {
+        forced.push(item);
+      }
+    }
+    return forced;
+  }
+
+  /** 条件制約を使わない選び方（D最適・I最適の制約なし）の前提。候補は同じで、制約・中心の1点・強制計測Shotを外す。 */
+  function unconstrainedContext(context) {
+    return Object.assign({}, context, {
+      constraints: [],
+      center: { enabled: false, active: false },
+      mandatoryItems: [],
+    });
   }
 
   function buildBalanceConstraints(items, settings) {
@@ -175,22 +216,18 @@
     return constraints;
   }
 
-  /**
-   * 中心に最も近いMark。追加のMarkを測らないときは必ず測るMarkの中から、
-   * 追加のMarkを測るときは選べるShotの全Markから探す。
-   */
-  function buildCenter(map, items, setting, allowExtraMarks) {
+  /** 中心に最も近いMark（選べるShotの全Markから探す）。そのMarkのShotを必ず選ぶ。 */
+  function buildCenter(map, items, setting) {
     if (!setting.enabled) {
       return { active: false, enabled: false };
     }
     let best = null;
     items.forEach((item, itemIndex) => {
-      const candidates = allowExtraMarks ? item.designatedMarks.concat(item.otherMarks) : item.designatedMarks;
-      for (const markIndex of candidates) {
+      for (const markIndex of item.marks) {
         const mark = map.marks[markIndex];
         const distance = Math.hypot(mark.x, mark.y);
         if (!best || distance < best.distance) {
-          best = { itemIndex, markIndex, distance, isDesignated: item.designatedMarks.includes(markIndex) };
+          best = { itemIndex, markIndex, distance };
         }
       }
     });
@@ -201,7 +238,6 @@
       priority: setting.priority,
       itemIndex: best.itemIndex,
       markIndex: best.markIndex,
-      isDesignated: best.isDesignated,
       distanceMm: best.distance,
     };
   }
@@ -401,7 +437,20 @@
       const included = measuredMarks.includes(center.markIndex);
       centerRow = { key: "center", label: C.CONSTRAINT_LABELS.center, hard: center.active, priority: center.priority, ok: included, shift: included ? 0 : 1 };
     }
-    return { rows, center: centerRow };
+    // 強制計測Shot: ずれは選ばれていない強制計測Shotの数
+    let mandatoryRow = null;
+    if (context.mandatoryItems.length > 0) {
+      const selected = new Set(selectedItems);
+      const included = context.mandatoryItems.filter((item) => selected.has(item)).length;
+      const total = context.mandatoryItems.length;
+      mandatoryRow = { key: "mandatory", label: C.CONSTRAINT_LABELS.mandatory, hard: true, priority: 0, ok: included === total, shift: total - included, included, total };
+    }
+    return { rows, center: centerRow, mandatory: mandatoryRow };
+  }
+
+  /** 満たし具合の行を、表に出す順（区画の制約 → 中心の1点 → 強制計測Shot）に並べる。 */
+  function statusRows(status) {
+    return status.rows.concat(status.center ? [status.center] : [], status.mandatory ? [status.mandatory] : []);
   }
 
   /**
@@ -459,7 +508,12 @@
     QUADRANT_LABELS,
     quadrantOf,
     zoneOf,
+    shotIdList,
+    isIncompleteShot,
     buildContext,
+    forcedItemsOf,
+    unconstrainedContext,
+    statusRows,
     targetsFor,
     violationOf,
     hasCapacity,

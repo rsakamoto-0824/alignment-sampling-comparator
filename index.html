@@ -15,6 +15,7 @@
           <span id="progress-label" aria-live="polite"></span>
           <button type="button" class="button-secondary" id="cancel-button">中止</button>
         </div>
+        <button type="button" class="button-secondary" id="plan-button">計画を作成（制約付きD・I最適）</button>
         <button type="button" class="button-primary" id="run-button">評価を実行</button>
       </div>
     </header>
@@ -71,6 +72,19 @@
               <div class="field">
                 <label for="scan-pattern">Scan方向の並べ方</label>
                 <select id="scan-pattern" data-setting="map.scanPattern"></select>
+              </div>
+              <div id="serpentine-fields">
+                <div class="field-row">
+                  <div class="field">
+                    <label for="serpentine-start">一筆書きの開始</label>
+                    <select id="serpentine-start" data-setting="map.serpentineStart"></select>
+                  </div>
+                  <div class="field">
+                    <label for="serpentine-first-scan">最初のShotのScan方向</label>
+                    <select id="serpentine-first-scan" data-setting="map.serpentineFirstScan"></select>
+                  </div>
+                </div>
+                <p class="hint">露光機のタクトが最小になる順（行ごとに折り返す一筆書き）でShotをたどり、1 Shot進むごとにUpとDownを入れ替えます。道順に数えるのは、マップにあるShot（有効なMarkが1つ以上あるShot）だけです。</p>
               </div>
               <h3 class="subheading">Shot内のMark（Shot中心からの座標）</h3>
               <div class="table-scroll">
@@ -214,11 +228,10 @@
               <legend>比べる補正の流れ</legend>
               <label class="choice"><input type="checkbox" data-setting="model.flows.howa" /> HOWAのみ</label>
               <label class="choice"><input type="checkbox" data-setting="model.flows.estimateThenHowa" /> 推定→HOWA（未計測Markを推定して埋め、全Markに多項式）</label>
-              <label class="choice"><input type="checkbox" data-setting="model.flows.howaPlusEstimate" /> HOWA＋推定（多項式の取り残しを推定して足す）</label>
             </fieldset>
             <p class="hint">2つの流れの違いは「使い方」のタブに図で説明しています。</p>
             <fieldset>
-              <legend>推定手法（推定を使う流れで、それぞれ評価します）</legend>
+              <legend>推定手法（推定→HOWAで、それぞれ評価します）</legend>
               <div id="estimator-choices"></div>
             </fieldset>
             <p class="field-error" id="flows-error"></p>
@@ -260,28 +273,16 @@
               <input type="number" id="shot-count" step="1" data-setting="sampling.shotCount" data-integer data-min="1" />
               <p class="field-error" id="shot-count-error"></p>
             </div>
-            <fieldset>
-              <legend>選んだShotで必ず測るMark（番号）</legend>
-              <div class="choice-group" id="designated-marks"></div>
-            </fieldset>
-            <fieldset>
-              <legend>Mark数の扱い</legend>
-              <label class="choice"><input type="radio" name="mark-mode" value="exact" data-setting="sampling.markMode" /> ちょうどk個（必ず測るMarkだけ）</label>
-              <label class="choice"><input type="radio" name="mark-mode" value="atLeast" data-setting="sampling.markMode" /> k個以上（選んだShotから追加のMarkも選ぶ）</label>
-            </fieldset>
-            <div class="field">
-              <label for="total-mark-count">総Mark数</label>
-              <input type="number" id="total-mark-count" step="1" data-setting="sampling.totalMarkCount" data-integer data-min="1" />
-              <p class="hint" id="total-mark-hint"></p>
-              <p class="field-error" id="total-mark-count-error"></p>
-            </div>
+            <p class="hint">選んだShotでは、そのShotに紐づくMark（Shot内のMark）をすべて測ります。ほかのShotのMarkは測りません。</p>
+            <label class="choice"><input type="checkbox" id="exclude-incomplete" data-setting="sampling.excludeIncompleteShots" /> Markが揃わない端のShot（有効半径の外にMarkがはみ出すShot）は選ばない</label>
+            <p class="hint">オフのときは、端のShotも有効半径の中にあるMarkだけを測る形で選べます。</p>
             <p id="eligible-summary" class="hint"></p>
 
             <fieldset>
               <legend>比べる選び方</legend>
               <div id="method-choices"></div>
             </fieldset>
-            <p class="hint">人が選ぶ「手動プラン」は「マップと選択点」のタブで作り、プランごとに「評価で比べる」を選びます。</p>
+            <p class="hint">「制約なし」のD最適・I最適は、5の条件制約（強制計測Shotを含む）を使わずに選びます。ほかの選び方は条件制約を守ります。人が選ぶ「手動プラン」は「マップと選択点」のタブで作り、プランごとに「評価で比べる」を選びます。</p>
             <div class="field-row">
               <div class="field">
                 <label for="draws">試行回数（ランダム・ポアソン）</label>
@@ -316,6 +317,18 @@
             </div>
             <p class="field-error" id="constraint-table-error"></p>
             <p class="hint">数は「選んだShot」で数え、ほぼ同数（差1以内）を目標にします。象限・領域はShot中心で判定します。ハードは必ず満たし、同時に満たせないときは優先度の低いものからソフトに切り替えます。</p>
+            <div class="field">
+              <label for="mandatory-shots">強制計測Shot（必ず測るShotの番号）</label>
+              <textarea id="mandatory-shots" rows="2" aria-describedby="mandatory-shots-hint"></textarea>
+              <p class="hint" id="mandatory-shots-hint">マップに表示しているShot番号を、カンマ・空白・改行で区切って入れます。制約付きの選び方（ランダム・ポアソン・制約付きD最適・I最適）は必ず選び、残りのShotを制約に合わせて足します。常にハードです。</p>
+              <p class="field-error" id="mandatory-shots-error"></p>
+            </div>
+            <div class="field">
+              <label for="excluded-shots">除外Shot（選ばないShotの番号）</label>
+              <textarea id="excluded-shots" rows="2" aria-describedby="excluded-shots-hint"></textarea>
+              <p class="hint" id="excluded-shots-hint">どの選び方でも選びません（制約なしのD最適・I最適も同じ）。手動プランに入っていれば、評価から外します。</p>
+              <p class="field-error" id="excluded-shots-error"></p>
+            </div>
             <div class="field-row">
               <div class="field">
                 <label for="zone-inner">同心円の内側の区切り [mm]</label>
@@ -376,6 +389,7 @@
             </div>
             <button type="button" class="button-secondary" id="copy-to-manual-button" hidden>この選択を新しい手動プランにする</button>
             <button type="button" class="button-secondary" id="new-plan-button">新しい手動プラン</button>
+            <button type="button" class="button-secondary" id="export-selection-button">表示中の選択点をCSVで保存</button>
           </div>
           <div id="manual-panel" class="manual-panel">
             <div class="toolbar">
@@ -397,7 +411,7 @@
               <div class="field">
                 <label for="plan-shot-ids">Shot番号（カンマ・空白・改行で区切る。Excelの列を貼り付けても可）</label>
                 <textarea id="plan-shot-ids" rows="3"></textarea>
-                <p class="hint">「反映」を押すと、このプランのShotを入力した番号で置き換えます。Shot番号はマップのCSVの ShotId（生成したマップでは上の行から振った番号）です。</p>
+                <p class="hint">「反映」を押すと、このプランのShotを入力した番号で置き換えます。Shot番号はマップに表示している番号（マップのCSVの ShotId。生成したマップでは上の行から振った番号）です。</p>
                 <p class="field-error" id="plan-shot-ids-error"></p>
               </div>
               <button type="button" class="button-secondary button-small" id="apply-shot-ids-button">反映</button>
@@ -434,7 +448,12 @@
         </section>
 
         <section class="tab-panel" role="tabpanel" id="panel-sweep" aria-labelledby="tab-sweep" hidden>
-          <p class="hint">計測Shot数を変えながら評価し、計測Mark数（計測コスト）と精度のトレードオフを見ます。マップ・評価データ・補正モデル・制約は左の設定を使います。「評価で比べる」にした手動プランは、そのプランのMark数の位置に点（× や ＋）で重ねます。「k個以上」のときは、Shotあたりの総Mark数の比を保ちます。</p>
+          <p class="hint">計測Shot数を変えながら評価し、計測Mark数（計測コスト）と精度のトレードオフを見ます。マップ・評価データ・補正モデル・制約は左の設定を使います。選んだShotの有効なMarkをすべて測るので、計測Mark数は選び方ごとに少し違うことがあります（Markが揃わない端のShotを選んだとき）。「評価で比べる」にした手動プランは、そのプランの位置に点（× や ＋）で重ねます。</p>
+          <fieldset class="inline-fieldset">
+            <legend>比べる選び方（スイープ）</legend>
+            <div class="choice-group" id="sweep-method-choices"></div>
+          </fieldset>
+          <p class="field-error" id="sweep-methods-error"></p>
           <div class="toolbar">
             <div class="field">
               <label for="sweep-start">計測Shot数 開始</label>
@@ -472,21 +491,24 @@
             <li>「1. Waferマップ」でShotとMarkを用意する（生成するか、CSVを読み込む）</li>
             <li>「2. 評価データ」でZernike項の大きさ、計測ノイズ、Scan方向のずれを決める</li>
             <li>「3. 補正モデル」でHOWAの多項式の項、比べる補正の流れ、推定手法を選ぶ</li>
-            <li>「4. サンプリング」と「5. 条件制約」で、計測Shot数・必ず測るMark・制約を決める</li>
+            <li>「4. サンプリング」と「5. 条件制約」で、計測Shot数・制約（強制計測Shot・除外Shotを含む）を決める</li>
+            <li>制約付きD最適・I最適で選んだ点だけを見たいときは「計画を作成」を押す（評価データは使わず、すぐに終わります）。「マップと選択点」に表示し、CSVで保存できます</li>
             <li>現行のサンプリングなど、人が選んだ点と比べたいときは「マップと選択点」で手動プランを作る（Shotをクリック、またはShot番号を貼り付け）</li>
             <li>「評価を実行」を押し、「評価結果」で選び方と補正を比べ、「選び方ごとのマップ」で選ばれた点を見比べる</li>
             <li>計測点の数を決めたいときは「計測点数のスイープ」で、計測Mark数と精度のトレードオフを見る</li>
           </ol>
           <h2>選び方</h2>
+          <p>どの選び方もShotを選び、選んだShotではそのShotに紐づくMark（有効範囲の中にあるもの）をすべて測ります。</p>
           <ul>
             <li><strong>ランダム</strong>: 制約を満たす範囲で、Shotを無作為に選びます。試行回数ぶん選び直して、結果のばらつきも見ます。</li>
             <li><strong>ポアソンディスク</strong>: Shot中心の最小間隔ができるだけ広くなるように、無作為に選びます。</li>
-            <li><strong>D最適</strong>: 多項式の係数の推定精度（情報行列の行列式）が最も良くなるように、Shotを入れ替えて探します。</li>
-            <li><strong>I最適</strong>: 全Markで平均した予測誤差が最も小さくなるように探します。</li>
-            <li><strong>手動プラン</strong>: 人が選んだShot（と追加Mark）です。名前を付けて10個まで作れ、D最適などと同列に比べられます。「マップと選択点」でマップをクリックするか、Shot番号を貼り付けて作ります。評価で選ばれた点を写して手直しすることもできます。スイープでは、プランのMark数の位置に × や ＋ の点で重ねます。</li>
+            <li><strong>D最適（制約なし）</strong>: 多項式の係数の推定精度（情報行列の行列式）が最も良くなるように、Shotを入れ替えて探します。条件制約は使いません（除外Shotは選びません）。</li>
+            <li><strong>I最適（制約なし）</strong>: 全Markで平均した予測誤差が最も小さくなるように探します。条件制約は使いません。</li>
+            <li><strong>制約付きD最適・制約付きI最適</strong>: 条件制約（Scan方向・4象限・同心円・中心の1点・強制計測Shot）を守ったうえで、D最適・I最適の基準が最も良くなるように探します。強制計測Shotを固定し、残りのShotを入れ替えて足していきます（拡張計画）。「計画を作成」でも同じ点を選びます。</li>
+            <li><strong>手動プラン</strong>: 人が選んだShotです。名前を付けて10個まで作れ、D最適などと同列に比べられます。「マップと選択点」でマップをクリックするか、Shot番号を貼り付けて作ります。評価で選ばれた点を写して手直しすることもできます。スイープでは、プランのMark数の位置に × や ＋ の点で重ねます。</li>
           </ul>
           <h2>補正の流れ</h2>
-          <p>違いは、<strong>最後に掛ける補正量が「多項式だけ」か「多項式＋取り残し」か</strong>です。</p>
+          <p>どちらも、<strong>最後に掛ける補正量は多項式だけ</strong>です。違いは、多項式を当てはめる点が「計測したMarkだけ」か「推定で埋めた全Mark」かです。</p>
           <div class="flow-compare">
             <div class="flow-card">
               <h3>HOWAのみ</h3>
@@ -504,15 +526,6 @@
               </ol>
               <p class="hint">推定の役目は、計測点の偏りをならすこと。点が固まった場所が当てはめに効きすぎるのを防ぎます。多項式で表せない形は補正されません。</p>
             </div>
-            <div class="flow-card">
-              <h3>HOWA＋推定</h3>
-              <ol class="flow-steps">
-                <li>計測したMarkに多項式を当てはめる</li>
-                <li>計測Markでの<strong>取り残し</strong>（計測値 − 多項式）を、推定手法で全Markに広げる</li>
-                <li class="flow-result">補正量 ＝ 多項式 ＋ 取り残しの推定</li>
-              </ol>
-              <p class="hint">多項式で表せない形（局所的な歪み）も補正に入ります。そのぶん計測ノイズも乗りやすくなります。ASML特許 US20120218533A1 の「1次多項式＋RBF」に近い形です。</p>
-            </div>
           </div>
           <h2>推定手法</h2>
           <ul>
@@ -526,14 +539,14 @@
           <ul>
             <li>残差は、真のずれから補正量を引いた値です。全Waferの全Markで求め、Waferごとに RMS・|平均|+3σ・最大 を出します。</li>
             <li>「一覧」は、選び方（行）× 補正（列）のWafer平均です。行ごとに最も小さい値に ★ を付けています。</li>
-            <li>箱ひげ図は、「推定手法を比べる流れ」で選んだ流れについて、HOWAのみと各推定手法を並べます。箱は25〜75%点、線は5〜95%点、箱の中の縦線は中央値です。ランダム系は全試行・全Waferの値をまとめています。</li>
+            <li>箱ひげ図は、選び方ごとにHOWAのみと各推定手法（推定→HOWA）を並べます。箱は25〜75%点、線は5〜95%点、箱の中の縦線は中央値です。ランダム系は全試行・全Waferの値をまとめています。</li>
             <li>「GPが学習した値」は、ガウス過程回帰がWaferごとに選んだ相関の長さとノイズ比です。</li>
             <li>「選び方ごとのマップ」のタブで、選び方ごとに選んだ点を並べて見比べられます。ランダム・ポアソンは中央・最良・最悪の試行か、全試行で各Shotが選ばれた割合を表示できます。</li>
             <li>「全点計測」は全Markを測ってHOWAで補正した残差です。多項式で表せない成分だけが残るので、選び方による悪化を測る物差しになります。</li>
             <li><strong>D基準</strong> log₁₀det(XᵀX) は、HOWAの多項式の係数をどれだけ精度よく決められるかの値で、大きいほど良い選び方です（D最適が最大にする値）。</li>
             <li><strong>I基準</strong>（予測分散の平均÷σ²）は、計測ノイズ σ が全Markの補正量にどれだけ乗るかの値で、小さいほど良い選び方です（I最適が最小にする値）。κ はその平方根です。</li>
             <li>D効率・I効率は、その評価の中で最も良い選び方・試行を100%にした値です。点が項数より少ないときや、点が一部の行・列に集まって多項式が決まらないときは「計算できない」と出ます。</li>
-            <li><strong>制約の満たし具合</strong>は、制約ごとに区画ごとの数と目標、判定を出します。外れたときの「ずれ」は、何個のShotを別の区画へ移せば満たせるかの目安です。ランダム系は全試行のうち満たした回数と、ずれの平均を出します。</li>
+            <li><strong>制約の満たし具合</strong>は、制約ごとに区画ごとの数と目標、判定を出します。外れたときの「ずれ」は、何個のShotを別の区画へ移せば満たせるかの目安です（強制計測Shotは選ばれていない数）。ランダム系は全試行のうち満たした回数と、ずれの平均を出します。制約なしのD最適・I最適と手動プランは制約を守らないので、外れることがあります。</li>
           </ul>
           <h2>推定精度</h2>
           <ul>
@@ -543,7 +556,8 @@
           </ul>
           <h2>計測点数のスイープ</h2>
           <ul>
-            <li>計測Shot数を範囲と刻みで変えながら評価し、横軸を計測Mark数（計測コスト）、縦軸を残差や推定誤差にした折れ線グラフを描きます。</li>
+            <li>計測Shot数を範囲と刻みで変えながら評価し、横軸を計測Mark数（計測コスト）か計測Shot数、縦軸を残差や推定誤差にした折れ線グラフを描きます。</li>
+            <li>「比べる選び方（スイープ）」で、線にする選び方を選びます（制約なし・制約付きのD最適・I最適を含む）。制約なしは破線、制約付きは実線です。</li>
             <li>「比べるもの」で、選び方の比較、補正の比較、推定精度の比較を切り替えます。値の幅が大きいときは「縦軸」を対数にすると見やすくなります。</li>
             <li>「目標の精度」を入れると、目標以下になる最小の計測Mark数を表で出します。</li>
             <li>計測点が多項式の項数（初期設定では21項）より少ないと、HOWAは不安定になり残差が大きくなります。</li>

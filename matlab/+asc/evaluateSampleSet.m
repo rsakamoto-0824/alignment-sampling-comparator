@@ -88,7 +88,7 @@ for axisCell = {'x', 'y'}
             if isempty(estimator)
                 operators{v} = parts.howa;
             elseif ~isempty(prepared.(estimator.key)) && strcmp(prepared.(estimator.key).type, 'linear')
-                operators{v} = asc.linearFlowOperator(parts, prepared.(estimator.key).operator, sample, variants(v).flowType);
+                operators{v} = asc.estimateThenHowaOperator(parts, prepared.(estimator.key).operator, sample);
             end
         end
         howaCache(termKey) = {parts, operators};
@@ -128,18 +128,13 @@ for axisCell = {'x', 'y'}
                 results(v).(axisName) = nanMetrics;
                 continue
             end
-            if strcmp(variant.flowType, 'estimateThenHowa')
-                raw = rawGp.(variant.estimator.key);
-                filled = raw.values;
-                filled(sample, :) = measured;
-                correction = parts.allDesign * (parts.allLeastSquares * filled);
-                lengths = raw.lengths;
-                ratios = raw.ratios;
-            else
-                leftover = measured - parts.fitted * measured;
-                [values, lengths, ratios] = asc.gpPredict(entry.gp, leftover);
-                correction = howaCorrection + values;
-            end
+            % 推定→HOWA: 未計測Markを推定値で埋め、全Markに多項式を当てはめる（GPの学習は推定精度と同じ結果を使う）
+            raw = rawGp.(variant.estimator.key);
+            filled = raw.values;
+            filled(sample, :) = measured;
+            correction = parts.allDesign * (parts.allLeastSquares * filled);
+            lengths = raw.lengths;
+            ratios = raw.ratios;
             finite = isfinite(lengths);
             gpChoices(v).lengthMm = [gpChoices(v).lengthMm; lengths(finite)' * C.NORMALIZATION_RADIUS_MM];
             gpChoices(v).noiseRatio = [gpChoices(v).noiseRatio; ratios(finite)'];

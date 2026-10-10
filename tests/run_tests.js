@@ -89,7 +89,12 @@ function contextFor(map, overrides) {
 }
 
 function statusAllOk(status) {
-  return status.rows.every((row) => row.ok) && (!status.center || status.center.ok);
+  return ASC.constraints.statusRows(status).every((row) => row.ok);
+}
+
+/** 選んだ候補のMark（Shotの有効なMarkすべて）の数の合計。 */
+function markCountOf(context, items) {
+  return items.reduce((sum, item) => sum + context.items[item].marks.length, 0);
 }
 
 // ---- テスト本体 --------------------------------------------------------------
@@ -211,7 +216,9 @@ async function main() {
   });
 
   await test("マップ生成: 有効範囲内のMarkだけ、Shot番号は上の行から、4象限のShot数が同じ、市松のScan方向", () => {
-    const map = defaultMap();
+    const settings = ASC.defaultSettings();
+    settings.map.scanPattern = "checker";
+    const map = ASC.waferMap.generateWaferMap(settings.map).map;
     assert(map.shots.length > 50, `Shot数が少なすぎます（${map.shots.length}）`);
     assert(map.marks.every((mark) => Math.hypot(mark.x, mark.y) < 150), "r≧150のMarkが入っています");
     assert(map.shots[0].y >= map.shots[map.shots.length - 1].y, "Shotが上の行から並んでいません");
@@ -230,6 +237,54 @@ async function main() {
       }
     }
     assert(checked > 0, "隣り合うShotがありません");
+    const incomplete = map.shots.filter((shot) => ASC.constraints.isIncompleteShot(shot));
+    assert(incomplete.length > 0 && incomplete.every((shot) => shot.definedMarkCount === 4 && shot.markIndices.length < 4), "Markが揃わない端のShotを数えられません");
+  });
+
+  await test("一筆書きのScan方向: 行ごとに折り返す順で1 Shotごとに交互。開始の角と最初の向きを変えられる", () => {
+    const settings = ASC.defaultSettings();
+    assert(settings.map.scanPattern === "serpentine", "初期設定が一筆書きではありません");
+    /** 開始の角から行ごとに折り返してたどったShotの並び。 */
+    function path(map, start) {
+      const rows = [];
+      for (const shot of map.shots) {
+        const last = rows[rows.length - 1];
+        if (last && last[0].y === shot.y) {
+          last.push(shot);
+        } else {
+          rows.push([shot]);
+        }
+      }
+      if (start.startsWith("bottom")) {
+        rows.reverse();
+      }
+      const leftFirst = start.endsWith("Left");
+      return rows.flatMap((row, index) => ((index % 2 === 0) === leftFirst ? row : row.slice().reverse()));
+    }
+    for (const start of Object.keys(ASC.constants.SERPENTINE_STARTS)) {
+      for (const first of ["Up", "Down"]) {
+        settings.map.serpentineStart = start;
+        settings.map.serpentineFirstScan = first;
+        const map = ASC.waferMap.generateWaferMap(settings.map).map;
+        const order = path(map, start);
+        assert(order.length === map.shots.length, "道順がすべてのShotを通りません");
+        assert(order[0].scan === first, `${start}: 最初のShotのScan方向が ${first} ではありません`);
+        for (let i = 1; i < order.length; i++) {
+          assert(order[i].scan !== order[i - 1].scan, `${start}: 道順で隣り合うShot ${order[i - 1].id} と ${order[i].id} のScan方向が同じです`);
+        }
+      }
+    }
+    settings.map.serpentineStart = "topLeft";
+    settings.map.serpentineFirstScan = "Up";
+    const map = ASC.waferMap.generateWaferMap(settings.map).map;
+    const firstRow = map.shots.filter((shot) => shot.y === map.shots[0].y);
+    const secondRow = map.shots.filter((shot) => shot.y === firstRow[0].y - settings.map.shotHeightMm);
+    // 1行目は左から右へ、2行目は右端から始まる（1行目の最後と2行目の右端で向きが変わる）
+    assert(firstRow[0].scan === "Up" && secondRow[secondRow.length - 1].scan !== firstRow[firstRow.length - 1].scan, "2行目が右端から始まっていません");
+    const upCount = map.shots.filter((shot) => shot.scan === "Up").length;
+    assert(Math.abs(upCount - (map.shots.length - upCount)) <= 1, "UpとDownの数がそろいません");
+    settings.map.serpentineStart = "middle";
+    assert(ASC.waferMap.generateWaferMap(settings.map).errors.length > 0, "開始の角の誤りを知らせていません");
   });
 
   await test("CSV: 書き出して読み込むと同じマップになる。誤りは行番号つきで知らせる", () => {
@@ -334,29 +389,18 @@ async function main() {
     }
   });
 
-  await test("補正の流れ: HOWA＋RBF（λ=0）は計測点で残差0、全点計測のRBF→HOWAはHOWAと同じ", () => {
+  await test("補正の流れ: HOWAのみ と 推定→HOWA だけ。全点計測のRBF→HOWAはHOWAと同じ", () => {
+    const settings = ASC.defaultSettings();
+    const keys = ASC.correction.buildVariants(settings.model).map((variant) => variant.key);
+    assert(keys.join(",") === "howa,estimateThenHowa:rbfXY,estimateThenHowa:rbfXYR,estimateThenHowa:gpXY,estimateThenHowa:gpXYR", `比べる補正が違います: ${keys}`);
     const map = defaultMap();
     const terms = allIndices(10);
     const all = allIndices(map.marks.length);
-    const values = map.marks.map((mark) => Math.sin(4 * mark.u) + mark.v ** 6);
-    const random = ASC.math.createRandom(9);
-    const sample = random.shuffle(all.slice()).slice(0, 40);
-    const rbf = ASC.correction.rbfOperator(map.marks, sample, { kernel: "tps", lambda: 0, shapeFactor: 2 }, "xy").operator;
-    const parts = howaPartsFor(map.marks, sample, terms);
-    const plus = ASC.correction.linearFlowOperator(parts, rbf, sample, "howaPlusEstimate", map.marks.length);
-    const n = sample.length;
-    sample.forEach((markIndex) => {
-      let correction = 0;
-      for (let k = 0; k < n; k++) {
-        correction += plus[markIndex * n + k] * values[sample[k]];
-      }
-      assertClose(correction, values[markIndex], 1e-7, "HOWA＋RBFの計測点での補正量");
-    });
     const subsetMarks = all.slice(0, 200).map((index) => map.marks[index]);
     const subsetAll = allIndices(subsetMarks.length);
     const subsetRbf = ASC.correction.rbfOperator(subsetMarks, subsetAll, { kernel: "tps", lambda: 0, shapeFactor: 2 }, "xy").operator;
     const fullParts = howaPartsFor(subsetMarks, subsetAll, terms);
-    const then = ASC.correction.linearFlowOperator(fullParts, subsetRbf, subsetAll, "estimateThenHowa", subsetMarks.length);
+    const then = ASC.correction.estimateThenHowaOperator(fullParts, subsetRbf, subsetAll, subsetMarks.length);
     for (let i = 0; i < fullParts.howa.length; i += 101) {
       assertClose(then[i], fullParts.howa[i], 1e-9, "全点計測でのRBF→HOWAとHOWA");
     }
@@ -475,38 +519,101 @@ async function main() {
       for (const [name, selection] of Object.entries(selections)) {
         assert(selection, `${name}: 選べませんでした`);
         assert(selection.items.length === context.shotCount, `${name}: Shot数が${context.shotCount}ではありません`);
-        assert(selection.markIndices.length === context.totalMarkCount, `${name}: Mark数が違います`);
+        assert(selection.markIndices.length === markCountOf(context, selection.items), `${name}: 選んだShotのMarkをすべて測っていません`);
         const status = ASC.constraints.describeStatus(context, selection.items, selection.markIndices);
         assert(statusAllOk(status), `${name}（シード${seed}）: 制約を満たしていません ` + JSON.stringify(status.rows.map((row) => [row.key, row.classes.map((c) => c.count)])));
       }
     }
   });
 
-  await test("k個以上: 総Mark数にそろい、選んだShotには必ず測るMarkが入る。中心のMarkも測る", () => {
+  await test("Markの扱い: 選んだShotの有効なMarkをすべて測り、ほかのShotのMarkは測らない。端のShotを選ばない設定もできる", () => {
     const map = defaultMap();
-    const { context, settings } = contextFor(map, (s) => {
-      s.sampling.markMode = "atLeast";
-      s.sampling.totalMarkCount = 52;
-    });
-    const termSets = [settings.model.termsX, settings.model.termsY];
-    const random = ASC.math.createRandom(4);
-    for (const selection of [
-      ASC.sampling.selectRandom(context, random),
-      ASC.sampling.selectPoisson(context, random),
-      ASC.sampling.selectOptimal(context, random, "D", termSets, 1),
-      ASC.sampling.selectOptimal(context, random, "I", termSets, 1),
-    ]) {
-      assert(selection.markIndices.length === 52, `Mark数が52ではありません（${selection.markIndices.length}）`);
-      assert(new Set(selection.markIndices).size === 52, "同じMarkを2回選んでいます");
-      for (const item of selection.items) {
-        for (const markIndex of context.items[item].designatedMarks) {
-          assert(selection.markIndices.includes(markIndex), "必ず測るMarkが抜けています");
+    for (const excludeIncomplete of [false, true]) {
+      const { context, settings } = contextFor(map, (s) => {
+        s.sampling.excludeIncompleteShots = excludeIncomplete;
+        s.constraints.zone.enabled = false;
+      });
+      const incompleteItems = context.items.filter((item) => ASC.constraints.isIncompleteShot(map.shots[item.shotIndex]));
+      assert(excludeIncomplete ? incompleteItems.length === 0 : incompleteItems.length > 0, `端のShotの扱いが違います（選ばない設定: ${excludeIncomplete}）`);
+      const termSets = [settings.model.termsX, settings.model.termsY];
+      const random = ASC.math.createRandom(4);
+      const selections = [
+        [ASC.sampling.selectRandom(context, random), true],
+        [ASC.sampling.selectPoisson(context, random), true],
+        [ASC.sampling.selectOptimal(context, random, "D", termSets, 1), true],
+        [ASC.sampling.selectOptimal(ASC.constraints.unconstrainedContext(context), random, "I", termSets, 1), false],
+      ];
+      for (const [selection, constrained] of selections) {
+        const expected = selection.items.flatMap((item) => map.shots[context.items[item].shotIndex].markIndices).sort((a, b) => a - b);
+        assert(selection.markIndices.slice().sort((a, b) => a - b).join(",") === expected.join(","), "選んだShotのMarkと測るMarkが一致しません");
+        if (constrained) {
+          assert(selection.markIndices.includes(context.center.markIndex), "中心のMarkが入っていません");
+        }
+        if (excludeIncomplete) {
+          assert(selection.markIndices.length === selection.items.length * 4, "端のShotを選ばない設定で4Markにそろいません");
         }
       }
-      const shotsOfMarks = new Set(selection.markIndices.map((markIndex) => map.marks[markIndex].shotIndex));
-      assert(shotsOfMarks.size === context.shotCount, "選んでいないShotのMarkが入っています");
-      assert(selection.markIndices.includes(context.center.markIndex), "中心のMarkが入っていません");
     }
+  });
+
+  await test("強制計測Shot・除外Shot: 制約付きは強制計測Shotを必ず選び、除外Shotはどの選び方も選ばない", () => {
+    const map = defaultMap();
+    const mandatory = ["30", "45", "70"];
+    const excluded = ["46", "47", "58", "59"];
+    const { context, settings } = contextFor(map, (s) => {
+      s.constraints.mandatoryShotIds = mandatory;
+      s.constraints.excludedShotIds = excluded;
+    });
+    const shotIdOf = (item) => map.shots[context.items[item].shotIndex].id;
+    assert(context.items.every((item) => !excluded.includes(map.shots[item.shotIndex].id)), "除外Shotが候補に入っています");
+    assert(context.mandatoryItems.map(shotIdOf).join(",") === mandatory.join(","), "強制計測Shotの候補番号が違います");
+    const termSets = [settings.model.termsX, settings.model.termsY];
+    const free = ASC.constraints.unconstrainedContext(context);
+    for (let seed = 1; seed <= 3; seed++) {
+      const random = ASC.math.createRandom(seed);
+      const constrained = [
+        ASC.sampling.selectRandom(context, random),
+        ASC.sampling.selectPoisson(context, random),
+        ASC.sampling.selectOptimal(context, random, "D", termSets, 1),
+        ASC.sampling.selectOptimal(context, random, "I", termSets, 1),
+      ];
+      for (const selection of constrained) {
+        const ids = selection.items.map(shotIdOf);
+        assert(mandatory.every((id) => ids.includes(id)), `強制計測Shotが選ばれていません: ${ids}`);
+        const status = ASC.constraints.describeStatus(context, selection.items, selection.markIndices);
+        assert(status.mandatory && status.mandatory.ok && status.mandatory.shift === 0, "強制計測Shotの満たし具合が違います");
+        assert(statusAllOk(status), "制約を満たしていません");
+      }
+      const unconstrained = ASC.sampling.selectOptimal(free, random, "D", termSets, 1);
+      assert(unconstrained.items.every((item) => !excluded.includes(shotIdOf(item))), "制約なしのD最適が除外Shotを選びました");
+    }
+    const partial = ASC.constraints.describeStatus(context, [context.mandatoryItems[0]], []);
+    assert(!partial.mandatory.ok && partial.mandatory.shift === 2 && partial.mandatory.included === 1, "強制計測Shotが足りないときのずれが違います");
+  });
+
+  await test("前提の誤り: マップにない番号、強制と除外の重複、端のShotを選ばない設定での強制、計測Shot数を超える強制", () => {
+    const map = defaultMap();
+    const errorsOf = (change) => {
+      const settings = ASC.defaultSettings();
+      change(settings);
+      return ASC.constraints.buildContext(map, settings).errors.join(" / ");
+    };
+    assert(errorsOf((s) => (s.constraints.mandatoryShotIds = ["999"])).includes("999"), "マップにない強制計測Shotを知らせていません");
+    assert(errorsOf((s) => (s.constraints.excludedShotIds = ["abc"])).includes("abc"), "マップにない除外Shotを知らせていません");
+    assert(errorsOf((s) => {
+      s.constraints.mandatoryShotIds = ["40"];
+      s.constraints.excludedShotIds = ["40"];
+    }).includes("両方"), "強制と除外の重複を知らせていません");
+    const edgeId = map.shots.find((shot) => ASC.constraints.isIncompleteShot(shot)).id;
+    assert(errorsOf((s) => {
+      s.sampling.excludeIncompleteShots = true;
+      s.constraints.mandatoryShotIds = [edgeId];
+    }).includes("端のShot"), "選べない端のShotの強制を知らせていません");
+    assert(errorsOf((s) => {
+      s.sampling.shotCount = 3;
+      s.constraints.mandatoryShotIds = ["20", "30", "60", "80"];
+    }).includes("超えて"), "計測Shot数を超える強制計測Shotを知らせていません");
+    assert(errorsOf((s) => (s.constraints.mandatoryShotIds = [20, "30"])) === "", "数で書いたShot番号を読めません");
   });
 
   await test("選び方の性質: D最適はlog det、I最適はκ、ポアソンは最小間隔がランダムより良い", () => {
@@ -573,17 +680,15 @@ async function main() {
     assert(strong < weak * 0.3, `強さを上げても偏りが減りません（${weak} → ${strong}）`);
   });
 
-  await test("手動選択: 選べないShotは外し、k個以上のときだけ追加Markを入れる", () => {
+  await test("手動選択: 選べないShot（除外Shot）は外し、選んだShotのMarkはすべて測る", () => {
     const map = defaultMap();
-    const { context } = contextFor(map);
-    const notEligibleShot = map.shots.findIndex((_, shotIndex) => !context.items.some((item) => item.shotIndex === shotIndex));
+    const { context } = contextFor(map, (s) => (s.constraints.excludedShotIds = ["50"]));
+    const excludedShot = map.shots.findIndex((shot) => shot.id === "50");
     const first = context.items[0];
-    const manual = ASC.sampling.manualSelection(context, [first.shotIndex, notEligibleShot].filter((i) => i >= 0), [first.otherMarks[0]]);
+    const manual = ASC.sampling.manualSelection(context, [first.shotIndex, excludedShot]);
     assert(manual.items.length === 1, "選べるShotの数が違います");
-    assert(manual.markIndices.length === context.markCountPerShot, "ちょうどk個なのに追加Markが入りました");
-    if (notEligibleShot >= 0) {
-      assert(manual.notEligible.includes(notEligibleShot), "選べないShotを知らせていません");
-    }
+    assert(manual.markIndices.join(",") === map.shots[first.shotIndex].markIndices.join(","), "選んだShotのMarkをすべて測っていません");
+    assert(manual.notEligible.join(",") === String(excludedShot), "選べないShotを知らせていません");
   });
 
   await test("評価全体: 多項式で表せる成分だけでノイズなしなら、HOWAの残差はほぼ0", async () => {
@@ -596,7 +701,7 @@ async function main() {
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
     const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
     assert(output.errors.length === 0, output.errors.join(" / "));
-    for (const methodKey of ["random", "poisson", "dOptimal", "iOptimal"]) {
+    for (const methodKey of ["random", "poisson", "dOptimal", "iOptimal", "constrainedD", "constrainedI"]) {
       const rms = output.summary[methodKey].variants.howa.x.rms.all.max;
       assert(rms < 1e-6, `${methodKey}: HOWAの残差が0になりません（${rms}）`);
     }
@@ -617,7 +722,7 @@ async function main() {
     let lastProgress = 0;
     const started = Date.now();
     const output = await ASC.evaluator.runEvaluation(
-      { map, data, settings, manualPlans: [{ key: "manual:1", label: "手動1", shotIndices: manualShots, extraMarkIndices: [] }] },
+      { map, data, settings, manualPlans: [{ key: "manual:1", label: "手動1", shotIndices: manualShots }] },
       (done, total) => {
         lastProgress = done / total;
       },
@@ -626,8 +731,12 @@ async function main() {
     const elapsed = Date.now() - started;
     assert(output.errors.length === 0, output.errors.join(" / "));
     assert(lastProgress === 1, "進み具合が100%になりません");
-    assert(output.variants.length === 9, `比べる補正が9通り（HOWAのみ＋2つの流れ×4つの推定手法）ではありません（${output.variants.length}）`);
-    assert(output.methods.map((method) => method.key).join(",") === "random,poisson,dOptimal,iOptimal,manual:1", `結果の選び方の並びが違います: ${output.methods.map((method) => method.key)}`);
+    assert(output.variants.length === 5, `比べる補正が5通り（HOWAのみ＋推定→HOWA×4つの推定手法）ではありません（${output.variants.length}）`);
+    assert(
+      output.methods.map((method) => method.key).join(",") === "random,poisson,dOptimal,iOptimal,constrainedD,constrainedI,manual:1",
+      `結果の選び方の並びが違います: ${output.methods.map((method) => method.key)}`
+    );
+    assert(output.failedMethods.length === 0, `選べなかった選び方があります: ${output.failedMethods}`);
     for (const method of output.methods) {
       const summary = output.summary[method.key];
       assert(summary, `${method.label} の結果がありません`);
@@ -713,14 +822,16 @@ async function main() {
     }
   });
 
-  await test("スイープ: 計測Shot数ごとに評価し、Mark数はShot数×k。点を増やすとD最適のHOWAの残差は小さくなる", async () => {
+  await test("スイープ: 計測Shot数ごとに評価し、選んだ選び方だけを比べる。端のShotを選ばなければMark数はShot数×4。点を増やすと残差は小さくなる", async () => {
     const map = defaultMap();
     const settings = ASC.defaultSettings();
     settings.evaluationData = defaultEvaluationSettings({ waferCount: 10 });
     settings.sampling.optimalStarts = 1;
+    settings.sampling.excludeIncompleteShots = true;
     settings.model.estimators = { rbfXY: true, rbfXYR: false, gpXY: true, gpXYR: false };
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
-    const sweep = { startShots: 12, endShots: 36, stepShots: 12, draws: 2 };
+    const methods = { random: true, poisson: false, dOptimal: true, iOptimal: false, constrainedD: true, constrainedI: false };
+    const sweep = { startShots: 12, endShots: 36, stepShots: 12, draws: 2, methods };
     let lastFraction = 0;
     const output = await ASC.evaluator.runSweep({ map, data, settings }, sweep, (done, total) => {
       lastFraction = done / total;
@@ -728,13 +839,14 @@ async function main() {
     assert(output.errors.length === 0, output.errors.join(" / "));
     assert(output.points.length === 3, `点の数が3ではありません（${output.points.length}）`);
     assert(Math.abs(lastFraction - 1) < 1e-9, "進み具合が100%になりません");
+    assert(output.methods.map((method) => method.key).join(",") === "random,dOptimal,constrainedD", `スイープの選び方が違います: ${output.methods.map((method) => method.key)}`);
     output.points.forEach((point) => {
-      assert(point.markCounts.dOptimal === point.shotCount * 2, `Shot ${point.shotCount}: Mark数がShot数×2ではありません`);
+      assert(point.markCounts.constrainedD === point.shotCount * 4, `Shot ${point.shotCount}: Mark数がShot数×4ではありません`);
       assert(Object.keys(point.summary).every((key) => !key.startsWith("manual:")), "スイープの点に手動プランが入っています");
       assert(point.summary.random.estimation.gpXY, "スイープに推定精度がありません");
     });
-    const first = output.points[0].summary.dOptimal.variants.howa.x.rms.all.mean;
-    const lastValue = output.points[2].summary.dOptimal.variants.howa.x.rms.all.mean;
+    const first = output.points[0].summary.constrainedD.variants.howa.x.rms.all.mean;
+    const lastValue = output.points[2].summary.constrainedD.variants.howa.x.rms.all.mean;
     assert(lastValue < first, `点を増やしても残差が減りません（${first} → ${lastValue}）`);
     const invalid = await ASC.evaluator.runSweep({ map, data, settings }, { startShots: 10, endShots: 500, stepShots: 10, draws: 2 }, () => {}, () => false);
     assert(invalid.errors.some((text) => text.includes("選べるShot数")), "選べるShot数を超える範囲を知らせていません");
@@ -749,19 +861,20 @@ async function main() {
     settings.model.estimators = { rbfXY: true, rbfXYR: false, gpXY: false, gpXYR: false };
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
     const { context } = contextFor(map);
-    const planA = { key: "manual:1", label: "現行", shotIndices: context.items.slice(0, 15).map((item) => item.shotIndex), extraMarkIndices: [] };
-    const planB = { key: "manual:2", label: "案B", shotIndices: context.items.slice(20, 50).map((item) => item.shotIndex), extraMarkIndices: [] };
-    const empty = { key: "manual:3", label: "空", shotIndices: [], extraMarkIndices: [] };
+    const planA = { key: "manual:1", label: "現行", shotIndices: context.items.slice(0, 15).map((item) => item.shotIndex) };
+    const planB = { key: "manual:2", label: "案B", shotIndices: context.items.slice(20, 50).map((item) => item.shotIndex) };
+    const empty = { key: "manual:3", label: "空", shotIndices: [] };
+    const marksOf = (plan) => plan.shotIndices.reduce((sum, shotIndex) => sum + map.shots[shotIndex].markIndices.length, 0);
     const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [planA, planB, empty] }, () => {}, () => false);
     assert(output.errors.length === 0, output.errors.join(" / "));
     const keys = output.methods.map((method) => method.key);
     assert(keys.includes("manual:1") && keys.includes("manual:2") && !keys.includes("manual:3"), `手動プランの並びが違います: ${keys}`);
     assert(output.methods.find((method) => method.key === "manual:2").label === "案B", "手動プランの名前が結果にありません");
-    assert(output.summary["manual:1"].markCount.mean === 30 && output.summary["manual:2"].markCount.mean === 60, "手動プランのMark数が違います");
+    assert(output.summary["manual:1"].markCount.mean === marksOf(planA) && output.summary["manual:2"].markCount.mean === marksOf(planB), "手動プランのMark数が選んだShotのMarkの合計ではありません");
     const sweep = await ASC.evaluator.runSweep({ map, data, settings, manualPlans: [planA, planB] }, { startShots: 10, endShots: 20, stepShots: 10, draws: 1 }, () => {}, () => false);
     assert(sweep.errors.length === 0, sweep.errors.join(" / "));
     assert(sweep.manual && sweep.manual.methods.length === 2, "スイープに手動プランの結果がありません");
-    assert(sweep.manual.markCounts["manual:2"] === 60 && sweep.manual.shotCounts["manual:2"] === 30, "スイープの手動プランのMark数・Shot数が違います");
+    assert(sweep.manual.markCounts["manual:2"] === marksOf(planB) && sweep.manual.shotCounts["manual:2"] === 30, "スイープの手動プランのMark数・Shot数が違います");
     assert(sweep.methods.every((method) => !method.manual), "スイープの点の選び方に手動プランが入っています");
   });
 
@@ -769,7 +882,7 @@ async function main() {
     const map = defaultMap();
     const P = ASC.manualPlans;
     const store = P.createStore();
-    const plan = P.addPlan(store, "現行", [], [], true);
+    const plan = P.addPlan(store, "現行", [], true);
     assert(plan.key === "manual:1" && plan.name === "現行", "プランの作成が違います");
     const ids = P.parseShotIdText("10, 11　12\n13、999");
     assert(ids.join(",") === "10,11,12,13,999", `Shot番号の読み取りが違います: ${ids}`);
@@ -778,18 +891,17 @@ async function main() {
     const shotIndex = map.shots.findIndex((shot) => shot.id === "11");
     P.toggleShot(plan, map, shotIndex);
     assert(!plan.shotIds.has("11") && plan.shotIds.size === 3, "Shotを外せません");
-    const markIndex = map.shots[map.shots.findIndex((shot) => shot.id === "12")].markIndices[1];
-    P.toggleExtraMark(plan, map, markIndex);
     const indices = P.planIndices(plan, map);
-    assert(indices.shotIndices.length === 3 && indices.extraMarkIndices.length === 1, "マップ上の番号に直せません");
+    assert(indices.shotIndices.length === 3 && indices.missingShotIds.length === 0, "マップ上の番号に直せません");
     const copy = P.duplicatePlan(store, plan.key);
     assert(copy.name === "現行の複製" && copy.shotIds.size === 3, "複製が違います");
-    assert(P.addPlan(store, "現行", [], [], true).name === "現行 (2)", "同じ名前に番号が付きません");
+    assert(P.addPlan(store, "現行", [], true).name === "現行 (2)", "同じ名前に番号が付きません");
     const restored = P.fromJson(JSON.parse(JSON.stringify(P.toJson(store))));
-    assert(restored.plans.length === 3 && restored.plans[0].name === "現行" && restored.plans[0].extraMarks.size === 1, "保存と読込で中身が変わりました");
-    const legacy = P.fromJson({ shotIds: ["5", "6"], marks: [] });
+    assert(restored.plans.length === 3 && restored.plans[0].name === "現行" && restored.plans[0].shotIds.size === 3, "保存と読込で中身が変わりました");
+    const legacy = P.fromJson({ shotIds: ["5", "6"], marks: [{ shotId: "5", markNo: 2 }] });
     assert(legacy.plans.length === 1 && legacy.plans[0].shotIds.size === 2, "以前の形式（手動選択1つ）を読めません");
-    while (P.addPlan(store, null, [], [], true)) {
+    assert(P.sortShotIds(["30", "999", "4"], map).join(",") === "4,30,999", "Shot番号の並べ替えが違います");
+    while (P.addPlan(store, null, [], true)) {
       // 上限まで足す
     }
     assert(store.plans.length === ASC.constants.MAX_MANUAL_PLANS, "プランの上限が効いていません");
@@ -830,16 +942,77 @@ async function main() {
     settings.evaluationData = defaultEvaluationSettings({ waferCount: 3 });
     settings.sampling.draws = 3;
     settings.sampling.optimalStarts = 1;
-    settings.model.flows = { howa: true, estimateThenHowa: false, howaPlusEstimate: false };
+    settings.model.flows = { howa: true, estimateThenHowa: false };
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
-    const plan = { key: "manual:1", label: "偏り", shotIndices: chosen.map((index) => context.items[index].shotIndex), extraMarkIndices: [] };
+    const plan = { key: "manual:1", label: "偏り", shotIndices: chosen.map((index) => context.items[index].shotIndex) };
     const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [plan] }, () => {}, () => false);
     const manualScan = output.summary["manual:1"].constraints.find((entry) => entry.key === "scan");
     assert(manualScan.satisfied === 0 && manualScan.meanShift === 2, "手動プランの制約の集計が違います");
     const randomScan = output.summary.random.constraints.find((entry) => entry.key === "scan");
     assert(randomScan.satisfied === 3 && randomScan.total === 3, "ランダム（ハード制約）の満たした回数が違います");
     assert(output.criteriaReference.x && Number.isFinite(output.criteriaReference.x.logDet), "効率の基準がありません");
-    assert(output.summary.dOptimal.criteriaX.logDet.mean >= output.summary.random.criteriaX.logDet.max - 1e-9, "D最適のlog detがランダムの最大以上になりません");
+    assert(output.summary.constrainedD.criteriaX.logDet.mean >= output.summary.random.criteriaX.logDet.max - 1e-9, "制約付きD最適のlog detがランダムの最大以上になりません");
+  });
+
+  await test("制約なしと制約付き: 制約付きは制約を満たし、制約なしのD最適のlog detは制約付き以上", async () => {
+    const map = defaultMap();
+    const settings = ASC.defaultSettings();
+    settings.evaluationData = defaultEvaluationSettings({ waferCount: 3 });
+    settings.sampling.optimalStarts = 2;
+    settings.sampling.methods = { random: false, poisson: false, dOptimal: true, iOptimal: true, constrainedD: true, constrainedI: true };
+    settings.model.flows = { howa: true, estimateThenHowa: false };
+    settings.constraints.mandatoryShotIds = ["17"];
+    const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
+    const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
+    assert(output.errors.length === 0, output.errors.join(" / "));
+    for (const key of ["constrainedD", "constrainedI"]) {
+      assert(output.summary[key].constraintsMet === 1, `${key}: 制約を満たしていません`);
+    }
+    assert(output.summary.dOptimal.criteriaX.logDet.mean >= output.summary.constrainedD.criteriaX.logDet.mean - 1e-9, "制約なしのD最適のlog detが制約付きより小さくなりました");
+    const freeSet = output.sets.find((set) => set.method === "dOptimal");
+    assert(freeSet.status.mandatory && freeSet.status.rows.length === 3, "制約なしの選び方にも制約の満たし具合を出していません");
+  });
+
+  await test("計画を作成: 評価データを使わずに制約付きD最適・I最適を選び、評価と同じ点になる", async () => {
+    const map = defaultMap();
+    const settings = ASC.defaultSettings();
+    settings.evaluationData = defaultEvaluationSettings({ waferCount: 2 });
+    settings.sampling.optimalStarts = 2;
+    settings.sampling.methods = { random: false, poisson: false, dOptimal: false, iOptimal: false, constrainedD: true, constrainedI: true };
+    settings.model.flows = { howa: true, estimateThenHowa: false };
+    settings.constraints.mandatoryShotIds = ["30", "75"];
+    settings.constraints.excludedShotIds = ["52"];
+    const plan = ASC.evaluator.runPlan({ map, settings });
+    assert(plan.errors.length === 0, plan.errors.join(" / "));
+    assert(plan.sets.map((set) => set.method).join(",") === "constrainedD,constrainedI", "計画の選び方が違います");
+    const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
+    const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
+    for (const set of plan.sets) {
+      const evaluated = output.sets.find((entry) => entry.method === set.method);
+      assert(set.shotIndices.join(",") === evaluated.shotIndices.join(","), `${set.method}: 計画と評価で選んだShotが違います`);
+      assert(ASC.constraints.statusRows(set.status).every((row) => row.ok), `${set.method}: 制約を満たしていません`);
+      assert(!set.results, "計画に評価の値が入っています");
+    }
+    const broken = ASC.evaluator.runPlan({ map, settings: Object.assign({}, settings, { constraints: Object.assign({}, settings.constraints, { mandatoryShotIds: ["0"] }) }) });
+    assert(broken.errors.length > 0, "設定の誤りを知らせていません");
+  });
+
+  await test("選択点のCSV: 1行1Mark、Wafer座標＝Shot中心＋Mark座標、Shotの並び順", () => {
+    const map = defaultMap();
+    const shot = map.shots[40];
+    const csv = ASC.waferMap.selectionToCsv(map, shot.markIndices.slice().reverse().concat(map.shots[3].markIndices));
+    const lines = csv.trim().split("\r\n");
+    assert(lines[0] === "ShotId,ShotX,ShotY,ScanDir,MarkNo,MarkX,MarkY,WaferX,WaferY", `見出しが違います: ${lines[0]}`);
+    assert(lines.length === 1 + shot.markIndices.length + map.shots[3].markIndices.length, "行の数が違います");
+    const rows = lines.slice(1).map((line) => line.split(","));
+    assert(rows[0][0] === map.shots[3].id, "Shotの並び順になっていません");
+    for (const row of rows) {
+      const [shotX, shotY, , , markX, markY, waferX, waferY] = row.slice(1).map(Number);
+      assertClose(waferX, shotX + markX, 1e-9, "Wafer座標X");
+      assertClose(waferY, shotY + markY, 1e-9, "Wafer座標Y");
+    }
+    const parsed = ASC.waferMap.parseMapCsv(csv, { validRadiusMm: 150, shotWidthMm: 26, shotHeightMm: 33 });
+    assert(parsed.errors.length === 0 && parsed.map.marks.length === rows.length, "選択点のCSVをマップのCSVとして読めません");
   });
 
   // ---- 結果の表示 ----

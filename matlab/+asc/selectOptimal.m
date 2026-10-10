@@ -2,7 +2,7 @@ function selection = selectOptimal(context, random, criterion, termSets, startCo
 %SELECTOPTIMAL D最適（criterion='D'）・I最適（'I'）。選べなければ []。
 %   開始点（ハード制約を満たす無作為な選択）ごとに入れ替え法（Fedorov）を行い、目的が最も良いものを使う。
 %   I最適は、D最適の入れ替えで整えてから探す。termSets は X と Y の多項式の項（0始まりの番号）の cell。
-%   追加のMark（k個以上のとき）は、基準が最も良くなるMarkを1つずつ加える。
+%   制約付きは context、制約なしは asc.unconstrainedContext(context) を渡す。選んだShotの有効なMarkをすべて測る。
 
 models = buildModels(context, termSets);
 best = [];
@@ -26,12 +26,14 @@ if isempty(best)
     selection = [];
     return
 end
-measured = asc.measuredMarks(context, best.List);
-selection = struct('items', best.List, 'markIndices', [measured, extrasOptimal(context, best.List, measured, models, criterion)]);
+selection = struct('items', best.List, 'markIndices', asc.measuredMarks(context, best.List));
 end
 
 function models = buildModels(context, termSets)
-% 補正多項式ごとの計算材料（XとYで項が同じなら1つにまとめる）
+% 補正多項式ごとの計算材料（XとYで項が同じなら1つにまとめる）。
+% blocks は候補（Shot）ごとの、測るMarkでの多項式の値（k × p × 候補数）。Shotごとに有効なMarkの数が違う
+% （Markが揃わない端のShot）ので、最も多いMark数 k まで0の行で埋める。0の行は情報行列に何も足さず、
+% 入れ替えの計算（Woodbury）でも結果を変えない
 uniqueTerms = {};
 for k = 1:numel(termSets)
     terms = termSets{k}(:)';
@@ -41,15 +43,17 @@ for k = 1:numel(termSets)
 end
 uv = [context.map.markU, context.map.markV];
 itemCount = numel(context.items);
+most = max(arrayfun(@(item) numel(item.marks), context.items));
 models = struct('terms', uniqueTerms, 'p', [], 'weight', [], 'blocks', []);
 for m = 1:numel(models)
     terms = models(m).terms;
     allDesign = asc.polynomialDesign(uv, terms);
     models(m).p = numel(terms);
     models(m).weight = allDesign' * allDesign / size(uv, 1);
-    blocks = zeros(context.markCountPerShot, numel(terms), itemCount);
+    blocks = zeros(most, numel(terms), itemCount);
     for item = 1:itemCount
-        blocks(:, :, item) = asc.polynomialDesign(uv(context.items(item).designatedMarks, :), terms);
+        marks = context.items(item).marks;
+        blocks(1:numel(marks), :, item) = asc.polynomialDesign(uv(marks, :), terms);
     end
     models(m).blocks = blocks;
 end
@@ -115,10 +119,7 @@ C = asc.constants();
 useWeight = strcmp(criterion, 'I');
 totalTerms = sum([models.p]);
 penaltyScale = context.softStrength * C.SOFT_PENALTY_LOG_EFFICIENCY;
-forced = 0;
-if context.center.active
-    forced = context.center.itemIndex;
-end
+forced = asc.forcedItemsOf(context);
 itemCount = numel(context.items);
 for pass = 1:C.OPTIMAL_MAX_PASSES
     prepared = cell(1, numel(models));
@@ -129,7 +130,7 @@ for pass = 1:C.OPTIMAL_MAX_PASSES
     bestGain = 1e-9;
     bestSwap = [];
     for removed = state.List
-        if removed == forced
+        if ismember(removed, forced)
             continue
         end
         hardDelta = state.swapDeltaAll(removed, true);
@@ -185,55 +186,4 @@ if useWeight
 else
     value = logDetTotal / sum([models.p]) - penalty;
 end
-end
-
-function chosen = extrasOptimal(context, selectedItems, measured, models, criterion)
-% D・I最適の基準が最も良くなるMarkを1つずつ加える（Sherman-Morrisonで逆行列を更新）
-C = asc.constants();
-chosen = zeros(1, 0);
-if context.extraMarkCount <= 0
-    return
-end
-uv = [context.map.markU, context.map.markV];
-[candidates, forced] = asc.extraCandidates(context, selectedItems);
-chosen = forced;
-current = [measured, forced];
-inverses = cell(1, numel(models));
-vectors = cell(1, numel(models));
-for m = 1:numel(models)
-    rows = asc.polynomialDesign(uv(current, :), models(m).terms);
-    inverses{m} = inv(rows' * rows + C.INFORMATION_RIDGE * eye(models(m).p));
-    vectors{m} = asc.polynomialDesign(uv(candidates, :), models(m).terms);
-end
-remaining = 1:numel(candidates);
-while numel(chosen) < context.extraMarkCount && ~isempty(remaining)
-    bestPosition = 1;
-    bestGain = -Inf;
-    for position = 1:numel(remaining)
-        gain = 0;
-        for m = 1:numel(models)
-            f = vectors{m}(remaining(position), :)';
-            af = inverses{m} * f;
-            leverage = f' * af;
-            if strcmp(criterion, 'I')
-                gain = gain + (af' * (models(m).weight * af)) / (1 + leverage);
-            else
-                gain = gain + log(1 + leverage);
-            end
-        end
-        if asc.isClearlyGreater(gain, bestGain)
-            bestGain = gain;
-            bestPosition = position;
-        end
-    end
-    candidate = remaining(bestPosition);
-    remaining(bestPosition) = [];
-    for m = 1:numel(models)
-        f = vectors{m}(candidate, :)';
-        af = inverses{m} * f;
-        inverses{m} = inverses{m} - (af * af') / (1 + f' * af);
-    end
-    chosen(end + 1) = candidates(candidate); %#ok<AGROW>
-end
-chosen = chosen(1:min(context.extraMarkCount, numel(chosen)));
 end

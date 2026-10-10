@@ -229,7 +229,6 @@
     const howaCorrection = new Float64Array(markCount);
     const correction = new Float64Array(markCount);
     const residual = new Float64Array(markCount);
-    const leftover = new Float64Array(n);
     const estimateBuffer = new Float64Array(markCount);
     const errorBuffer = new Float64Array(unmeasured.length);
     const howaCache = new Map();
@@ -274,7 +273,7 @@
           } else {
             const estimator = estimators[variant.estimator.key];
             if (estimator.type === "linear") {
-              operators[variant.key] = ASC.correction.linearFlowOperator(howaParts, estimator.operator, sampleIndices, variant.flowType, markCount);
+              operators[variant.key] = ASC.correction.estimateThenHowaOperator(howaParts, estimator.operator, sampleIndices, markCount);
             }
           }
         }
@@ -330,37 +329,21 @@
             markMissing(store, axis, wafer);
             continue;
           }
-          // ガウス過程回帰はWaferごとに調整値を学習する
-          let fit;
-          if (variant.flowType === "estimateThenHowa") {
-            // 未計測Markを推定して全Markを埋め、全Markに多項式を当てはめる（係数を直接求める）
-            fit = rawFits[variant.estimator.key];
-            const projectorKey = `${termsKey}|${variant.estimator.key}`;
-            if (!gpProjectors.has(projectorKey)) {
-              gpProjectors.set(projectorKey, ASC.correction.gpHowaProjector(estimator.gp, howaParts, sampleIndices));
+          // ガウス過程回帰はWaferごとに調整値を学習する（推定精度と同じ学習結果を使う）。
+          // 未計測Markを推定して全Markを埋め、全Markに多項式を当てはめる（係数を直接求める）
+          const fit = rawFits[variant.estimator.key];
+          const projectorKey = `${termsKey}|${variant.estimator.key}`;
+          if (!gpProjectors.has(projectorKey)) {
+            gpProjectors.set(projectorKey, ASC.correction.gpHowaProjector(estimator.gp, howaParts, sampleIndices));
+          }
+          ASC.correction.gpThenHowaCoefficients(estimator.gp, gpProjectors.get(projectorKey), fit, measured, coefficients);
+          for (let i = 0; i < markCount; i++) {
+            let sum = 0;
+            const offset = i * p;
+            for (let k = 0; k < p; k++) {
+              sum += howaParts.allDesign[offset + k] * coefficients[k];
             }
-            ASC.correction.gpThenHowaCoefficients(estimator.gp, gpProjectors.get(projectorKey), fit, measured, coefficients);
-            for (let i = 0; i < markCount; i++) {
-              let sum = 0;
-              const offset = i * p;
-              for (let k = 0; k < p; k++) {
-                sum += howaParts.allDesign[offset + k] * coefficients[k];
-              }
-              correction[i] = sum;
-            }
-          } else {
-            for (let j = 0; j < n; j++) {
-              let fittedValue = 0;
-              for (let k = 0; k < n; k++) {
-                fittedValue += howaParts.fitted[j * n + k] * measured[k];
-              }
-              leftover[j] = measured[j] - fittedValue;
-            }
-            fit = ASC.correction.gpFit(estimator.gp, leftover);
-            const estimate = ASC.correction.gpPredictAll(estimator.gp, fit);
-            for (let i = 0; i < markCount; i++) {
-              correction[i] = howaCorrection[i] + estimate[i];
-            }
+            correction[i] = sum;
           }
           storeMetrics(store, axis, wafer, truth, waferOffset, correction, markCount, residual);
           if (Number.isFinite(fit.length)) {
@@ -384,24 +367,57 @@
     return evaluateSampleSet(map, data, modelSettings, allIndices, howaOnly, modelCache, { estimation: false });
   }
 
+  /** 選び方の乱数（選び方の並び順と試行の番号で決める。評価と「計画を作成」で同じ点を選ぶため共通にする）。 */
+  function methodRandom(seed, methodKey, draw) {
+    const methodIndex = C.METHODS.findIndex((method) => method.key === methodKey);
+    return M.createRandom(M.deriveSeed(seed, STREAM_METHOD_BASE + methodIndex * 100000 + draw));
+  }
+
+  /**
+   * 自動の選び方で1組の点を選ぶ。制約付きの選び方は context、制約なしは freeContext を使う。
+   * 選べなければ null。
+   */
+  function selectByMethod(methodKey, context, freeContext, settings, draw, termSets) {
+    const sampling = settings.sampling;
+    const method = C.METHODS.find((entry) => entry.key === methodKey);
+    const random = methodRandom(sampling.seed, methodKey, draw);
+    if (methodKey === "random") {
+      return ASC.sampling.selectRandom(context, random);
+    }
+    if (methodKey === "poisson") {
+      return ASC.sampling.selectPoisson(context, random);
+    }
+    return ASC.sampling.selectOptimal(method.constrained ? context : freeContext, random, method.criterion, termSets, sampling.optimalStarts);
+  }
+
+  /** サンプリングの前提を作り、ハード制約を同時に満たせるか確かめる（評価と「計画を作成」で共通）。 */
+  function prepareContext(map, settings) {
+    const built = ASC.constraints.buildContext(map, settings);
+    if (built.errors.length > 0) {
+      return { errors: built.errors };
+    }
+    const context = built.context;
+    const relaxed = ASC.constraints.resolveHardConstraints(context, settings.sampling.seed, (ctx, random) =>
+      Boolean(ASC.sampling.findFeasibleState(ctx, random))
+    );
+    return { errors: [], context, freeContext: ASC.constraints.unconstrainedContext(context), relaxed };
+  }
+
   /**
    * 評価を実行する。
-   * input: { map, data, settings, manualPlans: [{ key, label, shotIndices, extraMarkIndices }] }
+   * input: { map, data, settings, manualPlans: [{ key, label, shotIndices }] }
    *   manualPlans は人が選んだ手動プラン（比較に含めるものだけ）。自動の選び方と同列に評価する
    * onProgress(done, total, label)、isCancelled() で進み具合と中止を扱う。
    * 戻り値の methods は、結果に出す選び方の一覧（自動の選び方 → 手動プランの順）。
    */
   async function runEvaluation(input, onProgress, isCancelled) {
     const { map, data, settings } = input;
-    const built = ASC.constraints.buildContext(map, settings);
-    if (built.errors.length > 0) {
-      return { errors: built.errors };
+    const prepared = prepareContext(map, settings);
+    if (prepared.errors.length > 0) {
+      return { errors: prepared.errors };
     }
-    const context = built.context;
+    const { context, freeContext, relaxed } = prepared;
     const sampling = settings.sampling;
-    const relaxed = ASC.constraints.resolveHardConstraints(context, sampling.seed, (ctx, random) =>
-      Boolean(ASC.sampling.findFeasibleState(ctx, random))
-    );
     const variants = ASC.correction.buildVariants(settings.model);
     const modelCache = createModelCache(map);
     const termSets = [settings.model.termsX, settings.model.termsY];
@@ -426,33 +442,21 @@
     let doneSteps = 0;
 
     const sets = [];
+    const failedMethods = [];
     for (const entry of plan) {
       if (isCancelled()) {
         return { cancelled: true };
       }
-      const methodIndex = C.METHODS.findIndex((method) => method.key === entry.method);
-      const random = M.createRandom(M.deriveSeed(sampling.seed, STREAM_METHOD_BASE + methodIndex * 100000 + entry.draw));
-      let selection = null;
-      switch (entry.method) {
-        case "random":
-          selection = ASC.sampling.selectRandom(context, random);
-          break;
-        case "poisson":
-          selection = ASC.sampling.selectPoisson(context, random);
-          break;
-        case "dOptimal":
-          selection = ASC.sampling.selectOptimal(context, random, "D", termSets, sampling.optimalStarts);
-          break;
-        case "iOptimal":
-          selection = ASC.sampling.selectOptimal(context, random, "I", termSets, sampling.optimalStarts);
-          break;
-        default:
-          selection = ASC.sampling.manualSelection(context, entry.manualPlan.shotIndices, entry.manualPlan.extraMarkIndices);
-          break;
-      }
+      const selection = entry.manualPlan
+        ? ASC.sampling.manualSelection(context, entry.manualPlan.shotIndices)
+        : selectByMethod(entry.method, context, freeContext, settings, entry.draw, termSets);
       doneSteps++;
       onProgress(doneSteps, totalSteps, "計測Markを選んでいます");
       if (!selection || selection.markIndices.length === 0) {
+        const label = methods.find((method) => method.key === entry.method).label;
+        if (!failedMethods.includes(label)) {
+          failedMethods.push(label);
+        }
         continue;
       }
       sets.push(describeSet(context, settings, entry, selection));
@@ -483,6 +487,7 @@
       errors: [],
       context,
       relaxed,
+      failedMethods,
       sets,
       baselines: { uncorrected, allMarks: allMarks.results },
       variants,
@@ -520,10 +525,51 @@
   }
 
   /**
+   * 制約付きD最適・I最適の「計画」だけを作る（評価データと補正は使わない）。
+   * 同じ設定なら、評価（runEvaluation）の制約付きD最適・I最適と同じ点を選ぶ。
+   * input: { map, settings }
+   * 戻り値: { errors, context, relaxed, failedMethods, methods, sets, criteriaReference, criteriaSameTerms }
+   *   sets は describeSet の形（results などの評価の値は持たない）
+   */
+  function runPlan(input) {
+    const { map, settings } = input;
+    const prepared = prepareContext(map, settings);
+    if (prepared.errors.length > 0) {
+      return { errors: prepared.errors };
+    }
+    const { context, freeContext, relaxed } = prepared;
+    const termSets = [settings.model.termsX, settings.model.termsY];
+    const methods = [];
+    const sets = [];
+    const failedMethods = [];
+    for (const key of C.PLAN_METHOD_KEYS) {
+      const method = C.METHODS.find((entry) => entry.key === key);
+      const selection = selectByMethod(key, context, freeContext, settings, 0, termSets);
+      if (!selection || selection.markIndices.length === 0) {
+        failedMethods.push(method.label);
+        continue;
+      }
+      methods.push({ key, label: method.label, usesDraws: false, manual: false });
+      sets.push(describeSet(context, settings, { method: key, draw: 0 }, selection));
+    }
+    return {
+      errors: [],
+      context,
+      relaxed,
+      failedMethods,
+      methods,
+      sets,
+      criteriaReference: criteriaReference(sets),
+      criteriaSameTerms: settings.model.termsX.join(",") === settings.model.termsY.join(","),
+    };
+  }
+
+  /**
    * 計測Shot数を変えながら評価する（計測コストと精度のトレードオフ）。
-   * 「k個以上」のときは、Shotあたりの総Mark数の比（総Mark数 ÷ 計測Shot数）を保つ。
+   * 比べる選び方は sweepSettings.methods（なければ評価の選び方）。計測Mark数は選んだShotの有効なMarkの数の合計で、
+   * Markが揃わない端のShotを選べば選び方ごとに少し変わる（点ごとに試行の平均を持つ）。
    * 手動プラン（input.manualPlans）は計測Shot数が決まっているので、1回だけ評価してグラフに点として重ねる。
-   * sweepSettings: { startShots, endShots, stepShots, draws }
+   * sweepSettings: { startShots, endShots, stepShots, draws, methods }
    * 戻り値: { points: [{ shotCount, markCounts, summary, relaxed, warnings }], methods, manual, variants, estimationKeys, baseline, uncorrected }
    *   manual: { methods, summary, shotCounts, markCounts }（手動プランがなければ null）
    */
@@ -537,8 +583,6 @@
     if (errors.length > 0) {
       return { errors };
     }
-    const sampling = settings.sampling;
-    const marksPerShot = sampling.markMode === "exact" ? built.context.markCountPerShot : sampling.totalMarkCount / sampling.shotCount;
     const manualPlans = (input.manualPlans || []).filter((manualPlan) => manualPlan.shotIndices.length > 0);
     const stepCount = values.length + (manualPlans.length > 0 ? 1 : 0);
     const points = [];
@@ -547,8 +591,10 @@
       const shotCount = values[index];
       const pointSettings = JSON.parse(JSON.stringify(settings));
       pointSettings.sampling.shotCount = shotCount;
-      pointSettings.sampling.totalMarkCount = Math.max(shotCount * built.context.markCountPerShot, Math.round(shotCount * marksPerShot));
       pointSettings.sampling.draws = sweepSettings.draws;
+      if (sweepSettings.methods) {
+        pointSettings.sampling.methods = Object.assign({}, sweepSettings.methods);
+      }
       const output = await runEvaluation(
         { map, data, settings: pointSettings, manualPlans: [] },
         (done, total, label) => onProgress(index + done / total, stepCount, `計測Shot数 ${shotCount}（${index + 1}/${values.length}）: ${label}`),
@@ -570,6 +616,7 @@
         markCounts,
         summary: output.summary,
         relaxed: output.relaxed,
+        failedMethods: output.failedMethods,
         warnings: Array.from(new Set(output.sets.flatMap((set) => set.warnings))),
       });
       last = output;
@@ -654,7 +701,7 @@
     const markIndices = Array.from(new Set(selection.markIndices)).sort((a, b) => a - b);
     const warnings = [];
     if (selection.notEligible && selection.notEligible.length > 0) {
-      warnings.push(`手動プランの、必ず測るMarkが有効範囲外のShot ${selection.notEligible.length}個は、評価から外しました。`);
+      warnings.push(`手動プランの、選べないShot（除外Shot・Markが揃わない端のShot）${selection.notEligible.length}個は、評価から外しました。`);
     }
     return {
       method: entry.method,
@@ -730,18 +777,16 @@
       summary[method.key].minSpacingMm = M.summarize(methodSets.map((set) => set.minSpacingMm));
       summary[method.key].markCount = M.summarize(methodSets.map((set) => set.markIndices.length));
       summary[method.key].shotCount = M.summarize(methodSets.map((set) => set.shotIndices.length));
-      summary[method.key].constraintsMet = methodSets.filter(
-        (set) => set.status.rows.every((row) => row.ok) && (!set.status.center || set.status.center.ok)
-      ).length;
+      summary[method.key].constraintsMet = methodSets.filter((set) => ASC.constraints.statusRows(set.status).every((row) => row.ok)).length;
     }
     return summary;
   }
 
   /** 制約ごとに、満たした試行の数とずれの平均・最大をまとめる。 */
   function summarizeConstraints(methodSets) {
-    const rows = methodSets[0].status.rows.concat(methodSets[0].status.center ? [methodSets[0].status.center] : []);
+    const rows = ASC.constraints.statusRows(methodSets[0].status);
     return rows.map((first) => {
-      const entries = methodSets.map((set) => (first.key === "center" ? set.status.center : set.status.rows.find((row) => row.key === first.key)));
+      const entries = methodSets.map((set) => ASC.constraints.statusRows(set.status).find((row) => row.key === first.key));
       return {
         key: first.key,
         label: first.label,
@@ -803,6 +848,7 @@
     residualMetrics,
     evaluateSampleSet,
     runEvaluation,
+    runPlan,
     runSweep,
     sweepShotCounts,
     summarizeStore,

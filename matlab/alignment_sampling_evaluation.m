@@ -5,7 +5,7 @@
 % 使い方: このファイルを MATLAB エディターで開き、セクション（%%）ごとに「セクションの実行」で進めます。
 %
 % 流れ
-%   1. 準備  2. 設定  3. Waferマップと評価データ  4. 手動プラン  5. 評価
+%   1. 準備  2. 設定  3. Waferマップと評価データ  4. 手動プランと、制約付きD・I最適の計画  5. 評価
 %   6. 表（残差・D/I基準と制約・推定精度）  7. 図  8. 計測点数のスイープ  9. CSVで保存
 %
 % 番号（Shot・Mark・選び方など）は MATLAB 版ではすべて1始まりです。
@@ -23,7 +23,10 @@ if ~isfolder(outputFolder)
 end
 
 %% 2. 設定
-% 初期設定はアプリの初期設定と同じです（Wafer 100枚、Shot 20個 × Mark 2個、試行30回、制約はすべてハード）。
+% 初期設定はアプリの初期設定と同じです（Wafer 100枚、計測Shot 20個、試行30回、制約はすべてハード、Scan方向は一筆書き）。
+% 選んだShotでは、そのShotに紐づくMark（有効範囲の中にあるもの）をすべて測ります。
+% Markが揃わない端のShotを選ばないときは settings.sampling.excludeIncompleteShots = true にします。
+% 強制計測Shot・除外Shotは settings.constraints.mandatoryShotIds・excludedShotIds に Shot番号の cell（{'30'; '45'}）で入れます。
 % アプリの「設定をJSONで保存」で作ったファイルがあれば、settingsFile に置き場所を書くと、そのまま読み込みます
 % （CSVのマップや手動プランも入ります）。
 settingsFile = '';  % 例: fullfile(scriptFolder, '設定_20261004-1200.json')
@@ -42,7 +45,9 @@ end
 % ここで設定を変えられる（例: Wafer数、試行回数）
 settings.evaluationData.waferCount = 100;
 settings.sampling.draws = 30;
-fprintf('計測Shot数: %d ／ 必ず測るMark: %s\n', settings.sampling.shotCount, mat2str(settings.sampling.designatedMarkNos'));
+fprintf('計測Shot数: %d ／ 端のShotを選ばない: %d\n', settings.sampling.shotCount, settings.sampling.excludeIncompleteShots);
+fprintf('強制計測Shot: %s ／ 除外Shot: %s\n', strjoin(asc.shotIdList(settings.constraints.mandatoryShotIds), ', '), ...
+    strjoin(asc.shotIdList(settings.constraints.excludedShotIds), ', '));
 
 %% 3. Waferマップと評価データ
 % 評価データは、Zernike（Fringe Z1〜Z36）の乱数係数で作るWafer高次傾向と計測ノイズです。
@@ -52,16 +57,35 @@ fprintf('真のずれ X のRMS（全Wafer）: %.3f nm\n', sqrt(mean(data.truthX(
 
 %% 4. 手動プラン（現行のサンプリング）を作る
 % Shot番号（アプリやCSVの ShotId）の一覧から作ります。実際の現行サンプリングのShot番号に置き換えてください。
-% 必ず測るMarkがWaferの有効範囲（半径150mm）の外に出るShotは評価から外れ、警告が出ます。
+% 除外Shot（と、端のShotを選ばない設定のときの端のShot）は評価から外れ、警告が出ます。
 currentShotIds = {'11', '13', '20', '26', '31', '34', '37', '39', '45', '48', '55', '58', '62', '66', '70', '73', '80', '85', '92', '94'};
 manualPlans = asc.planFromShotIds('現行（例）', currentShotIds, waferMap, 'manual:1');
 if ~isempty(plansFromFile)
     manualPlans = [manualPlans, plansFromFile];
 end
 
+%% 4-2 制約付きD最適・I最適の計画を作る（評価データを使わない）
+% Waferマップと制約だけから、制約付きD最適・I最適の計測点を選びます（アプリの「計画を作成」と同じ）。
+% 同じ設定なら、次の評価の制約付きD最適・I最適と同じ点になります。選んだ点の座標は output フォルダにCSVで保存します。
+designPlan = asc.runPlan(waferMap, settings);
+mandatoryShots = [designPlan.context.items(designPlan.context.mandatoryItems).shotIndex];
+figure('Name', '計画（制約付きD・I最適）', 'Position', [100, 100, 1200, 600]);
+layout = tiledlayout(1, numel(designPlan.sets), 'TileSpacing', 'compact');
+for s = 1:numel(designPlan.sets)
+    entry = designPlan.sets(s);
+    asc.plotSelectionMap(waferMap, entry, sprintf('%s（Shot %d個・Mark %d個）', designPlan.methods(s).label, ...
+        numel(entry.shotIndices), numel(entry.markIndices)), settings.zones, nexttile(layout), mandatoryShots);
+    fid = fopen(fullfile(outputFolder, ['plan_' entry.method '.csv']), 'w', 'n', 'UTF-8');
+    fwrite(fid, [char(65279), asc.selectionToCsv(waferMap, entry.markIndices)], 'char');  % Excel向けにBOMを付ける
+    fclose(fid);
+end
+if ~isempty(designPlan.failedMethods)
+    fprintf('制約を満たす点を選べなかった選び方: %s\n', strjoin(designPlan.failedMethods, '、'));
+end
+
 %% 5. 評価を実行する
-% 選び方（ランダム・ポアソンディスク・D最適・I最適・手動プラン）× 補正（HOWAのみ、推定→HOWA、HOWA＋推定）で、
-% 全Waferの残差を求めます。数秒〜十数秒かかります。
+% 選び方（ランダム・ポアソンディスク・D最適（制約なし）・I最適（制約なし）・制約付きD最適・制約付きI最適・手動プラン）
+% × 補正（HOWAのみ、推定→HOWA の推定手法ごと）で、全Waferの残差を求めます。数秒〜十数秒かかります。
 tic;
 output = asc.runEvaluation(waferMap, data, settings, manualPlans);
 fprintf('評価にかかった時間: %.1f 秒\n', toc);
@@ -70,6 +94,9 @@ if isempty(output.relaxed)
     fprintf('ソフトに切り替えた制約: なし\n');
 else
     fprintf('ソフトに切り替えた制約: %s\n', strjoin({output.relaxed.label}, '、'));
+end
+if ~isempty(output.failedMethods)
+    fprintf('制約を満たす点を選べなかった選び方: %s\n', strjoin(output.failedMethods, '、'));
 end
 allWarnings = unique([output.sets.warnings], 'stable');
 for k = 1:numel(allWarnings)
@@ -93,6 +120,7 @@ fprintf('全点計測（HOWAのみ）: %.3f nm\n', baseline.x.rms.mean);
 % D基準 log₁₀det(XᵀX) は大きいほど、I基準（予測分散の平均÷σ²）は小さいほど良い選び方です。
 % 効率は、この評価の中で最も良いものを100%にした値です。
 % 制約は「満たした回数 / 試行の数」と、外れたときのずれ（何個のShotを移せば満たせるか）の平均です。
+% 制約なしのD最適・I最適と手動プランは制約を守らないので、外れることがあります。
 criteriaRows = cell(numel(output.methods), 5);
 for m = 1:numel(output.methods)
     summary = output.summary(m);
@@ -119,18 +147,19 @@ disp(array2table(round(estimationTable, 3), 'RowNames', methodNames, 'VariableNa
 
 %% 7-1 図: 残差の箱ひげ図（HOWAのみ と 推定→HOWA の各推定手法）
 figure('Name', '残差の箱ひげ図', 'Position', [100, 100, 900, 1000]);
-asc.plotResidualBoxes(output, 'estimateThenHowa', 'x', 'rms');
+asc.plotResidualBoxes(output, 'x', 'rms');
 
 %% 7-2 図: 選び方ごとに選んだ点
 % ランダム・ポアソンは、残差（HOWAのみ）が中央の試行を表示します。
-figure('Name', '選んだ点', 'Position', [100, 100, 1500, 1000]);
-layout = tiledlayout(2, 3, 'TileSpacing', 'compact');
+figure('Name', '選んだ点', 'Position', [100, 100, 1500, 1500]);
+layout = tiledlayout(3, 3, 'TileSpacing', 'compact');
 for m = 1:numel(output.methods)
     methodSets = output.sets(strcmp({output.sets.method}, output.methods(m).key));
     rmsByDraw = arrayfun(@(s) mean(s.results(1).x.rms, 'omitnan'), methodSets);
     [~, order] = sort(rmsByDraw);
     entry = methodSets(order(ceil(numel(order) / 2)));
-    asc.plotSelectionMap(waferMap, entry, sprintf('%s（Mark %d個）', methodNames{m}, numel(entry.markIndices)), settings.zones, nexttile(layout));
+    asc.plotSelectionMap(waferMap, entry, sprintf('%s（Mark %d個）', methodNames{m}, numel(entry.markIndices)), settings.zones, ...
+        nexttile(layout), mandatoryShots);
 end
 
 %% 7-3 図: 推定誤差のマップ
@@ -141,9 +170,11 @@ asc.plotEstimationErrorMap(output, 'random', 'howa', 'x', [], nexttile(layout));
 asc.plotEstimationErrorMap(output, 'random', 'gpXYR', 'x', [], nexttile(layout));
 
 %% 8. 計測点数のスイープ（トレードオフカーブ）
-% 計測Shot数を変えながら評価します。手動プランは、そのMark数の位置に × で重ねます。
-% 時間を抑えるため、ここでは試行を5回にしています。
-sweepSettings = struct('startShots', 10, 'endShots', 60, 'stepShots', 10, 'draws', 5);
+% 計測Shot数を変えながら評価します。比べる選び方は sweepSettings.methods で選びます（制約なしは破線、制約付きは実線）。
+% 手動プランは、そのMark数の位置に × で重ねます。時間を抑えるため、ここでは試行を5回にしています。
+% 計測Mark数は選んだShotの有効なMarkの数の合計なので、端のShotを選ぶと選び方ごとに少し違います
+% （横軸を計測Shot数にするときは asc.plotSweep(sweep, XAxis='shots')）。
+sweepSettings = struct('startShots', 10, 'endShots', 60, 'stepShots', 10, 'draws', 5, 'methods', settings.sweep.methods);
 targetNm = 0.35;
 sweep = asc.runSweep(waferMap, data, settings, sweepSettings, manualPlans);
 figure('Name', 'トレードオフカーブ', 'Position', [100, 100, 800, 500]);
@@ -160,12 +191,14 @@ for method = sweep.methods(:)'
     if isnan(reached)
         fprintf('%s: 目標 %.2f nm には範囲内では届かない\n', method.label, targetNm);
     else
-        fprintf('%s: 目標 %.2f nm に届く最小の計測Mark数 = %d\n', method.label, targetNm, round(reached));
+        fprintf('%s: 目標 %.2f nm に届く最小の計測Mark数 = %.0f\n', method.label, targetNm, reached);
     end
 end
 
 %% 9. 結果をCSVで保存する
 % output フォルダに、選び方 × 補正の集計と、選んだ点の一覧を保存します（Gitでは管理しません）。
+% 1つの選択点だけを保存するときは、4-2 のように asc.selectionToCsv(waferMap, entry.markIndices) を使います
+% （列は ShotId, ShotX, ShotY, ScanDir, MarkNo, MarkX, MarkY, WaferX, WaferY）。
 metricNames = {'rms', 'mean3sigma', 'max'};
 summaryRows = {};
 for m = 1:numel(output.methods)
@@ -194,20 +227,25 @@ writetable(cell2table(selectionRows, 'VariableNames', {'Method', 'Draw', 'ShotId
 fprintf('保存しました: %s\n', outputFolder);
 
 %% 練習問題
-% 1. 必ず測るMarkを4つ（[1; 2; 3; 4]）にし、計測Shot数を10にして評価してください。
-%    D最適と現行（例）の残差はどう変わるでしょうか。
-% 2. 6次以上のZernike項（多項式で補正できない成分）を大きくすると、推定→HOWA と HOWA＋推定の
-%    どちらが効くようになるか試してください（settings.evaluationData.terms(k).xValue を変える）。
+% 1. 「Markが揃わない端のShotは選ばない」（excludeIncompleteShots = true）にし、計測Shot数を10にして評価してください。
+%    制約付きD最適と現行（例）の残差はどう変わるでしょうか。
+% 2. 強制計測Shot（例: Wafer中心のまわりの4Shot）を指定して asc.runPlan を実行し、残りのShotがどこに足されるかを見てください。
 %
 % 練習問題1の書き方の例（実行すると数秒かかります）:
 %   exercise = settings;
-%   exercise.sampling.designatedMarkNos = [1; 2; 3; 4];
+%   exercise.sampling.excludeIncompleteShots = true;
 %   exercise.sampling.shotCount = 10;
 %   exercise.sampling.draws = 10;
 %   result = asc.runEvaluation(waferMap, data, exercise);
 %   for m = 1:numel(result.methods)
 %       fprintf('%s %.3f\n', result.methods(m).label, result.summary(m).variants(1).x.rms.all.mean);
 %   end
+%
+% 練習問題2の書き方の例（Shot番号はマップの図の番号）:
+%   exercise2 = settings;
+%   exercise2.constraints.mandatoryShotIds = {'46'; '47'; '58'; '59'};
+%   plan2 = asc.runPlan(waferMap, exercise2);
+%   disp(waferMap.shotIds(plan2.sets(1).shotIndices)')
 %
 % よくある間違い: 計測Mark数が多項式の項数（初期設定では21項）より少ないと、HOWAが不安定になり
 % 残差が大きくなります。このときは警告が出ます（output.sets(s).warnings）。
