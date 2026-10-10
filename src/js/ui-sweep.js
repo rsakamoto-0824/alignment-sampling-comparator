@@ -18,13 +18,18 @@
   };
   const STATS = { mean: "Wafer平均", p95: "95%点" };
   const SCALES = { linear: "線形", log: "対数" };
-  // 選び方の線の色と形。ランダムは基準として灰色にする（推定手法の色と重ならないように）
+  const X_AXES = { marks: "計測Mark数（計測コスト）", shots: "計測Shot数" };
+  // 選び方の線の色と形。ランダムは基準として灰色にする（推定手法の色と重ならないように）。
+  // D最適・I最適は、制約なしを破線と中抜きのマーカー、制約付きを実線と塗りのマーカーにして、色以外でも見分けられるようにする
   const METHOD_STYLES = {
     random: { color: "var(--method-random)", shape: "circle" },
     poisson: { color: "var(--method-poisson)", shape: "square" },
-    dOptimal: { color: "var(--method-d)", shape: "triangle" },
-    iOptimal: { color: "var(--method-i)", shape: "diamond" },
+    dOptimal: { color: "var(--method-d)", shape: "triangle", dashed: true },
+    iOptimal: { color: "var(--method-i)", shape: "diamond", dashed: true },
+    constrainedD: { color: "var(--method-d)", shape: "triangle" },
+    constrainedI: { color: "var(--method-i)", shape: "diamond" },
   };
+  const DASH_PATTERN = "6 4";
   const ESTIMATOR_SHAPES = { howa: "circle", rbfXY: "square", rbfXYR: "triangle", gpXY: "diamond", gpXYR: "triangleDown" };
   // 手動プランは計測Shot数が決まっているので、線ではなく点（文字色の × や ＋）で重ねる
   const MANUAL_SHAPES = ["cross", "plus"];
@@ -56,38 +61,34 @@
   function normalizeView(sweep, view) {
     const methodKeys = allMethods(sweep).map((method) => method.key);
     const variantKeys = sweep.variants.map((variant) => variant.key);
-    const flowTypes = C.FLOW_TYPES.filter((flow) => flow.key !== "howa" && sweep.variants.some((variant) => variant.flowType === flow.key)).map((flow) => flow.key);
     return {
       mode: MODES[view.mode] ? view.mode : "methods",
       variant: variantKeys.includes(view.variant) ? view.variant : variantKeys[0],
       method: methodKeys.includes(view.method) ? view.method : sweep.methods[sweep.methods.length - 1].key,
-      flowType: flowTypes.includes(view.flowType) ? view.flowType : flowTypes[0] || "howa",
       metric: view.metric || "rms",
       axis: view.axis || "x",
       stat: STATS[view.stat] ? view.stat : "mean",
       scale: SCALES[view.scale] ? view.scale : "linear",
+      xAxis: X_AXES[view.xAxis] ? view.xAxis : "marks",
       target: view.target,
       methodKeys,
-      flowTypes,
     };
   }
 
   /**
    * 選び方1つぶんの点の並び。自動の選び方はスイープの各点、手動プランは1点だけ。
-   * pick(summary) で、その点の値（集計）を取り出す。
+   * pick(summary) で、その点の値（集計）を取り出す。x は横軸（計測Mark数か計測Shot数）の値。
+   * 計測Mark数は、選んだShotの有効なMarkの数の合計の試行平均（端のShotを選ぶと選び方ごとに少し違う）。
    */
-  function methodPoints(sweep, methodKey, pick) {
+  function methodPoints(sweep, methodKey, pick, xAxis) {
+    const toPoint = (markCount, shotCount, y) => ({ x: xAxis === "shots" ? shotCount : markCount, markCount, shotCount, y });
     if (sweep.manual && sweep.manual.summary[methodKey]) {
       const summary = sweep.manual.summary[methodKey];
-      return [{ x: sweep.manual.markCounts[methodKey], shotCount: sweep.manual.shotCounts[methodKey], y: pick(summary) }];
+      return [toPoint(sweep.manual.markCounts[methodKey], sweep.manual.shotCounts[methodKey], pick(summary))];
     }
     return sweep.points
       .filter((point) => point.summary)
-      .map((point) => ({
-        x: point.markCounts[methodKey],
-        shotCount: point.shotCount,
-        y: point.summary[methodKey] ? pick(point.summary[methodKey]) : NaN,
-      }));
+      .map((point) => toPoint(point.markCounts[methodKey], point.shotCount, point.summary[methodKey] ? pick(point.summary[methodKey]) : NaN));
   }
 
   /** グラフに描く系列（線、手動プランは点）。 */
@@ -101,7 +102,8 @@
           label: method.label,
           color: style.color,
           shape: style.shape,
-          points: methodPoints(sweep, method.key, (summary) => statOf(summary.variants[view.variant][view.axis][view.metric], view.stat)),
+          dashed: Boolean(style.dashed),
+          points: methodPoints(sweep, method.key, (summary) => statOf(summary.variants[view.variant][view.axis][view.metric], view.stat), view.xAxis),
         });
       });
       (sweep.manual ? sweep.manual.methods : []).forEach((method, index) => {
@@ -110,19 +112,18 @@
           label: `${method.label}（手動）`,
           color: MANUAL_COLOR,
           shape: MANUAL_SHAPES[index % MANUAL_SHAPES.length],
-          points: methodPoints(sweep, method.key, (summary) => statOf(summary.variants[view.variant][view.axis][view.metric], view.stat)),
+          points: methodPoints(sweep, method.key, (summary) => statOf(summary.variants[view.variant][view.axis][view.metric], view.stat), view.xAxis),
         });
       });
     } else if (view.mode === "corrections") {
-      const variants = sweep.variants.filter((variant) => variant.flowType === "howa" || variant.flowType === view.flowType);
-      for (const variant of variants) {
+      for (const variant of sweep.variants) {
         const estimatorKey = variant.estimator ? variant.estimator.key : "howa";
         series.push({
           key: variant.key,
           label: variant.label,
           color: ASC.resultsView.SERIES_COLORS[estimatorKey],
           shape: ESTIMATOR_SHAPES[estimatorKey],
-          points: methodPoints(sweep, view.method, (summary) => statOf(summary.variants[variant.key][view.axis][view.metric], view.stat)),
+          points: methodPoints(sweep, view.method, (summary) => statOf(summary.variants[variant.key][view.axis][view.metric], view.stat), view.xAxis),
         });
       }
     } else {
@@ -132,7 +133,7 @@
           label: ASC.evaluator.estimationLabel(key),
           color: ASC.resultsView.SERIES_COLORS[key],
           shape: ESTIMATOR_SHAPES[key],
-          points: methodPoints(sweep, view.method, (summary) => (summary.estimation[key] ? statOf(summary.estimation[key][view.axis][view.metric], view.stat) : NaN)),
+          points: methodPoints(sweep, view.method, (summary) => (summary.estimation[key] ? statOf(summary.estimation[key][view.axis][view.metric], view.stat) : NaN), view.xAxis),
         });
       }
     }
@@ -182,10 +183,10 @@
     return value >= 100 ? value.toFixed(0) : value >= 10 ? value.toFixed(1) : value.toFixed(3);
   }
 
-  /** マーカー（形で系列を見分けられるようにする）。 */
-  function marker(shape, x, y, color) {
+  /** マーカー（形で系列を見分けられるようにする）。hollow なら中抜き（制約なしの選び方）。 */
+  function marker(shape, x, y, color, hollow) {
     const r = MARKER_RADIUS;
-    const common = { fill: color, stroke: "var(--surface-1)", "stroke-width": 2 };
+    const common = hollow ? { fill: "var(--surface-1)", stroke: color, "stroke-width": 2 } : { fill: color, stroke: "var(--surface-1)", "stroke-width": 2 };
     const stroked = { fill: "none", stroke: color, "stroke-width": 2.5, "stroke-linecap": "round" };
     switch (shape) {
       case "cross":
@@ -220,10 +221,11 @@
     const scale = yScale(yValues, view.scale, plotHeight);
     const yOf = (value) => MARGIN.top + scale.toY(value);
 
+    const xTitle = X_AXES[view.xAxis];
     const svg = ui.createSvg("svg", {
       viewBox: `0 0 ${WIDTH} ${HEIGHT}`,
       role: "img",
-      "aria-label": `計測Mark数と${yTitle}の関係の折れ線グラフ。数値は下の表にもあります。`,
+      "aria-label": `${xTitle}と${yTitle}の関係の折れ線グラフ。数値は下の表にもあります。`,
     });
     for (const tick of scale.ticks) {
       const y = yOf(tick);
@@ -234,7 +236,7 @@
       svg.append(ui.createSvg("text", { className: "chart-tick", x: xOf(tick), y: MARGIN.top + plotHeight + 18, "text-anchor": "middle", text: String(Math.round(tick)) }));
     }
     svg.append(ui.createSvg("line", { className: "chart-axis", x1: MARGIN.left, y1: MARGIN.top + plotHeight, x2: MARGIN.left + plotWidth, y2: MARGIN.top + plotHeight }));
-    svg.append(ui.createSvg("text", { className: "chart-tick", x: MARGIN.left + plotWidth / 2, y: HEIGHT - 10, "text-anchor": "middle", text: "計測Mark数（計測コスト）" }));
+    svg.append(ui.createSvg("text", { className: "chart-tick", x: MARGIN.left + plotWidth / 2, y: HEIGHT - 10, "text-anchor": "middle", text: xTitle }));
     svg.append(ui.createSvg("text", { className: "chart-tick", x: 14, y: MARGIN.top + plotHeight / 2, "text-anchor": "middle", transform: `rotate(-90 14 ${MARGIN.top + plotHeight / 2})`, text: `${yTitle} [nm]` }));
 
     for (const reference of references) {
@@ -254,9 +256,11 @@
         continue;
       }
       const d = valid.map((point, index) => `${index === 0 ? "M" : "L"} ${xOf(point.x)} ${yOf(point.y)}`).join(" ");
-      svg.append(ui.createSvg("path", { d, fill: "none", stroke: entry.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      svg.append(
+        ui.createSvg("path", { d, fill: "none", stroke: entry.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round", "stroke-dasharray": entry.dashed ? DASH_PATTERN : null })
+      );
       for (const point of valid) {
-        svg.append(marker(entry.shape, xOf(point.x), yOf(point.y), entry.color));
+        svg.append(marker(entry.shape, xOf(point.x), yOf(point.y), entry.color, entry.dashed));
       }
       const last = valid[valid.length - 1];
       if (valid.length === 1) {
@@ -279,8 +283,13 @@
       svg.append(ui.createSvg("text", { className: "chart-row-label", x: labelX, y: label.labelY, "dominant-baseline": "central", text: label.entry.label }));
     }
 
-    // 縦線で一番近い計測Mark数を指し、全系列の値を出す（キーボードの左右キーでも動かせる）
-    const xPositions = Array.from(new Set(series.flatMap((entry) => entry.points.map((point) => point.x)))).filter(Number.isFinite).sort((a, b) => a - b);
+    // 縦線で一番近い計測Shot数の点を指し、全系列の値を出す（キーボードの左右キーでも動かせる）。
+    // 計測Mark数は選び方ごとに少し違うことがあるので、計測Shot数でまとめ、縦線は各系列の横軸の値の平均に引く
+    const shotPositions = Array.from(new Set(series.flatMap((entry) => entry.points.map((point) => point.shotCount)))).filter(Number.isFinite).sort((a, b) => a - b);
+    const xPositions = shotPositions.map((shotCount) => {
+      const xs = series.flatMap((entry) => entry.points.filter((point) => point.shotCount === shotCount && Number.isFinite(point.x)).map((point) => point.x));
+      return xs.reduce((sum, value) => sum + value, 0) / Math.max(xs.length, 1);
+    });
     const crosshair = ui.createSvg("line", { className: "chart-crosshair", x1: 0, y1: MARGIN.top, x2: 0, y2: MARGIN.top + plotHeight, visibility: "hidden" });
     svg.append(crosshair);
     const hit = ui.createSvg("rect", {
@@ -290,7 +299,7 @@
       height: plotHeight,
       fill: "transparent",
       tabindex: "0",
-      "aria-label": "グラフの値を読む。左右の矢印キーで計測Mark数を移動します",
+      "aria-label": "グラフの値を読む。左右の矢印キーで計測Shot数の点を移動します",
     });
     svg.append(hit);
     const tooltip = ui.byId("chart-tooltip");
@@ -298,21 +307,21 @@
     const show = (index, clientX, clientY) => {
       activeIndex = index;
       const xValue = xPositions[index];
+      const shotCount = shotPositions[index];
       crosshair.setAttribute("x1", xOf(xValue));
       crosshair.setAttribute("x2", xOf(xValue));
       crosshair.setAttribute("visibility", "visible");
       const rows = series
-        .map((entry) => ({ entry, point: entry.points.find((point) => point.x === xValue) }))
+        .map((entry) => ({ entry, point: entry.points.find((point) => point.shotCount === shotCount) }))
         .filter((row) => row.point && Number.isFinite(row.point.y))
         .sort((a, b) => a.point.y - b.point.y);
-      const shotCount = rows.length > 0 ? rows[0].point.shotCount : "";
       tooltip.replaceChildren(
-        ui.create("strong", { text: `計測Mark数 ${xValue}（Shot ${shotCount}）` }),
+        ui.create("strong", { text: `計測Shot数 ${shotCount}` }),
         ...rows.map((row) =>
           ui.create("div", { className: "tooltip-row" }, [
             ui.create("span", { className: "tooltip-key", style: `background:${row.entry.color}` }),
             ui.create("strong", { text: formatValue(row.point.y) }),
-            ` ${row.entry.label}`,
+            ` ${row.entry.label}（Mark ${formatCount(row.point.markCount)}点）`,
           ])
         )
       );
@@ -356,8 +365,8 @@
       series.map((entry) =>
         ui.create("li", null, [
           ui.createSvg("svg", { className: "legend-marker", viewBox: "0 0 16 16", "aria-hidden": "true" }, [
-            ui.createSvg("line", { x1: 0, y1: 8, x2: 16, y2: 8, stroke: entry.color, "stroke-width": 2 }),
-            marker(entry.shape, 8, 8, entry.color),
+            ui.createSvg("line", { x1: 0, y1: 8, x2: 16, y2: 8, stroke: entry.color, "stroke-width": 2, "stroke-dasharray": entry.dashed ? "3 2" : null }),
+            marker(entry.shape, 8, 8, entry.color, entry.dashed),
           ]),
           entry.label,
         ])
@@ -366,14 +375,30 @@
     return ui.create("div", null, [legend, ui.create("div", { className: "chart-frame" }, svg)]);
   }
 
-  /** 数値の表（行: 計測Shot数・Mark数、列: 系列）。 */
+  /** 計測Mark数（試行の平均）の表示。整数ならそのまま、そうでなければ小数1桁。 */
+  function formatCount(value) {
+    if (!Number.isFinite(value)) {
+      return "—";
+    }
+    return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  }
+
+  /**
+   * 数値の表（行: 計測Shot数、列: 系列）。計測Mark数が系列ごとに違う行は、値の横にMark数を書く。
+   */
   function dataTable(series) {
-    const xs = Array.from(new Set(series.flatMap((entry) => entry.points.map((point) => point.shotCount)))).sort((a, b) => a - b);
+    const shotCounts = Array.from(new Set(series.flatMap((entry) => entry.points.map((point) => point.shotCount)))).sort((a, b) => a - b);
     const headers = ["計測Shot数", "計測Mark数"].concat(series.map((entry) => entry.label));
-    const rows = xs.map((shotCount) => {
+    const rows = shotCounts.map((shotCount) => {
       const points = series.map((entry) => entry.points.find((point) => point.shotCount === shotCount));
-      const markCount = points.find((point) => point && Number.isFinite(point.x));
-      return [String(shotCount), markCount ? String(Math.round(markCount.x)) : "—"].concat(points.map((point) => (point ? formatValue(point.y) : "—")));
+      const markCounts = points.filter((point) => point && Number.isFinite(point.markCount)).map((point) => point.markCount);
+      const low = Math.min(...markCounts);
+      const high = Math.max(...markCounts);
+      const varies = markCounts.length > 0 && high > low;
+      const markText = markCounts.length === 0 ? "—" : varies ? `${formatCount(low)}〜${formatCount(high)}` : formatCount(low);
+      return [String(shotCount), markText].concat(
+        points.map((point) => (point ? `${formatValue(point.y)}${varies ? `（Mark ${formatCount(point.markCount)}）` : ""}` : "—"))
+      );
     });
     return ui.create("div", { className: "table-scroll" },
       ui.create("table", null, [
@@ -388,7 +413,7 @@
     const headers = ["手動プラン", "計測Shot数", "計測Mark数", "値"];
     const rows = series.map((entry) => {
       const point = entry.points[0];
-      return [entry.label, String(Math.round(point.shotCount)), String(Math.round(point.x)), formatValue(point.y)];
+      return [entry.label, String(Math.round(point.shotCount)), formatCount(point.markCount), formatValue(point.y)];
     });
     return ui.create("div", { className: "table-scroll" },
       ui.create("table", null, [
@@ -398,15 +423,15 @@
     );
   }
 
-  /** 目標の精度に届く最小の計測Mark数。 */
+  /** 目標の精度に届く最小の計測Mark数（と、そのときの計測Shot数）。 */
   function targetTable(series, target) {
     const rows = series.map((entry) => {
-      const reached = entry.points.filter((point) => Number.isFinite(point.y) && point.y <= target).sort((a, b) => a.x - b.x)[0];
-      return [entry.label, reached ? `${Math.round(reached.x)}点（Shot ${reached.shotCount}）` : "範囲内では届かない"];
+      const reached = entry.points.filter((point) => Number.isFinite(point.y) && point.y <= target).sort((a, b) => a.markCount - b.markCount)[0];
+      return [entry.label, reached ? `Mark ${formatCount(reached.markCount)}点（Shot ${reached.shotCount}）` : "範囲内では届かない"];
     });
     return ui.create("div", { className: "table-scroll" },
       ui.create("table", null, [
-        ui.create("thead", null, ui.create("tr", null, [ui.create("th", { text: "系列" }), ui.create("th", { text: `目標 ${target} nm 以下になる最小の計測Mark数` })])),
+        ui.create("thead", null, ui.create("tr", null, [ui.create("th", { text: "系列" }), ui.create("th", { text: `目標 ${target} nm 以下になる最小の計測Mark数（計測Shot数）` })])),
         ui.create("tbody", null, rows.map((cells) => ui.create("tr", null, cells.map((cell) => ui.create("td", { text: cell }))))),
       ])
     );
@@ -452,13 +477,6 @@
           (value) => handlers.onViewChange({ method: value }, "sweep-method")
         )
       );
-      if (view.mode === "corrections" && view.flowTypes.length > 0) {
-        selectors.push(
-          select("sweep-flow", "推定を使う流れ", view.flowTypes.map((key) => [key, C.FLOW_TYPES.find((flow) => flow.key === key).label]), view.flowType, (value) =>
-            handlers.onViewChange({ flowType: value }, "sweep-flow")
-          )
-        );
-      }
     }
     children.push(ui.create("div", { className: "toolbar" }, selectors));
     const targetInput = ui.create("input", { type: "number", id: "sweep-target", step: "any", min: "0", value: Number.isFinite(view.target) ? view.target : "", "aria-describedby": "sweep-target-hint" });
@@ -472,6 +490,7 @@
         select("sweep-axis", "軸", Object.entries(ASC.resultsView.AXIS_LABELS), view.axis, (value) => handlers.onViewChange({ axis: value }, "sweep-axis")),
         select("sweep-stat", "統計", Object.entries(STATS), view.stat, (value) => handlers.onViewChange({ stat: value }, "sweep-stat")),
         select("sweep-scale", "縦軸", Object.entries(SCALES), view.scale, (value) => handlers.onViewChange({ scale: value }, "sweep-scale")),
+        select("sweep-x-axis", "横軸", Object.entries(X_AXES), view.xAxis, (value) => handlers.onViewChange({ xAxis: value }, "sweep-x-axis")),
         ui.create("div", { className: "field" }, [ui.create("label", { for: "sweep-target", text: "目標の精度 [nm]（任意）" }), targetInput]),
         ui.create("button", { type: "button", className: "button-secondary", text: "スイープ結果をCSVで保存", onClick: handlers.onExport }),
       ])
@@ -487,7 +506,7 @@
     if (Number.isFinite(view.target)) {
       references.push({ label: "目標", value: view.target });
     }
-    children.push(ui.create("h2", { className: "subheading", text: `計測Mark数と${yTitle}（Wafer ${sweep.waferCount}枚、ランダム系は${sweep.draws}回の試行をまとめたもの）` }));
+    children.push(ui.create("h2", { className: "subheading", text: `${view.xAxis === "shots" ? "計測Shot数" : "計測Mark数"}と${yTitle}（Wafer ${sweep.waferCount}枚、ランダム系は${sweep.draws}回の試行をまとめたもの）` }));
     children.push(renderLineChart(series, view, references, yTitle));
     children.push(
       ui.create("p", {
@@ -496,7 +515,7 @@
         text:
           view.mode === "estimation"
             ? "推定誤差は、未計測Markでの 推定値 − 真のずれ です。計測Mark数が増えると未計測Markが減るので、評価するMarkの数も変わります。"
-            : "横線の「全点計測」は全Markを計測してHOWAで補正した残差で、計測点を増やしても下回れない目安です。グラフにポインターを合わせるか、グラフをTabで選んで左右キーを押すと値が出ます。",
+            : "横線の「全点計測」は全Markを計測してHOWAで補正した残差で、計測点を増やしても下回れない目安です。制約なしのD最適・I最適は破線と中抜きの印、制約付きは実線と塗りの印です。グラフにポインターを合わせるか、グラフをTabで選んで左右キーを押すと値が出ます。",
       })
     );
     children.push(ui.create("h3", { className: "subheading", text: "数値の表（単位 nm）" }));

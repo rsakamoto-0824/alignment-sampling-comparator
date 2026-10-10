@@ -333,38 +333,42 @@
 
   // ---- サンプリング・制約 --------------------------------------------------
 
-  function renderDesignatedMarks() {
-    const container = ui.byId("designated-marks");
-    container.replaceChildren();
-    const markNumbers = state.map ? state.map.markNumbers : [];
-    const sampling = state.settings.sampling;
-    if (state.map) {
-      // マップにない番号は外す。全部なくなったら、最初の番号を選んでおく（マップがないときは選択を残す）
-      sampling.designatedMarkNos = sampling.designatedMarkNos.filter((markNo) => markNumbers.includes(markNo));
-      if (sampling.designatedMarkNos.length === 0 && markNumbers.length > 0) {
-        sampling.designatedMarkNos = [markNumbers[0]];
+  // Shot番号の入力欄（強制計測Shot・除外Shot）と、設定の置き場所
+  const SHOT_ID_FIELDS = [
+    { id: "mandatory-shots", key: "mandatoryShotIds", label: "強制計測Shot" },
+    { id: "excluded-shots", key: "excludedShotIds", label: "除外Shot" },
+  ];
+
+  /** Shot番号の入力欄の内容を設定に書く（入力を終えたとき）。 */
+  function handleShotIdInput(field, textarea) {
+    state.settings.constraints[field.key] = ASC.manualPlans.parseShotIdText(textarea.value);
+    notifyChange("constraints");
+  }
+
+  /** Shot番号の入力欄に、設定の値をマップの並びで書く。 */
+  function writeShotIdFields() {
+    for (const field of SHOT_ID_FIELDS) {
+      const textarea = ui.byId(field.id);
+      if (document.activeElement !== textarea) {
+        textarea.value = ASC.manualPlans.sortShotIds(ASC.constraints.shotIdList(state.settings.constraints[field.key]), state.map).join(", ");
       }
     }
-    for (const markNo of markNumbers) {
-      container.append(
-        ui.create("label", { className: "choice" }, [
-          ui.create("input", {
-            type: "checkbox",
-            checked: sampling.designatedMarkNos.includes(markNo) ? "checked" : null,
-            onChange: (event) => {
-              const set = new Set(sampling.designatedMarkNos);
-              if (event.target.checked) {
-                set.add(markNo);
-              } else {
-                set.delete(markNo);
-              }
-              sampling.designatedMarkNos = Array.from(set).sort((a, b) => a - b);
-              notifyChange("sampling");
-            },
-          }),
-          ` Mark ${markNo}`,
-        ])
-      );
+  }
+
+  /** マップにないShot番号を、入力欄の下に知らせる（評価の前には buildContext でも確かめる）。 */
+  function updateShotIdErrors() {
+    const known = new Set(state.map ? state.map.shots.map((shot) => shot.id) : []);
+    for (const field of SHOT_ID_FIELDS) {
+      const ids = ASC.constraints.shotIdList(state.settings.constraints[field.key]);
+      const unknown = state.map ? ids.filter((id) => !known.has(id)) : [];
+      const textarea = ui.byId(field.id);
+      ui.byId(`${field.id}-error`).textContent =
+        unknown.length > 0 ? `マップにないShot番号 ${unknown.slice(0, 8).join(", ")}${unknown.length > 8 ? " ほか" : ""} があります。番号を確かめてください。` : "";
+      if (unknown.length > 0) {
+        textarea.setAttribute("aria-invalid", "true");
+      } else {
+        textarea.removeAttribute("aria-invalid");
+      }
     }
   }
 
@@ -378,13 +382,16 @@
     }
   }
 
+  /** 選び方のチェックボックス（評価の「比べる選び方」と、スイープの「比べる選び方」）。 */
   function renderMethodChoices() {
-    const container = ui.byId("method-choices");
-    container.replaceChildren();
-    for (const method of C.METHODS) {
-      const input = ui.create("input", { type: "checkbox", "data-setting": `sampling.methods.${method.key}` });
-      input.addEventListener("change", handleBoundInput);
-      container.append(ui.create("label", { className: "choice" }, [input, ` ${method.label}`]));
+    for (const [containerId, prefix] of [["method-choices", "sampling.methods"], ["sweep-method-choices", "sweep.methods"]]) {
+      const container = ui.byId(containerId);
+      container.replaceChildren();
+      for (const method of C.METHODS) {
+        const input = ui.create("input", { type: "checkbox", "data-setting": `${prefix}.${method.key}` });
+        input.addEventListener("change", handleBoundInput);
+        container.append(ui.create("label", { className: "choice" }, [input, ` ${method.label}`]));
+      }
     }
   }
 
@@ -432,6 +439,7 @@
     const isCsv = settings.map.source === "csv";
     ui.byId("generate-fields").hidden = isCsv;
     ui.byId("csv-fields").hidden = !isCsv;
+    ui.byId("serpentine-fields").hidden = settings.map.scanPattern !== "serpentine";
 
     const map = state.map;
     const summary = ui.byId("map-summary");
@@ -449,24 +457,25 @@
     }
 
     const sampling = settings.sampling;
-    const k = sampling.designatedMarkNos.length;
-    const exact = sampling.markMode === "exact";
-    const totalInput = ui.byId("total-mark-count");
-    totalInput.disabled = exact;
-    ui.byId("total-mark-hint").textContent = exact
-      ? `ちょうどk個のときは自動で決まります: ${sampling.shotCount} × ${k} = ${sampling.shotCount * k}`
-      : `計測Shot数 × 必ず測るMarkの数（${sampling.shotCount} × ${k} = ${sampling.shotCount * k}）以上にしてください。`;
-
     const eligible = ui.byId("eligible-summary");
-    if (map && k > 0) {
-      const eligibleCount = map.shots.filter((shot) => {
-        const numbers = new Set(shot.markIndices.map((index) => map.marks[index].markNo));
-        return sampling.designatedMarkNos.every((markNo) => numbers.has(markNo));
-      }).length;
-      eligible.textContent = `選べるShot: ${eligibleCount}個（必ず測るMarkのどれかが有効範囲外のShot ${map.shots.length - eligibleCount}個は選べません）。`;
+    if (map) {
+      const excluded = new Set(ASC.constraints.shotIdList(settings.constraints.excludedShotIds));
+      const incomplete = map.shots.filter((shot) => ASC.constraints.isIncompleteShot(shot));
+      const eligibleShots = map.shots.filter(
+        (shot) => !excluded.has(shot.id) && !(sampling.excludeIncompleteShots && ASC.constraints.isIncompleteShot(shot))
+      );
+      const markCount = eligibleShots.reduce((sum, shot) => sum + shot.markIndices.length, 0);
+      const notes = [`Markが揃わない端のShot ${incomplete.length}個${sampling.excludeIncompleteShots ? "は選びません" : "を含みます"}`];
+      const excludedCount = map.shots.filter((shot) => excluded.has(shot.id)).length;
+      if (excludedCount > 0) {
+        notes.push(`除外Shot ${excludedCount}個は選びません`);
+      }
+      eligible.textContent = `選べるShot: ${eligibleShots.length}個（Mark ${markCount}個）。${notes.join("。")}。`;
     } else {
-      eligible.textContent = "必ず測るMarkを1つ以上選んでください。";
+      eligible.textContent = "マップがまだありません。";
     }
+    writeShotIdFields();
+    updateShotIdErrors();
 
     const model = settings.model;
     ui.byId("polynomial-summary").textContent = `X: ${model.termsX.length}項、Y: ${model.termsY.length}項を使います。`;
@@ -489,7 +498,7 @@
 
   /** 補正の流れと推定手法の組み合わせの誤り（なければ空文字）。 */
   function flowSettingError(model) {
-    const estimatorFlow = model.flows.estimateThenHowa || model.flows.howaPlusEstimate;
+    const estimatorFlow = model.flows.estimateThenHowa;
     const anyEstimator = C.ESTIMATORS.some((estimator) => model.estimators[estimator.key]);
     if (!model.flows.howa && !estimatorFlow) {
       return "補正の流れを1つ以上選んでください。";
@@ -505,6 +514,8 @@
     state = appState;
     notifyChange = onChange;
     fillSelect(ui.byId("scan-pattern"), C.SCAN_PATTERNS);
+    fillSelect(ui.byId("serpentine-start"), C.SERPENTINE_STARTS);
+    fillSelect(ui.byId("serpentine-first-scan"), { [C.SCAN_UP]: "Up", [C.SCAN_DOWN]: "Down" });
     fillSelect(ui.byId("rbf-kernel"), C.RBF_KERNELS);
     fillSelect(ui.byId("gp-kernel"), C.GP_KERNELS);
     renderEstimatorChoices();
@@ -512,9 +523,13 @@
     renderConstraintTable();
     for (const input of document.querySelectorAll("[data-setting]")) {
       const eventName = input.type === "number" ? "input" : "change";
-      if (!input.closest("#constraint-table") && !input.closest("#method-choices") && !input.closest("#estimator-choices")) {
+      if (!input.closest("#constraint-table") && !input.closest("#method-choices") && !input.closest("#sweep-method-choices") && !input.closest("#estimator-choices")) {
         input.addEventListener(eventName, handleBoundInput);
       }
+    }
+    for (const field of SHOT_ID_FIELDS) {
+      const textarea = ui.byId(field.id);
+      textarea.addEventListener("change", () => handleShotIdInput(field, textarea));
     }
     ui.byId("add-mark-button").addEventListener("click", addMarkRow);
     ui.byId("bulk-apply-button").addEventListener("click", applyBulkAmplitude);
@@ -536,9 +551,8 @@
     renderMarkTable();
     renderZernikeTable();
     renderPolynomialTable();
-    renderDesignatedMarks();
     updateDerivedTexts();
   }
 
-  ASC.settingsForm = { initialize, writeAll, renderDesignatedMarks, updateDerivedTexts, flowSettingError };
+  ASC.settingsForm = { initialize, writeAll, updateDerivedTexts, flowSettingError };
 })(typeof window !== "undefined" ? window : globalThis);

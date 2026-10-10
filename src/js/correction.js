@@ -4,7 +4,6 @@
  * 補正の流れ:
  *   HOWAのみ     計測したMarkに多項式を当てはめる
  *   推定→HOWA    未計測Markのずれを推定して全Markを埋め、全Markに多項式を当てはめる（補正量は多項式だけ）
- *   HOWA＋推定   多項式で補正し、計測Markでの取り残しを推定手法で全Markに広げて足す
  * HOWAとRBFは「計測値（n点）→ 全Mark（M点）の補正量」が線形なので、選んだ点ごとに M×n の行列を
  * 1回だけ作り、全Waferに掛ける。ガウス過程回帰はWaferごとに調整値を学習するので、Waferごとに計算する。
  */
@@ -532,7 +531,7 @@
   // ---- 補正の流れ ----------------------------------------------------------
 
   /**
-   * 比べる補正の一覧（HOWAのみ ＋ 補正の流れ × 推定手法）。結果の表やグラフの並び順にもなる。
+   * 比べる補正の一覧（HOWAのみ ＋ 推定→HOWA × 推定手法）。結果の表やグラフの並び順にもなる。
    * key は "howa" または "流れ:推定手法"（例 "estimateThenHowa:gpXY"）。
    */
   function buildVariants(modelSettings) {
@@ -548,8 +547,7 @@
         if (!modelSettings.estimators[estimator.key]) {
           continue;
         }
-        const label = flow.key === "estimateThenHowa" ? `${estimator.label}→HOWA` : `HOWA＋${estimator.label}`;
-        variants.push({ key: `${flow.key}:${estimator.key}`, flowType: flow.key, estimator, label });
+        variants.push({ key: `${flow.key}:${estimator.key}`, flowType: flow.key, estimator, label: `${estimator.label}→HOWA` });
       }
     }
     return variants;
@@ -558,7 +556,6 @@
   /**
    * 1つの軸（XかY）のHOWAの部品。
    *   howa: 計測値 → 全Markの補正量（M×n）
-   *   fitted: 計測値 → 計測点での当てはめ値（n×n）
    *   allLeastSquares: 全Markの値 → 多項式の係数（p×M。推定→HOWA で使う）
    */
   function prepareHowa(marks, sampleIndices, termIndices, allDesign, allLeastSquares) {
@@ -579,45 +576,25 @@
       allDesign,
       allLeastSquares: allLeastSquares.operator,
       howa: M.multiply(allDesign, markCount, p, leastSquares.operator, n),
-      fitted: M.multiply(sampleDesign, n, p, leastSquares.operator, n),
       warnings,
     };
   }
 
   /**
-   * 線形の推定手法（RBF）を使う流れの演算子（M×n）。
-   *   推定→HOWA: X_all B_all E（E は計測Markの行が単位行列、未計測Markの行が推定）
-   *   HOWA＋推定: P_howa + G (I − H_s)
+   * 線形の推定手法（RBF）を使う「推定→HOWA」の演算子（M×n）: X_all B_all E
+   * （E は計測Markの行が単位行列、未計測Markの行が推定）。
    */
-  function linearFlowOperator(howaParts, estimate, sampleIndices, flowType, markCount) {
+  function estimateThenHowaOperator(howaParts, estimate, sampleIndices, markCount) {
     const n = sampleIndices.length;
     const p = howaParts.p;
-    if (flowType === "estimateThenHowa") {
-      const filled = Float64Array.from(estimate);
-      sampleIndices.forEach((markIndex, j) => {
-        const offset = markIndex * n;
-        filled.fill(0, offset, offset + n);
-        filled[offset + j] = 1;
-      });
-      const coefficients = M.multiply(howaParts.allLeastSquares, p, markCount, filled, n);
-      return M.multiply(howaParts.allDesign, markCount, p, coefficients, n);
-    }
-    const combined = Float64Array.from(howaParts.howa);
-    for (let a = 0; a < markCount; a++) {
-      const rowOffset = a * n;
-      for (let k = 0; k < n; k++) {
-        const g = estimate[rowOffset + k];
-        if (g === 0) {
-          continue;
-        }
-        combined[rowOffset + k] += g;
-        const fittedOffset = k * n;
-        for (let j = 0; j < n; j++) {
-          combined[rowOffset + j] -= g * howaParts.fitted[fittedOffset + j];
-        }
-      }
-    }
-    return combined;
+    const filled = Float64Array.from(estimate);
+    sampleIndices.forEach((markIndex, j) => {
+      const offset = markIndex * n;
+      filled.fill(0, offset, offset + n);
+      filled[offset + j] = 1;
+    });
+    const coefficients = M.multiply(howaParts.allLeastSquares, p, markCount, filled, n);
+    return M.multiply(howaParts.allDesign, markCount, p, coefficients, n);
   }
 
   ASC.correction = {
@@ -636,6 +613,6 @@
     gpThenHowaCoefficients,
     buildVariants,
     prepareHowa,
-    linearFlowOperator,
+    estimateThenHowaOperator,
   };
 })(typeof window !== "undefined" ? window : globalThis);

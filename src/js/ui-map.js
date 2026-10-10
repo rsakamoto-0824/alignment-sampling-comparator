@@ -10,11 +10,13 @@
 
   const VIEW_HALF_SIZE_MM = 162;
   const MARK_RADIUS_MM = 1.6;
-  const MARK_HIT_RADIUS_MM = 3.5;
   // 推定誤差などを色で示すMarkは、色が見えるように大きめに描く
   const STEP_MARK_RADIUS_MM = 2.6;
   const CENTER_RING_RADIUS_MM = 4.5;
   const SCAN_GLYPH_MIN_SHOT_MM = 10;
+  // Shot番号はShot中心の上に、Scan方向の記号は下に置く（Shot中心からの距離 [mm]）
+  const SHOT_LABEL_OFFSET_MM = 5.5;
+  const SCAN_GLYPH_OFFSET_MM = 6.5;
   const QUADRANT_LABEL_OFFSET_MM = 138;
   // 選べないShotは色だけでなく斜線でも示す（濃色表示や白黒印刷でも区別できるように）
   const HATCH_ID_MAP = "map-hatch";
@@ -32,8 +34,9 @@
   /**
    * マップを描く。options:
    *   map, zones, eligibleShots(Set), selectedShots(Set), measuredMarks(Set), centerMarkIndex,
-   *   editable, extraCandidates(Set: クリックで追加・解除できるMark), onToggleShot, onToggleMark
-   *   compact（小さく並べる用。Scan方向・区画の文字を省く）、
+   *   mandatoryShots(Set: 強制計測Shot。太い枠で示す), shotNotes(Map: Shot番号 → 説明に添える文),
+   *   editable, onToggleShot
+   *   compact（小さく並べる用。Shot番号・Scan方向・区画の文字を省く）、
    *   shotSteps（Map: Shot番号 → { step: 1〜5, text }。選ばれた割合などを段階色で塗る）、
    *   markSteps（Map: Mark番号 → { step: 1〜5, text }。推定誤差などをMarkの段階色で示す）、ariaLabel
    */
@@ -52,11 +55,19 @@
     const markLayer = ui.createSvg("g");
     const width = map.shotWidthMm;
     const height = map.shotHeightMm;
+    const withLabels = !options.compact && Math.min(width, height) >= SCAN_GLYPH_MIN_SHOT_MM;
+    const mandatoryShots = options.mandatoryShots || new Set();
     map.shots.forEach((shot, shotIndex) => {
       shotLayer.append(drawShot(shot, shotIndex, width, height, options));
-      if (!options.compact && Math.min(width, height) >= SCAN_GLYPH_MIN_SHOT_MM) {
+      if (withLabels) {
         shotLayer.append(
-          ui.createSvg("text", { className: "map-scan", x: shot.x, y: -shot.y, text: shot.scan === C.SCAN_UP ? "▲" : "▼" })
+          ui.createSvg("text", { className: "map-shot-label", x: shot.x, y: -shot.y - SHOT_LABEL_OFFSET_MM, text: shot.id }),
+          ui.createSvg("text", { className: "map-scan", x: shot.x, y: -shot.y + SCAN_GLYPH_OFFSET_MM, text: shot.scan === C.SCAN_UP ? "▲" : "▼" })
+        );
+      }
+      if (mandatoryShots.has(shotIndex)) {
+        shotLayer.append(
+          ui.createSvg("rect", { className: "map-mandatory", x: shot.x - width / 2 + 0.8, y: -(shot.y + height / 2) + 0.8, width: width - 1.6, height: height - 1.6 })
         );
       }
       for (const markIndex of shot.markIndices) {
@@ -92,11 +103,12 @@
     if (stepInfo && stepInfo.step > 0) {
       classes.push(`step-${stepInfo.step}`);
     }
-    let stateText = selected ? "選択中" : eligible ? "未選択" : "選べない（必ず測るMarkが範囲外）";
+    let stateText = selected ? "選択中" : eligible ? "未選択" : "選べない";
     if (stepInfo) {
       stateText = stepInfo.text;
     }
-    const label = `Shot ${shot.id}（中心 ${shot.x}, ${shot.y} mm、Scan ${shot.scan}）${stateText}`;
+    const note = options.shotNotes ? options.shotNotes.get(shotIndex) : null;
+    const label = `Shot ${shot.id}（中心 ${shot.x}, ${shot.y} mm、Scan ${shot.scan}、Mark ${shot.markIndices.length}個）${stateText}${note ? `・${note}` : ""}`;
     const rect = ui.createSvg("rect", {
       className: classes.join(" "),
       // CSSのクラスより優先させるため style で指定する
@@ -147,33 +159,6 @@
         "pointer-events": "none",
       })
     );
-    if (options.editable && options.extraCandidates.has(markIndex)) {
-      const label = `Shot ${map.shots[mark.shotIndex].id} の Mark ${mark.markNo}（追加Mark、${measured ? "測る" : "測らない"}）`;
-      const hit = ui.createSvg("circle", {
-        className: "map-mark-hit editable",
-        cx: mark.x,
-        cy: -mark.y,
-        r: MARK_HIT_RADIUS_MM,
-        fill: "transparent",
-        tabindex: "0",
-        role: "button",
-        "aria-pressed": measured ? "true" : "false",
-        "aria-label": label,
-      });
-      hit.append(ui.createSvg("title", { text: label }));
-      const toggle = (event) => {
-        event.stopPropagation();
-        options.onToggleMark(markIndex);
-      };
-      hit.addEventListener("click", toggle);
-      hit.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          toggle(event);
-        }
-      });
-      layer.append(hit);
-    }
   }
 
   /** 4象限の境界、同心円の区切り、有効半径、ノッチ。compact なら文字を省く。 */
@@ -246,9 +231,17 @@
           hatchPattern(HATCH_ID_LEGEND, 4),
           ui.createSvg("rect", { className: "map-shot not-eligible", style: `fill:url(#${HATCH_ID_LEGEND})`, x: 2, y: 2, width: 24, height: 16 }),
         ]),
-        "選べないShot（必ず測るMarkが範囲外、斜線）",
+        "選べないShot（除外Shot・Markが揃わない端のShot、斜線）",
       ],
-      [symbol([ui.createSvg("circle", { className: "map-mark measured", cx: 14, cy: 10, r: 4 })]), "測るMark"],
+      [
+        symbol([
+          ui.createSvg("rect", { className: "map-shot", x: 2, y: 2, width: 24, height: 16 }),
+          ui.createSvg("rect", { className: "map-mandatory", x: 3.5, y: 3.5, width: 21, height: 13 }),
+        ]),
+        "強制計測Shot（太い枠）",
+      ],
+      [symbol([ui.createSvg("text", { className: "map-shot-label", x: 14, y: 10, style: "font-size:12px", text: "12" })]), "Shot番号（ShotId）"],
+      [symbol([ui.createSvg("circle", { className: "map-mark measured", cx: 14, cy: 10, r: 4 })]), "測るMark（選んだShotのMarkをすべて測る）"],
       [symbol([ui.createSvg("circle", { className: "map-mark", cx: 14, cy: 10, r: 4 })]), "測らないMark"],
       [symbol([ui.createSvg("circle", { className: "map-center", cx: 14, cy: 10, r: 7 })]), "中心に最も近いMark（中心の1点）"],
       [symbol([ui.createSvg("text", { className: "map-scan", x: 14, y: 10, style: "font-size:14px", text: "▲" })]), "Scan Up（▼はDown）"],
@@ -340,6 +333,15 @@
           ui.create("th", { scope: "row", text: `${status.center.label}（${kindText(status.center)}）` }),
           ui.create("td", { text: "中心に最も近いMark" }),
           ui.create("td", null, verdict(status.center.ok, status.center.ok ? "測る" : "測らない")),
+        ])
+      );
+    }
+    if (status.mandatory) {
+      body.append(
+        ui.create("tr", null, [
+          ui.create("th", { scope: "row", text: `${status.mandatory.label}（ハード）` }),
+          ui.create("td", { text: `${status.mandatory.included} / ${status.mandatory.total}個を選択` }),
+          ui.create("td", null, verdict(status.mandatory.ok, status.mandatory.ok ? "すべて測る" : `${status.mandatory.shift}個足りない`)),
         ])
       );
     }

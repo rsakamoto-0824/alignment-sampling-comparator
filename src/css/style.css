@@ -390,7 +390,8 @@ input[type="radio"] {
   accent-color: var(--accent);
 }
 
-input[aria-invalid="true"] {
+input[aria-invalid="true"],
+textarea[aria-invalid="true"] {
   border-color: var(--critical);
   border-width: 2px;
 }
@@ -630,7 +631,8 @@ th.number {
   font-weight: 600;
 }
 
-.shot-id-entry textarea {
+.shot-id-entry textarea,
+.settings-panel textarea {
   width: 100%;
   font: inherit;
   padding: var(--space-2);
@@ -763,15 +765,28 @@ th.number {
   fill: var(--step-5);
 }
 
-.map-mark-hit.editable {
-  cursor: pointer;
-}
-
 .map-scan {
   fill: var(--ink-muted);
   font-size: 7px;
   text-anchor: middle;
   dominant-baseline: central;
+  pointer-events: none;
+}
+
+.map-shot-label {
+  fill: var(--ink-1);
+  font-size: 7px;
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: central;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.map-mandatory {
+  fill: none;
+  stroke: var(--ink-1);
+  stroke-width: 1.6;
   pointer-events: none;
 }
 
@@ -1241,6 +1256,33 @@ tr.current-row th,
 tr.current-row td {
   background: var(--accent-wash);
   font-weight: 700;
+}
+
+.data-triple {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.data-panel {
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  min-width: 0;
+}
+
+.data-panel svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.data-panel-title {
+  font-weight: 700;
+  margin-bottom: var(--space-2);
 }
 
 .data-thumbs {

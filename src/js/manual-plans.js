@@ -1,6 +1,6 @@
 /**
  * 手動プラン（人が選んだサンプリングShot）の管理。
- * プランはShot番号（ShotId）と「Shot番号|Mark番号」（追加Mark）で持つ。
+ * プランはShot番号（ShotId）で持つ。選んだShotでは、そのShotの有効なMarkをすべて測る。
  * マップを作り直しても同じShot番号のShotを選んだままにでき、設定JSONにもそのまま保存できる。
  */
 (function (root) {
@@ -12,10 +12,6 @@
 
   function createStore() {
     return { plans: [], nextId: 1 };
-  }
-
-  function markKey(shotId, markNo) {
-    return `${shotId}|${markNo}`;
   }
 
   /** 同じ名前があれば「名前 (2)」のように番号を付ける。 */
@@ -33,7 +29,7 @@
   }
 
   /** プランを足す。上限を超えるときは null。 */
-  function addPlan(store, name, shotIds, extraMarkKeys, included) {
+  function addPlan(store, name, shotIds, included) {
     if (store.plans.length >= C.MAX_MANUAL_PLANS) {
       return null;
     }
@@ -43,7 +39,6 @@
       name: uniqueName(store, (name || `${DEFAULT_NAME}${id}`).slice(0, C.MAX_PLAN_NAME_LENGTH)),
       included: included !== false,
       shotIds: new Set(shotIds || []),
-      extraMarks: new Set(extraMarkKeys || []),
     };
     store.plans.push(plan);
     return plan;
@@ -62,12 +57,11 @@
     if (!source) {
       return null;
     }
-    return addPlan(store, `${source.name}の複製`, source.shotIds, source.extraMarks, source.included);
+    return addPlan(store, `${source.name}の複製`, source.shotIds, source.included);
   }
 
   /**
-   * 今のマップでの番号（Shotの並び番号・Markの並び番号）に直す。
-   * マップにないShot番号は missingShotIds で返す。
+   * 今のマップでの番号（Shotの並び番号）に直す。マップにないShot番号は missingShotIds で返す。
    */
   function planIndices(plan, map) {
     const shotIndexById = new Map(map.shots.map((shot, index) => [shot.id, index]));
@@ -80,55 +74,22 @@
         missingShotIds.push(shotId);
       }
     }
-    const extraMarkIndices = [];
-    for (const key of plan.extraMarks) {
-      const [shotId, markNoText] = key.split("|");
-      const shotIndex = shotIndexById.get(shotId);
-      if (shotIndex === undefined || !plan.shotIds.has(shotId)) {
-        continue;
-      }
-      const markIndex = map.shots[shotIndex].markIndices.find((index) => map.marks[index].markNo === Number(markNoText));
-      if (markIndex !== undefined) {
-        extraMarkIndices.push(markIndex);
-      }
-    }
-    return { shotIndices, extraMarkIndices, missingShotIds };
+    return { shotIndices, missingShotIds };
   }
 
-  /** マップ上の番号でShotを足す・外す。外したShotの追加Markも外す。 */
+  /** マップ上の番号でShotを足す・外す。 */
   function toggleShot(plan, map, shotIndex) {
     const shotId = map.shots[shotIndex].id;
     if (plan.shotIds.has(shotId)) {
       plan.shotIds.delete(shotId);
-      for (const key of Array.from(plan.extraMarks)) {
-        if (key.startsWith(`${shotId}|`)) {
-          plan.extraMarks.delete(key);
-        }
-      }
     } else {
       plan.shotIds.add(shotId);
     }
   }
 
-  function toggleExtraMark(plan, map, markIndex) {
-    const mark = map.marks[markIndex];
-    const key = markKey(map.shots[mark.shotIndex].id, mark.markNo);
-    if (plan.extraMarks.has(key)) {
-      plan.extraMarks.delete(key);
-    } else {
-      plan.extraMarks.add(key);
-    }
-  }
-
   /** マップ上の番号の選択から、プランの中身を作り直す（評価結果をプランに写すとき）。 */
-  function setFromIndices(plan, map, shotIndices, extraMarkIndices) {
+  function setFromIndices(plan, map, shotIndices) {
     plan.shotIds = new Set(shotIndices.map((index) => map.shots[index].id));
-    plan.extraMarks = new Set(
-      extraMarkIndices.map((index) => {
-        const mark = map.marks[index];
-        return markKey(map.shots[mark.shotIndex].id, mark.markNo);
-      })
-    );
   }
 
   /** 「1, 2 3」のような文字からShot番号の一覧を取り出す（カンマ・読点・空白・改行で区切る）。 */
@@ -145,20 +106,20 @@
     const unknown = shotIds.filter((shotId) => !known.has(shotId));
     const applied = shotIds.filter((shotId) => known.has(shotId));
     plan.shotIds = new Set(applied);
-    for (const key of Array.from(plan.extraMarks)) {
-      if (!plan.shotIds.has(key.split("|")[0])) {
-        plan.extraMarks.delete(key);
-      }
-    }
     return { unknown, applied: applied.length };
   }
 
   /** Shot番号を、マップのShotの並び（上の行から）にそろえた文字にする。 */
   function shotIdText(plan, map) {
+    return sortShotIds(Array.from(plan.shotIds), map).join(", ");
+  }
+
+  /** Shot番号を、マップのShotの並び（上の行から）にそろえる。マップにない番号は数の順で後ろに置く。 */
+  function sortShotIds(shotIds, map) {
     const order = new Map(map ? map.shots.map((shot, index) => [shot.id, index]) : []);
-    return Array.from(plan.shotIds)
-      .sort((a, b) => (order.has(a) && order.has(b) ? order.get(a) - order.get(b) : String(a).localeCompare(String(b), "ja", { numeric: true })))
-      .join(", ");
+    return shotIds
+      .slice()
+      .sort((a, b) => (order.has(a) && order.has(b) ? order.get(a) - order.get(b) : String(a).localeCompare(String(b), "ja", { numeric: true })));
   }
 
   /** 設定JSONに入れる形。 */
@@ -168,25 +129,23 @@
         name: plan.name,
         included: plan.included,
         shotIds: Array.from(plan.shotIds),
-        marks: Array.from(plan.extraMarks).map((key) => {
-          const [shotId, markNo] = key.split("|");
-          return { shotId, markNo: Number(markNo) };
-        }),
       })),
     };
   }
 
-  /** 設定JSONから作り直す。以前の形（手動選択が1つ: { shotIds, marks }）も読む。 */
+  /**
+   * 設定JSONから作り直す。以前の形（手動選択が1つ: { shotIds, marks }）も読む。
+   * 以前の版の追加Mark（marks）は、選んだShotの全Markを測るようになったので使わない。
+   */
   function fromJson(json) {
     const store = createStore();
     if (!json) {
       return store;
     }
-    const entries = Array.isArray(json.plans) ? json.plans : json.shotIds ? [{ name: `${DEFAULT_NAME}1`, included: true, shotIds: json.shotIds, marks: json.marks }] : [];
+    const entries = Array.isArray(json.plans) ? json.plans : json.shotIds ? [{ name: `${DEFAULT_NAME}1`, included: true, shotIds: json.shotIds }] : [];
     for (const entry of entries.slice(0, C.MAX_MANUAL_PLANS)) {
       const shotIds = Array.isArray(entry.shotIds) ? entry.shotIds.map(String) : [];
-      const marks = Array.isArray(entry.marks) ? entry.marks.map((mark) => markKey(String(mark.shotId), Number(mark.markNo))) : [];
-      addPlan(store, typeof entry.name === "string" && entry.name.trim() !== "" ? entry.name.trim() : null, shotIds, marks, entry.included !== false);
+      addPlan(store, typeof entry.name === "string" && entry.name.trim() !== "" ? entry.name.trim() : null, shotIds, entry.included !== false);
     }
     return store;
   }
@@ -200,11 +159,11 @@
     uniqueName,
     planIndices,
     toggleShot,
-    toggleExtraMark,
     setFromIndices,
     parseShotIdText,
     applyShotIds,
     shotIdText,
+    sortShotIds,
     toJson,
     fromJson,
   };

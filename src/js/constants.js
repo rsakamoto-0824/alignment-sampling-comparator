@@ -16,10 +16,18 @@
     SCAN_UP: "Up",
     SCAN_DOWN: "Down",
     SCAN_PATTERNS: {
+      serpentine: "一筆書き（露光順に1 Shotごとに交互）",
       checker: "市松（上下左右の隣で交互）",
       column: "列ごとに交互",
       row: "行ごとに交互",
       allUp: "すべてUp",
+    },
+    // 一筆書きの開始の角。行ごとに蛇行し、1 Shot進むごとにUp/Downを交互にする（露光機のタクトが最小になる順）
+    SERPENTINE_STARTS: {
+      topLeft: "左上から",
+      topRight: "右上から",
+      bottomLeft: "左下から",
+      bottomRight: "右下から",
     },
 
     // ---- Zernike ----
@@ -34,11 +42,10 @@
     DISTRIBUTION_NORMAL: "normal",
 
     // ---- 補正の流れ ----
-    // 推定を使う流れは、下の推定手法ごとに評価する
+    // 推定を使う流れ（推定→HOWA）は、下の推定手法ごとに評価する
     FLOW_TYPES: [
       { key: "howa", label: "HOWAのみ" },
       { key: "estimateThenHowa", label: "推定→HOWA" },
-      { key: "howaPlusEstimate", label: "HOWA＋推定" },
     ],
 
     // ---- 推定手法（未計測Markのずれを推定する方法）----
@@ -73,12 +80,19 @@
 
     // ---- 選び方 ----
     // 自動で選ぶ方法。人が選ぶ「手動プラン」は別に持ち、キーを "manual:番号" にする
+    // constrained: 条件制約（5. 条件制約）を守って選ぶか。criterion: D最適・I最適の基準
+    // 並び順は乱数列の番号にも使うので、途中に入れずに末尾へ足す
     METHODS: [
-      { key: "random", label: "ランダム", usesDraws: true },
-      { key: "poisson", label: "ポアソンディスク", usesDraws: true },
-      { key: "dOptimal", label: "D最適", usesDraws: false },
-      { key: "iOptimal", label: "I最適", usesDraws: false },
+      { key: "random", label: "ランダム", usesDraws: true, constrained: true, criterion: null },
+      { key: "poisson", label: "ポアソンディスク", usesDraws: true, constrained: true, criterion: null },
+      { key: "dOptimal", label: "D最適（制約なし）", usesDraws: false, constrained: false, criterion: "D" },
+      { key: "iOptimal", label: "I最適（制約なし）", usesDraws: false, constrained: false, criterion: "I" },
+      { key: "constrainedD", label: "制約付きD最適", usesDraws: false, constrained: true, criterion: "D" },
+      { key: "constrainedI", label: "制約付きI最適", usesDraws: false, constrained: true, criterion: "I" },
     ],
+    // 「計画を作成」で選ぶ方法（評価データを使わずに、選んだ点だけを出す）
+    PLAN_METHOD_KEYS: ["constrainedD", "constrainedI"],
+    PLAN_PREFIX: "plan:",
     MANUAL_PREFIX: "manual:",
     MAX_MANUAL_PLANS: 10,
     MAX_PLAN_NAME_LENGTH: 30,
@@ -90,6 +104,7 @@
       scan: "Scan方向",
       quadrant: "4象限",
       zone: "同心円の3領域",
+      mandatory: "強制計測Shot",
     },
     ALLOCATION_EQUAL: "equal",
     ALLOCATION_PROPORTIONAL: "proportional",
@@ -128,7 +143,9 @@
         offsetXmm: 13,
         offsetYmm: 16.5,
         validRadiusMm: 150,
-        scanPattern: "checker",
+        scanPattern: "serpentine",
+        serpentineStart: "topLeft",
+        serpentineFirstScan: "Up",
         marks: [
           { markNo: 1, x: -12, y: 15.5 },
           { markNo: 2, x: 12, y: 15.5 },
@@ -136,8 +153,8 @@
           { markNo: 4, x: 12, y: -15.5 },
         ],
       },
-      // 初期のマップで、選べるShotの数が3領域でほぼそろう値（20・24・24個）
-      zones: { innerRadiusMm: 80, outerRadiusMm: 115 },
+      // 初期のマップで、選べるShotの数が3領域でほぼそろう値（36・32・36個）
+      zones: { innerRadiusMm: 95, outerRadiusMm: 135 },
       evaluationData: {
         waferCount: 100,
         seed: 1,
@@ -156,7 +173,7 @@
         // 21項のうち使う項の番号（0始まり）。初期値はすべて使う
         termsX: Array.from({ length: 21 }, (_, i) => i),
         termsY: Array.from({ length: 21 }, (_, i) => i),
-        flows: { howa: true, estimateThenHowa: true, howaPlusEstimate: true },
+        flows: { howa: true, estimateThenHowa: true },
         estimators: { rbfXY: true, rbfXYR: true, gpXY: true, gpXYR: true },
         rbfKernel: "tps",
         rbfLambda: 0,
@@ -164,23 +181,32 @@
         gpKernel: "squaredExponential",
       },
       sampling: {
+        // 選んだShotでは、そのShotの有効なMarkをすべて測る
         shotCount: 20,
-        designatedMarkNos: [1, 4],
-        markMode: "exact", // exact: ちょうどk個 / atLeast: k個以上
-        totalMarkCount: 48,
+        // true なら、Markが揃わない端のShot（有効半径の外にMarkがはみ出すShot）は選ばない
+        excludeIncompleteShots: false,
         draws: 30,
         optimalStarts: 5,
         seed: 1,
-        methods: { random: true, poisson: true, dOptimal: true, iOptimal: true },
+        methods: { random: true, poisson: true, dOptimal: true, iOptimal: true, constrainedD: true, constrainedI: true },
       },
-      // 計測点数のスイープ（計測Shot数の範囲と、ランダム・ポアソンの試行回数）
-      sweep: { startShots: 10, endShots: 60, stepShots: 10, draws: 10 },
+      // 計測点数のスイープ（計測Shot数の範囲、ランダム・ポアソンの試行回数、比べる選び方）
+      sweep: {
+        startShots: 10,
+        endShots: 60,
+        stepShots: 10,
+        draws: 10,
+        methods: { random: true, poisson: true, dOptimal: true, iOptimal: true, constrainedD: true, constrainedI: true },
+      },
       constraints: {
         center: { enabled: true, priority: 1 },
         scan: { enabled: true, hard: true, priority: 2, allocation: constants.ALLOCATION_EQUAL },
         quadrant: { enabled: true, hard: true, priority: 3, allocation: constants.ALLOCATION_EQUAL },
         zone: { enabled: true, hard: true, priority: 4, allocation: constants.ALLOCATION_EQUAL },
         softStrength: 0.5,
+        // 必ず測るShot（強制計測Shot）と、選ばないShot（除外Shot）。Shot番号（ShotId）の文字で持つ
+        mandatoryShotIds: [],
+        excludedShotIds: [],
       },
     };
   }

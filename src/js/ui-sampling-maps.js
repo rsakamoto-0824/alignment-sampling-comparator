@@ -93,13 +93,14 @@
   /**
    * タブ全体を描く。
    * choices: { 選び方: "median" | "best" | "worst" | "frequency" }（ランダム系の表示の選択）
-   * handlers: { onChoiceChange(methodKey, choice), onOpenInMapTab(methodKey, drawIndex) }
+   * handlers: { onChoiceChange(methodKey, choice), onOpenInMapTab(methodKey, drawIndex), onExportSelection(name, set) }
    */
   function render(container, output, map, zones, choices, handlers) {
     const rankingVariant = output.variants[0];
     const context = output.context;
     const eligibleShots = new Set(context.items.map((item) => item.shotIndex));
     const centerMarkIndex = context.center.enabled ? context.center.markIndex : null;
+    const mandatoryShots = new Set(context.mandatoryItems.map((item) => context.items[item].shotIndex));
     const cards = [];
     let usesFrequency = false;
 
@@ -129,8 +130,8 @@
           selectedShots: new Set(),
           measuredMarks: new Set(),
           centerMarkIndex,
+          mandatoryShots,
           editable: false,
-          extraCandidates: new Set(),
           compact: true,
           shotSteps: selectionFrequency(sets),
           ariaLabel: `${method.label}: 全${sets.length}回の試行で各Shotが選ばれた割合`,
@@ -148,8 +149,8 @@
           selectedShots: new Set(set.shotIndices),
           measuredMarks: new Set(set.markIndices),
           centerMarkIndex,
+          mandatoryShots,
           editable: false,
-          extraCandidates: new Set(),
           compact: true,
           ariaLabel: `${method.label}${sets.length > 1 ? `（試行 ${entry.index + 1}）` : ""}で選んだ点のマップ`,
         });
@@ -167,13 +168,23 @@
           )
         );
         card.append(ASC.mapView.constraintTable(set.status, new Set(output.relaxed.map((relaxedEntry) => relaxedEntry.key))));
+        const exportName = sets.length > 1 ? `${method.label}_試行${entry.index + 1}` : method.label;
         card.append(
-          ui.create("button", {
-            type: "button",
-            className: "button-secondary button-small",
-            text: "マップのタブで大きく見る",
-            onClick: () => handlers.onOpenInMapTab(method.key, entry.index),
-          })
+          ui.create("div", { className: "button-row" }, [
+            ui.create("button", {
+              type: "button",
+              className: "button-secondary button-small",
+              text: "マップのタブで大きく見る",
+              onClick: () => handlers.onOpenInMapTab(method.key, entry.index),
+            }),
+            ui.create("button", {
+              type: "button",
+              className: "button-secondary button-small",
+              text: "この選択点をCSVで保存",
+              "aria-label": `${method.label}${sets.length > 1 ? `（試行 ${entry.index + 1}）` : ""}の選択点をCSVで保存`,
+              onClick: () => handlers.onExportSelection(exportName, set),
+            }),
+          ])
         );
       }
       cards.push(card);
@@ -182,7 +193,7 @@
     const children = [
       ui.create("p", {
         className: "hint",
-        text: `ランダム・ポアソンの「良い・悪い」は、${rankingVariant.label}の残差RMS（XとYの平均）で決めています。記号は「マップと選択点」のタブと同じです（塗りつぶしたShotが選んだShot、濃い点が測るMark、赤い輪が中心の1点）。D基準 log₁₀det(XᵀX) は大きいほど、I基準（予測分散の平均÷σ²）は小さいほど良く、効率はこの評価の中で最も良い選び方を100%にした値です。制約の「ずれ」は、何個のShotを別の区画へ移せば満たせるかの目安です。`,
+        text: `ランダム・ポアソンの「良い・悪い」は、${rankingVariant.label}の残差RMS（XとYの平均）で決めています。記号は「マップと選択点」のタブと同じです（塗りつぶしたShotが選んだShot、濃い点が測るMark、赤い輪が中心の1点、太い枠が強制計測Shot）。「この選択点をCSVで保存」は、表示中の試行の点を1行1Markで保存します。D基準 log₁₀det(XᵀX) は大きいほど、I基準（予測分散の平均÷σ²）は小さいほど良く、効率はこの評価の中で最も良い選び方を100%にした値です。制約の「ずれ」は、何個のShotを別の区画へ移せば満たせるかの目安です。`,
       }),
     ];
     if (usesFrequency) {
@@ -235,7 +246,6 @@
         measuredMarks: new Set(set.markIndices),
         centerMarkIndex: null,
         editable: false,
-        extraCandidates: new Set(),
         compact: true,
         markSteps,
         ariaLabel: `${ASC.evaluator.estimationLabel(key)}の推定誤差のマップ`,

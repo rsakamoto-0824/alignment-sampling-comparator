@@ -2,7 +2,10 @@
  * Waferマップ（Shot・Mark・Scan方向）の生成、CSVの読込と書き出し。
  *
  * マップの形:
- *   shots: [{ id, x, y, scan, markIndices }]   x, y はShot中心 [mm]
+ *   shots: [{ id, x, y, scan, markIndices, definedMarkCount }]   x, y はShot中心 [mm]
+ *     definedMarkCount はShotに定義したMarkの数（有効範囲外も含む）。markIndices の数より多ければ
+ *     「Markが揃わない端のShot」
+ *
  *   marks: [{ shotIndex, markNo, x, y, u, v }] x, y はWafer座標 [mm]、u, v は正規化座標
  * marks には有効範囲（r < 有効半径）のMarkだけを入れる。
  */
@@ -12,6 +15,8 @@
   const C = ASC.constants;
 
   const CSV_COLUMNS = ["ShotId", "ShotX", "ShotY", "ScanDir", "MarkNo", "MarkX", "MarkY"];
+  // 選んだ点のCSV: マップのCSVの列に、Wafer座標（Shot中心＋Mark座標）を足す
+  const SELECTION_CSV_COLUMNS = CSV_COLUMNS.concat(["WaferX", "WaferY"]);
   const SCAN_ALIASES = {
     up: C.SCAN_UP,
     u: C.SCAN_UP,
@@ -29,6 +34,7 @@
     return ((value % 2) + 2) % 2;
   }
 
+  /** 格子の位置で決まる並べ方のScan方向（一筆書きは、マップを作ったあとで assignSerpentineScan が決める）。 */
   function scanFromPattern(pattern, column, row) {
     switch (pattern) {
       case "column":
@@ -50,6 +56,14 @@
     }
     if (!(settings.validRadiusMm > 0) || settings.validRadiusMm > C.WAFER_RADIUS_MM) {
       errors.push(`有効半径は0より大きく${C.WAFER_RADIUS_MM} mm以下にしてください。`);
+    }
+    if (settings.scanPattern === "serpentine") {
+      if (!C.SERPENTINE_STARTS[settings.serpentineStart]) {
+        errors.push("一筆書きの開始の角を選んでください。");
+      }
+      if (settings.serpentineFirstScan !== C.SCAN_UP && settings.serpentineFirstScan !== C.SCAN_DOWN) {
+        errors.push("一筆書きの最初のScan方向は Up か Down にしてください。");
+      }
     }
     if (!Array.isArray(settings.marks) || settings.marks.length === 0) {
       errors.push("Shot内のMarkを1つ以上指定してください。");
@@ -98,7 +112,7 @@
       }
       excludedMarkCount += record.marks.length - validMarks.length;
       const shotIndex = shots.length;
-      const shot = { id: String(record.id), x: record.x, y: record.y, scan: record.scan, markIndices: [] };
+      const shot = { id: String(record.id), x: record.x, y: record.y, scan: record.scan, markIndices: [], definedMarkCount: record.marks.length };
       validMarks.sort((left, right) => left.markNo - right.markNo);
       for (const mark of validMarks) {
         shot.markIndices.push(marks.length);
@@ -125,6 +139,39 @@
       excludedMarkCount,
       excludedShotCount,
     };
+  }
+
+  /**
+   * 一筆書き（露光順）のScan方向を付ける。露光機は行ごとに蛇行して露光し、1 Shot進むごとにScan方向を
+   * 反転すると、レチクルステージを戻さずに済む（タクトが最小）。開始の角の行から、行ごとに進む向きを
+   * 反転しながらたどり、たどった順に first・その逆・first… と付ける。
+   * shots は生成した順（上の行から下へ、各行は左から右へ）に並んでいること。マップにあるShot
+   * （有効なMarkが1つ以上あるShot）だけを道順に数える。
+   */
+  function assignSerpentineScan(shots, start, firstScan) {
+    const rows = [];
+    for (const shot of shots) {
+      const last = rows[rows.length - 1];
+      if (last && last[0].y === shot.y) {
+        last.push(shot);
+      } else {
+        rows.push([shot]);
+      }
+    }
+    if (start === "bottomLeft" || start === "bottomRight") {
+      rows.reverse();
+    }
+    const firstLeftToRight = start === "topLeft" || start === "bottomLeft";
+    const otherScan = firstScan === C.SCAN_UP ? C.SCAN_DOWN : C.SCAN_UP;
+    let order = 0;
+    rows.forEach((row, rowIndex) => {
+      const leftToRight = rowIndex % 2 === 0 ? firstLeftToRight : !firstLeftToRight;
+      const path = leftToRight ? row : row.slice().reverse();
+      for (const shot of path) {
+        shot.scan = order % 2 === 0 ? firstScan : otherScan;
+        order++;
+      }
+    });
   }
 
   /**
@@ -156,6 +203,9 @@
     const map = buildMap(records, settings);
     // 生成では格子を広めに作るため、Wafer外のShotの数には意味がない
     map.excludedShotCount = 0;
+    if (settings.scanPattern === "serpentine") {
+      assignSerpentineScan(map.shots, settings.serpentineStart, settings.serpentineFirstScan);
+    }
     map.shots.forEach((shot, index) => {
       shot.id = String(index + 1);
     });
@@ -307,5 +357,38 @@
     return Math.round(value * 1e6) / 1e6;
   }
 
-  ASC.waferMap = { CSV_COLUMNS, generateWaferMap, parseMapCsv, mapToCsv, buildMap };
+  /**
+   * 選んだ点（測るMark）の座標をCSV（1行1Mark）にする。列はマップのCSVと同じ並びに、Wafer座標を足したもの。
+   * Markはマップの並び（Shotの番号順、Shot内はMark番号順）にそろえる。
+   */
+  function selectionToCsv(map, markIndices) {
+    const rows = [SELECTION_CSV_COLUMNS.join(",")];
+    const sorted = Array.from(new Set(markIndices)).sort((a, b) => a - b);
+    for (const markIndex of sorted) {
+      const mark = map.marks[markIndex];
+      const shot = map.shots[mark.shotIndex];
+      rows.push(
+        [
+          csvText(shot.id),
+          shot.x,
+          shot.y,
+          shot.scan,
+          mark.markNo,
+          roundForCsv(mark.x - shot.x),
+          roundForCsv(mark.y - shot.y),
+          roundForCsv(mark.x),
+          roundForCsv(mark.y),
+        ].join(",")
+      );
+    }
+    return rows.join("\r\n") + "\r\n";
+  }
+
+  /** カンマや引用符を含むShotIdは引用符で囲む（CSVから読んだマップのShotIdに備える）。 */
+  function csvText(value) {
+    const text = String(value);
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  ASC.waferMap = { CSV_COLUMNS, SELECTION_CSV_COLUMNS, generateWaferMap, parseMapCsv, mapToCsv, selectionToCsv, buildMap, assignSerpentineScan };
 })(typeof window !== "undefined" ? window : globalThis);

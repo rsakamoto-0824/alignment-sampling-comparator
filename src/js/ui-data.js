@@ -1,7 +1,7 @@
 /**
  * 「評価データ」タブ。乱数で作ったWafer面内傾向（評価データ）を、Waferごと・成分ごとに確かめる。
- * 表示はベクトル図（矢印）か、X・Yの色マップ。矢印の長さと色の目盛りは成分ごとに全Waferで共通にし、
- * Waferどうしを同じ目盛りで見比べられるようにする。
+ * 表示中のWaferは、ベクトル図（矢印）とX・Yのヒートマップ（色）を横に並べる。全Waferの一覧は表示の形を選ぶ。
+ * 矢印の長さと色の目盛りは成分ごとに全Waferで共通にし、Waferどうしを同じ目盛りで見比べられるようにする。
  */
 (function (root) {
   "use strict";
@@ -26,8 +26,8 @@
   const NICE_FACTORS = [1, 2, 5];
   const DISPLAYS = [
     { key: "vector", label: "ベクトル図（矢印）" },
-    { key: "x", label: "Xの色マップ" },
-    { key: "y", label: "Yの色マップ" },
+    { key: "x", label: "Xのヒートマップ" },
+    { key: "y", label: "Yのヒートマップ" },
   ];
 
   let markerCounter = 0;
@@ -193,7 +193,7 @@
     return svg;
   }
 
-  /** 目盛りの説明（矢印の長さか、色の段階）。 */
+  /** 目盛りの説明（矢印の長さか、色の段階）。図の下に置くので、色の段階は横に並べる。 */
   function scaleLegend(display, scale) {
     if (!(scale > 0)) {
       return ui.create("p", { className: "hint", text: "この成分はすべて0です（設定で大きさを0にしているか、オフにしています）。" });
@@ -222,7 +222,7 @@
     }
     return ui.create("div", null, [
       ui.create("p", { className: "hint", text: `青が負（−）、赤が正（＋）、灰色がほぼ0です。目盛りはこの成分で全Wafer共通です（絶対値の${SCALE_PERCENT}%点で端の色）。各Markにポインターを合わせると値が出ます。` }),
-      ui.create("ul", { className: "step-legend vertical", "aria-label": "色の目盛り" }, items),
+      ui.create("ul", { className: "step-legend", "aria-label": `${display.toUpperCase()}の色の目盛り` }, items),
     ]);
   }
 
@@ -344,6 +344,7 @@
     const waferCount = data.waferCount;
     const wafer = Math.max(0, Math.min(waferCount - 1, view.wafer));
     const component = components().find((entry) => entry.key === view.component) || components()[0];
+    // display は全Waferの一覧（小さいマップ）の表示の形。表示中のWaferは3つの形を並べる
     const display = DISPLAYS.find((entry) => entry.key === view.display) || DISPLAYS[0];
     const statistics = statisticsOf(data);
     const parts = ASC.evaluationData.waferComponents(data, wafer);
@@ -366,24 +367,23 @@
       ui.create("button", { type: "button", className: "button-secondary", id: "data-previous", text: "← 前のWafer", disabled: wafer === 0, onClick: () => goTo(wafer - 1) }),
       ui.create("button", { type: "button", className: "button-secondary", id: "data-next", text: "次のWafer →", disabled: wafer === waferCount - 1, onClick: () => goTo(wafer + 1) }),
       field("data-component", "表示する成分", select("data-component", components(), component.key, (value) => input.onChange({ component: value }))),
-      field("data-display", "表示の形", select("data-display", DISPLAYS, display.key, (value) => input.onChange({ display: value }))),
+      field("data-display", "一覧の表示の形", select("data-display", DISPLAYS, display.key, (value) => input.onChange({ display: value }))),
       ui.create("button", { type: "button", className: "button-secondary", id: "data-download", text: "このWaferのずれをCSVで保存", onClick: () => input.onDownload(wafer) }),
     ]);
 
-    const mainFrame = ui.create("div", { className: "map-frame" },
-      waferSvg(map, parts[component.key], display.key, scale, {
-        withTitles: true,
-        withScale: true,
-        ariaLabel: `Wafer ${wafer + 1} の${component.label}の${display.label}`,
-      })
-    );
-    const side = ui.create("div", null, [
-      ui.create("h2", { className: "subheading", text: "目盛り" }),
-      scaleLegend(display.key, scale),
-      ui.create("h2", { className: "subheading", text: `Wafer ${wafer + 1} の大きさ [nm]` }),
-      waferTable(statistics, wafer, component.key),
-      ui.create("p", { className: "hint", text: "RMS は全Markでの二乗平均平方根、最大の大きさは √(X²＋Y²) の最大です。" }),
-    ]);
+    // 表示中のWaferは、ベクトル図・Xのヒートマップ・Yのヒートマップを横に並べ、それぞれの下に目盛りを置く
+    const panels = DISPLAYS.map((entry) => {
+      const panelScale = statistics.scales[component.key][entry.key];
+      return ui.create("figure", { className: "data-panel" }, [
+        ui.create("figcaption", { className: "data-panel-title", text: entry.label }),
+        waferSvg(map, parts[component.key], entry.key, panelScale, {
+          withTitles: true,
+          withScale: true,
+          ariaLabel: `Wafer ${wafer + 1} の${component.label}の${entry.label}`,
+        }),
+        scaleLegend(entry.key, panelScale),
+      ]);
+    });
 
     // 全Waferの一覧（ページごとに小さく並べる。押すとそのWaferを上に表示）
     const pageCount = Math.ceil(waferCount / THUMBNAILS_PER_PAGE);
@@ -423,7 +423,11 @@
         text: "「評価を実行」で使うものと同じ評価データです（左の「2. 評価データ」の設定とシードで決まり、同じ設定なら毎回同じ値になります）。「5次以下」は5次までの多項式（21項）ですべて表せる成分で、補正モデルで項を減らすと一部は補正しきれません。「6次以上」とScan方向のずれは、多項式では補正できない成分です。",
       }),
       toolbar,
-      ui.create("div", { className: "map-layout" }, [mainFrame, side]),
+      ui.create("h2", { className: "subheading", text: `Wafer ${wafer + 1} の${component.label}` }),
+      ui.create("div", { className: "data-triple" }, panels),
+      ui.create("h2", { className: "subheading", text: `Wafer ${wafer + 1} の大きさ [nm]` }),
+      waferTable(statistics, wafer, component.key),
+      ui.create("p", { className: "hint", text: "RMS は全Markでの二乗平均平方根、最大の大きさは √(X²＋Y²) の最大です。" }),
       ui.create("h2", { className: "subheading", text: `Wafer ${wafer + 1} のZernike項の係数` }),
       ui.create("p", { className: "hint", text: "各項の値（正規化なしなら単位円の端で最大1）に掛けた乱数の係数です。大きさ0かオフにした項は使っていないので出しません。" }),
       coefficientTable(data, wafer),

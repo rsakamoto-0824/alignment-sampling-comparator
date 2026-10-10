@@ -7,9 +7,12 @@
   const C = ASC.constants;
   const ui = ASC.ui;
 
-  // 設定ファイルの版。2 で手動プランを複数持てるようにした（1 も読める）
-  const SETTINGS_FILE_VERSION = 2;
-  const READABLE_SETTINGS_VERSIONS = [1, 2];
+  // 設定ファイルの版。2 で手動プランを複数持てるようにした。3 で選んだShotの全Markを測る形・
+  // 制約なし／制約付きのD・I最適・強制計測Shot・除外Shot・一筆書きのScan方向を入れた（1・2 も読める）
+  const SETTINGS_FILE_VERSION = 3;
+  const READABLE_SETTINGS_VERSIONS = [1, 2, 3];
+  // ファイル名に使えない文字（Windowsを含む）
+  const FILE_NAME_FORBIDDEN = /[\\/:*?"<>|\s]+/g;
 
   const state = {
     settings: createInitialSettings(),
@@ -22,6 +25,9 @@
     plans: createInitialPlans(),
     output: null,
     outputStale: false,
+    // 「計画を作成」の結果（制約付きD最適・I最適の選択点。評価データは使わない）
+    plan: null,
+    planStale: false,
     sweep: null,
     sweepStale: false,
     invalidFields: new Set(),
@@ -34,10 +40,9 @@
       editing: false,
       metric: "rms",
       axis: "x",
-      flowType: "estimateThenHowa",
       mapChoices: {},
       estimationMapMethod: null,
-      sweep: { mode: "methods", metric: "rms", axis: "x", stat: "mean", scale: "linear", target: NaN },
+      sweep: { mode: "methods", metric: "rms", axis: "x", stat: "mean", scale: "linear", xAxis: "marks", target: NaN },
       // 評価データのタブ: 表示するWafer（0始まり）・成分・表示の形・一覧のページ
       data: { wafer: 0, component: "truth", display: "vector", page: 0 },
     },
@@ -47,12 +52,17 @@
 
   function createInitialPlans() {
     const store = ASC.manualPlans.createStore();
-    ASC.manualPlans.addPlan(store, null, [], [], true);
+    ASC.manualPlans.addPlan(store, null, [], true);
     return store;
   }
 
   function isPlanKey(key) {
     return typeof key === "string" && key.startsWith(C.MANUAL_PREFIX);
+  }
+
+  /** 「計画を作成」の結果のキー（plan:選び方）か。 */
+  function isDesignPlanKey(key) {
+    return typeof key === "string" && key.startsWith(C.PLAN_PREFIX);
   }
 
   /** 表示中の手動プラン（自動の選び方を表示中なら null）。 */
@@ -111,10 +121,12 @@
     }
     if (kind === "map") {
       rebuildMap();
-      ASC.settingsForm.renderDesignatedMarks();
     }
     if (state.output) {
       state.outputStale = true;
+    }
+    if (state.plan) {
+      state.planStale = true;
     }
     rebuildContext();
     ASC.settingsForm.updateDerivedTexts();
@@ -182,6 +194,24 @@
     return outputMatchesMap() ? state.output.sets.filter((set) => set.method === methodKey) : [];
   }
 
+  function methodInfo(methodKey) {
+    return C.METHODS.find((method) => method.key === methodKey);
+  }
+
+  /** 「計画を作成」の選択点（いまのマップで作ったものだけ）。 */
+  function designPlanSets() {
+    return state.plan && state.plan.map === state.map ? state.plan.sets : [];
+  }
+
+  /** 表示中の、自動の選び方で選んだ点（計画か評価の結果。手動プランを表示中なら null）。 */
+  function displayedSet() {
+    const key = state.view.selection;
+    if (isDesignPlanKey(key)) {
+      return designPlanSets().find((set) => `${C.PLAN_PREFIX}${set.method}` === key) || null;
+    }
+    return methodSets(key)[state.view.draw] || null;
+  }
+
   function renderSelectionOptions() {
     const select = ui.byId("view-selection");
     const planGroup = ui.create(
@@ -190,6 +220,12 @@
       state.plans.plans.map((plan) => ui.create("option", { value: plan.key, text: `${plan.name}${plan.included ? "" : "（評価に含めない）"}` }))
     );
     const options = [planGroup];
+    const designOptions = designPlanSets().map((set) =>
+      ui.create("option", { value: `${C.PLAN_PREFIX}${set.method}`, text: `${methodInfo(set.method).label}（計画${state.planStale ? "・設定が変わる前" : ""}）` })
+    );
+    if (designOptions.length > 0) {
+      options.push(ui.create("optgroup", { label: "計画を作成で選んだ点（評価データなし）" }, designOptions));
+    }
     const resultOptions = C.METHODS.filter((method) => methodSets(method.key).length > 0).map((method) =>
       ui.create("option", { value: method.key, text: method.label })
     );
@@ -219,7 +255,7 @@
       drawSelect.value = String(state.view.draw);
     }
     const plan = activePlan();
-    ui.byId("copy-to-manual-button").hidden = Boolean(plan) || methodSets(state.view.selection).length === 0;
+    ui.byId("copy-to-manual-button").hidden = Boolean(plan) || !displayedSet();
     ui.byId("new-plan-button").disabled = state.plans.plans.length >= C.MAX_MANUAL_PLANS;
     ui.byId("manual-panel").hidden = !plan;
     if (plan) {
@@ -241,11 +277,11 @@
   function currentSelection() {
     const plan = activePlan();
     if (plan) {
-      const indices = state.map ? ASC.manualPlans.planIndices(plan, state.map) : { shotIndices: [], extraMarkIndices: [], missingShotIds: [] };
+      const indices = state.map ? ASC.manualPlans.planIndices(plan, state.map) : { shotIndices: [], missingShotIds: [] };
       if (!state.context) {
         return { shots: new Set(indices.shotIndices), marks: new Set(), status: null, stats: null, context: null, missing: indices.missingShotIds };
       }
-      const selection = ASC.sampling.manualSelection(state.context, indices.shotIndices, indices.extraMarkIndices);
+      const selection = ASC.sampling.manualSelection(state.context, indices.shotIndices);
       const terms = state.settings.model;
       return {
         missing: indices.missingShotIds,
@@ -265,10 +301,11 @@
         relaxedKeys: new Set(),
       };
     }
-    const set = methodSets(state.view.selection)[state.view.draw];
+    const set = displayedSet();
     if (!set) {
       return { shots: new Set(), marks: new Set(), status: null, stats: null, context: state.context };
     }
+    const source = isDesignPlanKey(state.view.selection) ? state.plan : state.output;
     return {
       shots: new Set(set.shotIndices),
       marks: new Set(set.markIndices),
@@ -278,11 +315,35 @@
         markCount: set.markIndices.length,
         minSpacingMm: set.minSpacingMm,
         criteria: set.criteria,
-        reference: state.output.criteriaReference,
+        reference: source.criteriaReference,
       },
-      context: state.output.context,
-      relaxedKeys: new Set(state.output.relaxed.map((entry) => entry.key)),
+      context: source.context,
+      relaxedKeys: new Set(source.relaxed.map((entry) => entry.key)),
     };
+  }
+
+  /** マップの各Shotに添える説明（選べない理由・強制計測Shot）と、強制計測Shotの集まり。 */
+  function shotAnnotations(context) {
+    const notes = new Map();
+    const mandatoryShots = new Set();
+    if (!context || !state.map) {
+      return { notes, mandatoryShots };
+    }
+    const excluded = new Set(ASC.constraints.shotIdList(state.settings.constraints.excludedShotIds));
+    const eligible = new Set(context.items.map((item) => item.shotIndex));
+    state.map.shots.forEach((shot, shotIndex) => {
+      if (excluded.has(shot.id)) {
+        notes.set(shotIndex, "除外Shot");
+      } else if (ASC.constraints.isIncompleteShot(shot)) {
+        notes.set(shotIndex, eligible.has(shotIndex) ? "Markが揃わない端のShot（有効なMarkだけ測る）" : "Markが揃わない端のShot（選ばない設定）");
+      }
+    });
+    for (const item of context.mandatoryItems) {
+      const shotIndex = context.items[item].shotIndex;
+      mandatoryShots.add(shotIndex);
+      notes.set(shotIndex, "強制計測Shot");
+    }
+    return { notes, mandatoryShots };
   }
 
   function renderMapTab() {
@@ -299,14 +360,7 @@
     const plan = activePlan();
     const editing = Boolean(plan) && state.view.editing && Boolean(context);
     const eligibleShots = new Set(context ? context.items.map((item) => item.shotIndex) : []);
-    const extraCandidates = new Set();
-    if (editing && !context.exactMode) {
-      for (const item of context.items) {
-        if (selection.shots.has(item.shotIndex)) {
-          item.otherMarks.forEach((markIndex) => extraCandidates.add(markIndex));
-        }
-      }
-    }
+    const annotations = shotAnnotations(context);
     ASC.mapView.render(frame, {
       map: state.map,
       zones: state.settings.zones,
@@ -314,11 +368,12 @@
       selectedShots: selection.shots,
       measuredMarks: selection.marks,
       centerMarkIndex: context && context.center.enabled ? context.center.markIndex : null,
+      mandatoryShots: annotations.mandatoryShots,
+      shotNotes: annotations.notes,
       editable: editing,
-      extraCandidates,
       onToggleShot: toggleManualShot,
-      onToggleMark: toggleManualMark,
     });
+    ui.byId("export-selection-button").disabled = selection.marks.size === 0;
     ui.byId("map-hint").textContent = mapHintText(editing, context, selection);
     if (selection.stats) {
       ASC.mapView.renderStats(ui.byId("selection-stats"), selection.stats);
@@ -332,6 +387,11 @@
     if (!context) {
       return "設定に誤りがあるため、手動プランの判定と制約の判定はできません: " + state.contextErrors.join(" ");
     }
+    if (isDesignPlanKey(state.view.selection)) {
+      return state.planStale
+        ? "「計画を作成」で選んだ点ですが、そのあとで設定が変わりました。今の設定で選ぶには、もう一度「計画を作成」を押してください。"
+        : "「計画を作成」で選んだ点です（制約付き。評価データは使っていません）。CSVで保存したり、新しい手動プランに写して手直ししたりできます。";
+    }
     if (!activePlan()) {
       return "評価で選ばれた点です。「この選択を新しい手動プランにする」で写して手直しできます。";
     }
@@ -340,16 +400,11 @@
       notes.push(`今のマップにないShot番号 ${selection.missing.length}個（${selection.missing.slice(0, 5).join(", ")}${selection.missing.length > 5 ? " ほか" : ""}）は使いません。`);
     }
     if (selection.notEligible && selection.notEligible.length > 0) {
-      notes.push(`必ず測るMarkが範囲外のShot ${selection.notEligible.length}個は、評価に入りません。`);
+      notes.push(`選べないShot（除外Shot・Markが揃わない端のShot）${selection.notEligible.length}個は、評価に入りません。`);
     }
-    let guide;
-    if (!editing) {
-      guide = "「マップのクリックでShotを選ぶ」をオンにすると、Shotをクリック（またはTabで選んでEnter）して選べます。Shot番号を貼り付けて指定することもできます。";
-    } else if (context.exactMode) {
-      guide = "Shotをクリックすると選択・解除します。斜線のShotは必ず測るMarkが範囲外なので評価に入りません。";
-    } else {
-      guide = "Shotをクリックすると選択・解除します。選んだShotの中のMarkの点をクリックすると、追加のMarkを選べます。";
-    }
+    const guide = editing
+      ? "Shotをクリックすると選択・解除します。選んだShotのMarkはすべて測ります。斜線のShotは選べない（除外Shotか、Markが揃わない端のShotを選ばない設定）ので評価に入りません。"
+      : "「マップのクリックでShotを選ぶ」をオンにすると、Shotをクリック（またはTabで選んでEnter）して選べます。Shot番号を貼り付けて指定することもできます。";
     return [guide].concat(notes).join(" ");
   }
 
@@ -361,15 +416,6 @@
     ASC.manualPlans.toggleShot(plan, state.map, shotIndex);
     afterManualChange(plan);
     focusShot(shotIndex);
-  }
-
-  function toggleManualMark(markIndex) {
-    const plan = activePlan();
-    if (!plan) {
-      return;
-    }
-    ASC.manualPlans.toggleExtraMark(plan, state.map, markIndex);
-    afterManualChange(plan);
   }
 
   /** 作り直したマップで、直前に操作したShotへフォーカスを戻す（キーボード操作を続けられるように）。 */
@@ -403,7 +449,7 @@
   }
 
   function createNewPlan() {
-    const plan = ASC.manualPlans.addPlan(state.plans, null, [], [], true);
+    const plan = ASC.manualPlans.addPlan(state.plans, null, [], true);
     if (!plan) {
       ui.showMessage("warning", `手動プランは${C.MAX_MANUAL_PLANS}個までです。`, ["使わないプランを削除してから作ってください。"]);
       return;
@@ -414,20 +460,35 @@
     ui.byId("plan-name").focus();
   }
 
+  /** 表示中の選択の名前（ファイル名や手動プランの名前に使う）。 */
+  function selectionName() {
+    const key = state.view.selection;
+    const plan = activePlan();
+    if (plan) {
+      return plan.name;
+    }
+    const set = displayedSet();
+    if (!set) {
+      return "選択";
+    }
+    const label = methodInfo(set.method).label;
+    if (isDesignPlanKey(key)) {
+      return `${label}（計画）`;
+    }
+    return methodSets(set.method).length > 1 ? `${label}（試行${set.draw + 1}）` : label;
+  }
+
   function copySelectionToManual() {
-    const set = methodSets(state.view.selection)[state.view.draw];
+    const set = displayedSet();
     if (!set) {
       return;
     }
-    const method = C.METHODS.find((entry) => entry.key === set.method);
-    const name = methodSets(set.method).length > 1 ? `${method.label}（試行${set.draw + 1}）の写し` : `${method.label}の写し`;
-    const plan = ASC.manualPlans.addPlan(state.plans, name, [], [], true);
+    const plan = ASC.manualPlans.addPlan(state.plans, `${selectionName()}の写し`, [], true);
     if (!plan) {
       ui.showMessage("warning", `手動プランは${C.MAX_MANUAL_PLANS}個までです。`, ["使わないプランを削除してから写してください。"]);
       return;
     }
-    const designated = new Set(set.items.flatMap((item) => state.output.context.items[item].designatedMarks));
-    ASC.manualPlans.setFromIndices(plan, state.map, set.shotIndices, set.markIndices.filter((markIndex) => !designated.has(markIndex)));
+    ASC.manualPlans.setFromIndices(plan, state.map, set.shotIndices);
     state.view.editing = true;
     ui.byId("edit-manual").checked = true;
     selectPlan(plan);
@@ -511,7 +572,7 @@
       .filter((plan) => plan.included)
       .map((plan) => {
         const indices = ASC.manualPlans.planIndices(plan, state.map);
-        return { key: plan.key, label: plan.name, shotIndices: indices.shotIndices, extraMarkIndices: indices.extraMarkIndices };
+        return { key: plan.key, label: plan.name, shotIndices: indices.shotIndices };
       })
       .filter((plan) => plan.shotIndices.length > 0);
   }
@@ -548,8 +609,90 @@
     state.running = running;
     ui.byId("run-button").disabled = running;
     ui.byId("run-button").textContent = running ? "計算中…" : "評価を実行";
+    ui.byId("plan-button").disabled = running;
     ui.byId("sweep-run-button").disabled = running;
     ui.byId("progress-area").hidden = !running;
+  }
+
+  // ---- 計画を作成（制約付きD最適・I最適の選択点だけ） -------------------------
+
+  /** 計画の作成に要る設定の誤り（評価データ・補正の流れ・比べる選び方は使わないので見ない）。 */
+  function collectPlanErrors() {
+    const errors = [];
+    if (state.invalidFields.size > 0) {
+      errors.push(`入力に誤りがある欄が${state.invalidFields.size}か所あります。赤い枠の欄と、その下の説明を確かめてください。`);
+    }
+    if (!state.map) {
+      errors.push(...state.mapErrors);
+      return errors;
+    }
+    const model = state.settings.model;
+    if (model.termsX.length === 0 || model.termsY.length === 0) {
+      errors.push("D基準・I基準に使う補正の多項式の項（3. 補正モデル）を、X・Yとも1つ以上選んでください。");
+    }
+    errors.push(...state.contextErrors);
+    return Array.from(new Set(errors));
+  }
+
+  /**
+   * Waferマップと制約から、制約付きD最適・I最適の選択点を作り、「マップと選択点」に表示する。
+   * 評価データを使わないので、すぐに終わる。同じ設定なら「評価を実行」の制約付きD最適・I最適と同じ点になる。
+   */
+  function createDesignPlan() {
+    if (state.running) {
+      return;
+    }
+    const errors = collectPlanErrors();
+    if (errors.length > 0) {
+      ui.showMessage("error", "計画を作成できません。次の点を直してください。", errors);
+      return;
+    }
+    const settings = JSON.parse(JSON.stringify(state.settings));
+    const started = performance.now();
+    const plan = ASC.evaluator.runPlan({ map: state.map, settings });
+    if (plan.errors.length > 0) {
+      ui.showMessage("error", "計画を作成できません。次の点を直してください。", plan.errors);
+      return;
+    }
+    plan.map = state.map;
+    state.plan = plan;
+    state.planStale = false;
+    const seconds = ((performance.now() - started) / 1000).toFixed(1);
+    const details = plan.sets.map((set) => `${methodInfo(set.method).label}: Shot ${set.shotIndices.length}個・Mark ${set.markIndices.length}個`);
+    details.push(`計算時間 ${seconds}秒。「マップと選択点」に表示しています。「表示中の選択点をCSVで保存」で座標を保存できます。`);
+    if (plan.relaxed.length > 0) {
+      details.push(`同時に満たせなかったハード制約をソフトとして扱いました: ${plan.relaxed.map((entry) => entry.label).join("、")}`);
+    }
+    if (plan.failedMethods.length > 0) {
+      details.push(`制約を満たす点を選べなかった選び方: ${plan.failedMethods.join("、")}（計測Shot数や制約を見直してください）`);
+    }
+    ui.showMessage(plan.failedMethods.length > 0 ? "warning" : "success", "計画を作成しました。", details);
+    if (plan.sets.length > 0) {
+      state.view.selection = `${C.PLAN_PREFIX}${plan.sets[0].method}`;
+      state.view.draw = 0;
+    }
+    renderMapTab();
+    selectTab("tab-map");
+  }
+
+  // ---- 選択点のCSV ----------------------------------------------------------
+
+  /** ファイル名に使えるように、名前の中の記号や空白を「_」に置き換える。 */
+  function fileNamePart(name) {
+    return String(name).replace(FILE_NAME_FORBIDDEN, "_").slice(0, 40);
+  }
+
+  function downloadSelection(name, markIndices) {
+    if (!state.map || markIndices.length === 0) {
+      ui.showMessage("warning", "保存できる選択点がありません。", ["Shotを選んだ手動プランか、評価・計画で選んだ点を表示してください。"]);
+      return;
+    }
+    ui.download(`選択点_${fileNamePart(name)}_${ui.timestampForFile()}.csv`, ASC.waferMap.selectionToCsv(state.map, markIndices), "text/csv");
+  }
+
+  /** 「マップと選択点」で表示中の選択点をCSVにする。 */
+  function exportDisplayedSelection() {
+    downloadSelection(selectionName(), Array.from(currentSelection().marks));
   }
 
   function showProgress(done, total, label) {
@@ -654,13 +797,17 @@
     const settings = state.settings;
     const sweep = settings.sweep;
     const pointCount = sweep.stepShots > 0 && sweep.endShots >= sweep.startShots ? Math.floor((sweep.endShots - sweep.startShots) / sweep.stepShots) + 1 : 0;
-    const methods = C.METHODS.filter((method) => settings.sampling.methods[method.key]);
+    const methods = C.METHODS.filter((method) => sweep.methods[method.key]);
     const setsPerPoint = methods.reduce((sum, method) => sum + (method.usesDraws ? sweep.draws : 1), 0);
-    const k = settings.sampling.designatedMarkNos.length;
+    // 計測Mark数の目安は、選べるShotの平均のMark数から出す（端のShotを選べば少し減る）
+    const items = state.context ? state.context.items : [];
+    const marksPerShot = items.length > 0 ? items.reduce((sum, item) => sum + item.marks.length, 0) / items.length : 0;
+    const markRange = marksPerShot > 0 ? `（計測Mark数 ${Math.round(sweep.startShots * marksPerShot)}〜${Math.round(sweep.endShots * marksPerShot)} 程度）` : "";
     element.textContent =
       pointCount > 0
-        ? `評価する点: ${pointCount}点（計測Mark数 ${sweep.startShots * k}〜${sweep.endShots * k} 程度）、1点あたり選択 ${setsPerPoint}組 × Wafer ${settings.evaluationData.waferCount}枚。点や試行回数が多いほど時間がかかります。`
+        ? `評価する点: ${pointCount}点${markRange}、1点あたり選択 ${setsPerPoint}組 × Wafer ${settings.evaluationData.waferCount}枚。点や試行回数が多いほど時間がかかります。`
         : "";
+    ui.byId("sweep-methods-error").textContent = methods.length === 0 ? "比べる選び方を1つ以上選んでください。" : "";
   }
 
   async function runSweep() {
@@ -668,8 +815,8 @@
       return;
     }
     const errors = collectRunErrors().filter((text) => !text.includes("手動プラン"));
-    if (!C.METHODS.some((method) => state.settings.sampling.methods[method.key])) {
-      errors.push("スイープには、自動の選び方（ランダム・ポアソン・D最適・I最適）を1つ以上選んでください（4. サンプリングの「比べる選び方」）。");
+    if (!C.METHODS.some((method) => state.settings.sweep.methods[method.key])) {
+      errors.push("スイープで比べる選び方を1つ以上選んでください（このタブの「比べる選び方（スイープ）」）。");
     }
     if (errors.length > 0) {
       ui.showMessage("error", "スイープを始められません。次の点を直してください。", errors);
@@ -748,6 +895,13 @@
         renderMapsTab();
         ui.byId(focusId).focus();
       },
+      onExportSelection: (name, set) => {
+        if (!outputMatchesMap()) {
+          ui.showMessage("warning", "マップが変わったため、この選択点は保存できません。", ["もう一度「評価を実行」を押してください。"]);
+          return;
+        }
+        downloadSelection(name, set.markIndices);
+      },
       onOpenInMapTab: (methodKey, drawIndex) => {
         if (!outputMatchesMap()) {
           ui.showMessage("warning", "マップが変わったため、この選択は「マップと選択点」で表示できません。", ["もう一度「評価を実行」を押してください。"]);
@@ -814,6 +968,27 @@
     ui.download(`設定_${ui.timestampForFile()}.json`, JSON.stringify(content, null, 2), "application/json");
   }
 
+  /**
+   * 版2以前の設定を、版3の形に読み替える（初期設定に重ねる前に行う）。
+   *   - 以前のD最適・I最適は制約を守る選び方だったので、制約付きD最適・I最適として読む
+   *   - 「必ず測るMark」「k個以上」「HOWA＋推定」は、なくなったので使わない（重ねるときに捨てられる）
+   */
+  function migrateOldSettings(loaded, version) {
+    if (version >= 3 || !loaded || !loaded.sampling || !loaded.sampling.methods) {
+      return loaded;
+    }
+    const old = loaded.sampling.methods;
+    loaded.sampling.methods = {
+      random: old.random !== false,
+      poisson: old.poisson !== false,
+      dOptimal: false,
+      iOptimal: false,
+      constrainedD: old.dOptimal !== false,
+      constrainedI: old.iOptimal !== false,
+    };
+    return loaded;
+  }
+
   /** 読み込んだ設定を初期設定に重ねる。型が違う値や知らない項目は使わない。 */
   function mergeSettings(base, loaded) {
     if (Array.isArray(base)) {
@@ -842,7 +1017,7 @@
       if (!content || !READABLE_SETTINGS_VERSIONS.includes(content.version) || !content.settings) {
         throw new Error("このアプリで保存した設定ファイルではありません。");
       }
-      const settings = mergeSettings(createInitialSettings(), content.settings);
+      const settings = mergeSettings(createInitialSettings(), migrateOldSettings(content.settings, content.version));
       if (!Array.isArray(settings.evaluationData.terms) || settings.evaluationData.terms.length !== ASC.zernike.TERMS.length) {
         settings.evaluationData.terms = createInitialSettings().evaluationData.terms;
       }
@@ -856,6 +1031,7 @@
       state.view.selection = state.plans.plans[0].key;
       state.output = null;
       state.sweep = null;
+      state.plan = null;
       state.view.mapChoices = {};
       rebuildMap();
       ASC.settingsForm.writeAll();
@@ -867,7 +1043,11 @@
       renderSweepTab();
       updateSweepEstimate();
       renderDataTab();
-      ui.showMessage("success", "設定を読み込みました。", [`ファイル: ${file.name}`]);
+      const notes = [`ファイル: ${file.name}`];
+      if (content.version < 3) {
+        notes.push("以前の版の設定です。D最適・I最適は「制約付きD最適・I最適」として読み、「必ず測るMark」「k個以上」「HOWA＋推定」の設定は使いません（選んだShotのMarkはすべて測ります）。");
+      }
+      ui.showMessage("success", "設定を読み込みました。", notes);
     } catch (error) {
       ui.showMessage("error", "設定を読み込めませんでした。", [`内容: ${error.message}`, "このアプリの「設定をJSONで保存」で作ったファイルを選んでください。"]);
     } finally {
@@ -918,6 +1098,8 @@
     setupTabs();
 
     ui.byId("run-button").addEventListener("click", runEvaluation);
+    ui.byId("plan-button").addEventListener("click", createDesignPlan);
+    ui.byId("export-selection-button").addEventListener("click", exportDisplayedSelection);
     ui.byId("sweep-run-button").addEventListener("click", runSweep);
     updateSweepEstimate();
     ui.byId("cancel-button").addEventListener("click", () => {
@@ -946,7 +1128,6 @@
       const plan = activePlan();
       if (plan) {
         plan.shotIds.clear();
-        plan.extraMarks.clear();
         afterManualChange(plan);
       }
     });
