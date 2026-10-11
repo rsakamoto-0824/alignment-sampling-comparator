@@ -1,5 +1,5 @@
 /**
- * 「評価データ」タブ。乱数で作ったWafer面内傾向（評価データ）を、Waferごと・成分ごとに確かめる。
+ * 「評価データ」タブ。評価データ（乱数で作ったWafer面内傾向か、計測データのファイルの値）を、Waferごと・成分ごとに確かめる。
  * 表示中のWaferは、ベクトル図（矢印）とX・Yのヒートマップ（色）を横に並べる。全Waferの一覧は表示の形を選ぶ。
  * 矢印の長さと色の目盛りは成分ごとに全Waferで共通にし、Waferどうしを同じ目盛りで見比べられるようにする。
  */
@@ -33,8 +33,13 @@
   let markerCounter = 0;
   const statisticsCache = new WeakMap();
 
-  function components() {
-    return ASC.evaluationData.COMPONENTS;
+  function components(data) {
+    return ASC.evaluationData.componentsOf(data);
+  }
+
+  /** Waferの呼び名（ファイルから読んだデータなら、ファイルのWaferの名前を添える）。 */
+  function waferLabel(data, wafer) {
+    return data.waferNames ? `Wafer ${wafer + 1}（${data.waferNames[wafer]}）` : `Wafer ${wafer + 1}`;
   }
 
   // ---- 集計と目盛り ----------------------------------------------------------
@@ -49,13 +54,13 @@
     const markCount = data.markCount;
     const perWafer = {};
     const samples = {};
-    for (const component of components()) {
+    for (const component of components(data)) {
       perWafer[component.key] = { rmsX: new Float64Array(waferCount), rmsY: new Float64Array(waferCount), maxLength: new Float64Array(waferCount) };
       samples[component.key] = { length: [], x: [], y: [] };
     }
     for (let wafer = 0; wafer < waferCount; wafer++) {
       const parts = ASC.evaluationData.waferComponents(data, wafer);
-      for (const component of components()) {
+      for (const component of components(data)) {
         const { x, y } = parts[component.key];
         const sample = samples[component.key];
         let sumX = 0;
@@ -78,7 +83,7 @@
       }
     }
     const scales = {};
-    for (const component of components()) {
+    for (const component of components(data)) {
       const sample = samples[component.key];
       const scaleOf = (values) => ASC.math.percentileOfSorted(values.sort((a, b) => a - b), SCALE_PERCENT);
       scales[component.key] = { vector: scaleOf(sample.length), x: scaleOf(sample.x), y: scaleOf(sample.y) };
@@ -190,6 +195,8 @@
       });
     }
     svg.append(layer);
+    // 無効マーク（計測データのファイルで測れていないMark）は値がないので ✕ だけ描く
+    svg.append(ASC.mapView.drawInvalidLayer(map));
     return svg;
   }
 
@@ -227,8 +234,8 @@
   }
 
   /** 表示中のWaferの、成分ごとの大きさの表。 */
-  function waferTable(statistics, wafer, currentKey) {
-    const rows = components().map((component) => {
+  function waferTable(data, statistics, wafer, currentKey) {
+    const rows = components(data).map((component) => {
       const entry = statistics.perWafer[component.key];
       const current = component.key === currentKey;
       return ui.create("tr", { className: current ? "current-row" : null, "aria-current": current ? "true" : null }, [
@@ -252,8 +259,8 @@
   }
 
   /** 全Waferでの、成分ごとの大きさのばらつきの表。 */
-  function spreadTable(statistics) {
-    const rows = components().map((component) => {
+  function spreadTable(data, statistics) {
+    const rows = components(data).map((component) => {
       const entry = statistics.perWafer[component.key];
       const rmsX = ASC.math.summarize(Array.from(entry.rmsX));
       const rmsY = ASC.math.summarize(Array.from(entry.rmsY));
@@ -343,7 +350,8 @@
     }
     const waferCount = data.waferCount;
     const wafer = Math.max(0, Math.min(waferCount - 1, view.wafer));
-    const component = components().find((entry) => entry.key === view.component) || components()[0];
+    const fromFile = data.source === ASC.constants.DATA_SOURCE_FILE;
+    const component = components(data).find((entry) => entry.key === view.component) || components(data)[0];
     // display は全Waferの一覧（小さいマップ）の表示の形。表示中のWaferは3つの形を並べる
     const display = DISPLAYS.find((entry) => entry.key === view.display) || DISPLAYS[0];
     const statistics = statisticsOf(data);
@@ -366,7 +374,7 @@
       field("data-wafer", `Wafer番号（1〜${waferCount}）`, waferInput, "data-wafer-error"),
       ui.create("button", { type: "button", className: "button-secondary", id: "data-previous", text: "← 前のWafer", disabled: wafer === 0, onClick: () => goTo(wafer - 1) }),
       ui.create("button", { type: "button", className: "button-secondary", id: "data-next", text: "次のWafer →", disabled: wafer === waferCount - 1, onClick: () => goTo(wafer + 1) }),
-      field("data-component", "表示する成分", select("data-component", components(), component.key, (value) => input.onChange({ component: value }))),
+      field("data-component", "表示する成分", select("data-component", components(data), component.key, (value) => input.onChange({ component: value }))),
       field("data-display", "一覧の表示の形", select("data-display", DISPLAYS, display.key, (value) => input.onChange({ display: value }))),
       ui.create("button", { type: "button", className: "button-secondary", id: "data-download", text: "このWaferのずれをCSVで保存", onClick: () => input.onDownload(wafer) }),
     ]);
@@ -379,7 +387,7 @@
         waferSvg(map, parts[component.key], entry.key, panelScale, {
           withTitles: true,
           withScale: true,
-          ariaLabel: `Wafer ${wafer + 1} の${component.label}の${entry.label}`,
+          ariaLabel: `${waferLabel(data, wafer)} の${component.label}の${entry.label}`,
         }),
         scaleLegend(entry.key, panelScale),
       ]);
@@ -395,7 +403,7 @@
       const thumbParts = ASC.evaluationData.waferComponents(data, index);
       const entry = statistics.perWafer[component.key];
       const current = index === wafer;
-      const caption = `Wafer ${index + 1}${current ? "（表示中）" : ""}`;
+      const caption = `${waferLabel(data, index)}${current ? "・表示中" : ""}`;
       const detail = `RMS X ${ui.formatNumber(entry.rmsX[index], 2)}・Y ${ui.formatNumber(entry.rmsY[index], 2)} nm`;
       thumbnails.push(
         ui.create("button", {
@@ -417,36 +425,42 @@
       ui.create("button", { type: "button", className: "button-secondary", id: "data-page-next", text: `次の${THUMBNAILS_PER_PAGE}枚 →`, disabled: page >= pageCount - 1, onClick: () => input.onChange({ page: page + 1 }) }),
     ]);
 
+    const introText = fromFile
+      ? "「評価を実行」で使うものと同じ評価データです（左の「2. 評価データ」で読み込んだ計測データのファイルの値）。計測値そのものを「真のずれ」とみなし、選んだMarkの計測値から補正した残差を全Markで求めます。✕ は無効マーク（どれかのWaferで測れていないMark）で、評価には使いません。"
+      : "「評価を実行」で使うものと同じ評価データです（左の「2. 評価データ」の設定とシードで決まり、同じ設定なら毎回同じ値になります）。「5次以下」は5次までの多項式（21項）ですべて表せる成分で、補正モデルで項を減らすと一部は補正しきれません。「6次以上」とScan方向のずれは、多項式では補正できない成分です。";
+    const coefficientSection = fromFile
+      ? []
+      : [
+          ui.create("h2", { className: "subheading", text: `Wafer ${wafer + 1} のZernike項の係数` }),
+          ui.create("p", { className: "hint", text: "各項の値（正規化なしなら単位円の端で最大1）に掛けた乱数の係数です。大きさ0かオフにした項は使っていないので出しません。" }),
+          coefficientTable(data, wafer),
+        ];
     container.replaceChildren(
-      ui.create("p", {
-        className: "hint",
-        text: "「評価を実行」で使うものと同じ評価データです（左の「2. 評価データ」の設定とシードで決まり、同じ設定なら毎回同じ値になります）。「5次以下」は5次までの多項式（21項）ですべて表せる成分で、補正モデルで項を減らすと一部は補正しきれません。「6次以上」とScan方向のずれは、多項式では補正できない成分です。",
-      }),
+      ui.create("p", { className: "hint", text: introText }),
       toolbar,
-      ui.create("h2", { className: "subheading", text: `Wafer ${wafer + 1} の${component.label}` }),
+      ui.create("h2", { className: "subheading", text: `${waferLabel(data, wafer)} の${component.label}` }),
       ui.create("div", { className: "data-triple" }, panels),
-      ui.create("h2", { className: "subheading", text: `Wafer ${wafer + 1} の大きさ [nm]` }),
-      waferTable(statistics, wafer, component.key),
+      ui.create("h2", { className: "subheading", text: `${waferLabel(data, wafer)} の大きさ [nm]` }),
+      waferTable(data, statistics, wafer, component.key),
       ui.create("p", { className: "hint", text: "RMS は全Markでの二乗平均平方根、最大の大きさは √(X²＋Y²) の最大です。" }),
-      ui.create("h2", { className: "subheading", text: `Wafer ${wafer + 1} のZernike項の係数` }),
-      ui.create("p", { className: "hint", text: "各項の値（正規化なしなら単位円の端で最大1）に掛けた乱数の係数です。大きさ0かオフにした項は使っていないので出しません。" }),
-      coefficientTable(data, wafer),
+      ...coefficientSection,
       ui.create("h2", { className: "subheading", text: `全Waferの一覧（${component.shortLabel}・${display.label}）` }),
       pager,
       ui.create("div", { className: "data-thumbs" }, thumbnails),
       ui.create("h2", { className: "subheading", text: `全${waferCount}枚のばらつき（Waferごとの大きさ [nm]）` }),
-      spreadTable(statistics)
+      spreadTable(data, statistics)
     );
   }
 
   /** 1枚のWaferのずれ（成分ごと）をCSVにする。 */
   function waferCsv(map, data, wafer) {
     const parts = ASC.evaluationData.waferComponents(data, wafer);
-    const keys = components().map((component) => component.key);
+    const keys = components(data).map((component) => component.key);
     const header = ["Wafer", "ShotId", "MarkNo", "X_mm", "Y_mm"].concat(keys.flatMap((key) => [`${key}X_nm`, `${key}Y_nm`]));
     const lines = [header.join(",")];
+    const waferName = data.waferNames ? data.waferNames[wafer] : wafer + 1;
     map.marks.forEach((mark, markIndex) => {
-      const cells = [wafer + 1, map.shots[mark.shotIndex].id, mark.markNo, mark.x, mark.y].concat(keys.flatMap((key) => [parts[key].x[markIndex], parts[key].y[markIndex]]));
+      const cells = [waferName, map.shots[mark.shotIndex].id, mark.markNo, mark.x, mark.y].concat(keys.flatMap((key) => [parts[key].x[markIndex], parts[key].y[markIndex]]));
       lines.push(cells.map(ui.csvCell).join(","));
     });
     return lines.join("\r\n") + "\r\n";

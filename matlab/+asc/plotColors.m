@@ -15,4 +15,9 @@ colors.waferEdge = hex('#4a4945');
 colors.guide = hex('#6b6a65');
 colors.shotEdge = hex('#a3a29a');
 colors.grid = hex('#e1e0d9');
+colors.band = hex('#efeee9');
+colors.ink = hex('#0b0b0b');
+colors.inkSecondary = hex('#4a4945');
+% 無効マーク（計測データのファイルで、どれかのWaferで測れていないMark）の ✕
+colors.invalidMark = hex('#a8292a');
 end

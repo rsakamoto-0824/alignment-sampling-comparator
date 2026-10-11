@@ -13,6 +13,8 @@
   // 推定誤差などを色で示すMarkは、色が見えるように大きめに描く
   const STEP_MARK_RADIUS_MM = 2.6;
   const CENTER_RING_RADIUS_MM = 4.5;
+  // 無効マークの ✕ の腕の長さ（中心から）[mm]
+  const INVALID_MARK_ARM_MM = 1.6;
   const SCAN_GLYPH_MIN_SHOT_MM = 10;
   // Shot番号はShot中心の上に、Scan方向の記号は下に置く（Shot中心からの距離 [mm]）
   const SHOT_LABEL_OFFSET_MM = 5.5;
@@ -29,6 +31,41 @@
         ui.createSvg("line", { className: "map-hatch-line", x1: 0, y1: 0, x2: 0, y2: spacing }),
       ])
     );
+  }
+
+  /** 無効マーク（✕）と、Markがすべて無効のShot（破線の枠）を描く。評価データのタブでも使う。 */
+  function drawInvalidLayer(map) {
+    const group = ui.createSvg("g", { "pointer-events": "none" });
+    for (const shot of map.inactiveShots || []) {
+      group.append(
+        ui.createSvg("rect", {
+          className: "map-inactive-shot",
+          x: shot.x - map.shotWidthMm / 2,
+          y: -(shot.y + map.shotHeightMm / 2),
+          width: map.shotWidthMm,
+          height: map.shotHeightMm,
+        })
+      );
+    }
+    const arm = INVALID_MARK_ARM_MM;
+    for (const mark of map.invalidMarks || []) {
+      group.append(
+        ui.createSvg("path", {
+          className: "map-invalid-mark",
+          d: `M ${mark.x - arm} ${-mark.y - arm} L ${mark.x + arm} ${-mark.y + arm} M ${mark.x - arm} ${-mark.y + arm} L ${mark.x + arm} ${-mark.y - arm}`,
+        })
+      );
+    }
+    return group;
+  }
+
+  /** ShotIdごとの無効マークの数（Shotの説明に添える）。 */
+  function invalidCountsOf(map) {
+    const counts = new Map();
+    for (const mark of map.invalidMarks || []) {
+      counts.set(mark.shotId, (counts.get(mark.shotId) || 0) + 1);
+    }
+    return counts;
   }
 
   /**
@@ -57,8 +94,9 @@
     const height = map.shotHeightMm;
     const withLabels = !options.compact && Math.min(width, height) >= SCAN_GLYPH_MIN_SHOT_MM;
     const mandatoryShots = options.mandatoryShots || new Set();
+    const invalidCounts = invalidCountsOf(map);
     map.shots.forEach((shot, shotIndex) => {
-      shotLayer.append(drawShot(shot, shotIndex, width, height, options));
+      shotLayer.append(drawShot(shot, shotIndex, width, height, options, invalidCounts.get(shot.id) || 0));
       if (withLabels) {
         shotLayer.append(
           ui.createSvg("text", { className: "map-shot-label", x: shot.x, y: -shot.y - SHOT_LABEL_OFFSET_MM, text: shot.id }),
@@ -74,9 +112,16 @@
         drawMark(markLayer, map, markIndex, options);
       }
     });
+    if (withLabels) {
+      // Markがすべて無効マークのShotも、番号が抜けて見えないように番号だけ書く
+      for (const shot of map.inactiveShots || []) {
+        shotLayer.append(ui.createSvg("text", { className: "map-shot-label inactive", x: shot.x, y: -shot.y - SHOT_LABEL_OFFSET_MM, text: shot.id }));
+      }
+    }
     svg.append(shotLayer);
     svg.append(drawGuides(map, zones, Boolean(options.compact)));
     svg.append(markLayer);
+    svg.append(drawInvalidLayer(map));
 
     if (options.centerMarkIndex !== null && options.centerMarkIndex !== undefined) {
       const mark = map.marks[options.centerMarkIndex];
@@ -85,7 +130,7 @@
     container.replaceChildren(svg);
   }
 
-  function drawShot(shot, shotIndex, width, height, options) {
+  function drawShot(shot, shotIndex, width, height, options, invalidCount) {
     const eligible = options.eligibleShots.has(shotIndex);
     const selected = options.selectedShots.has(shotIndex);
     const classes = ["map-shot"];
@@ -108,7 +153,8 @@
       stateText = stepInfo.text;
     }
     const note = options.shotNotes ? options.shotNotes.get(shotIndex) : null;
-    const label = `Shot ${shot.id}（中心 ${shot.x}, ${shot.y} mm、Scan ${shot.scan}、Mark ${shot.markIndices.length}個）${stateText}${note ? `・${note}` : ""}`;
+    const invalidText = invalidCount > 0 ? `、無効マーク ${invalidCount}個` : "";
+    const label = `Shot ${shot.id}（中心 ${shot.x}, ${shot.y} mm、Scan ${shot.scan}、Mark ${shot.markIndices.length}個${invalidText}）${stateText}${note ? `・${note}` : ""}`;
     const rect = ui.createSvg("rect", {
       className: classes.join(" "),
       // CSSのクラスより優先させるため style で指定する
@@ -243,6 +289,10 @@
       [symbol([ui.createSvg("text", { className: "map-shot-label", x: 14, y: 10, style: "font-size:12px", text: "12" })]), "Shot番号（ShotId）"],
       [symbol([ui.createSvg("circle", { className: "map-mark measured", cx: 14, cy: 10, r: 4 })]), "測るMark（選んだShotのMarkをすべて測る）"],
       [symbol([ui.createSvg("circle", { className: "map-mark", cx: 14, cy: 10, r: 4 })]), "測らないMark"],
+      [
+        symbol([ui.createSvg("path", { className: "map-invalid-mark", style: "stroke-width:2", d: "M 10 6 L 18 14 M 10 14 L 18 6" })]),
+        "無効マーク（計測データのファイルで、どれかのWaferで測れていないMark。測る対象にしない）",
+      ],
       [symbol([ui.createSvg("circle", { className: "map-center", cx: 14, cy: 10, r: 7 })]), "中心に最も近いMark（中心の1点）"],
       [symbol([ui.createSvg("text", { className: "map-scan", x: 14, y: 10, style: "font-size:14px", text: "▲" })]), "Scan Up（▼はDown）"],
       [symbol([ui.createSvg("line", { className: "map-guide", x1: 2, y1: 10, x2: 26, y2: 10, "stroke-dasharray": "3 2" })]), "同心円の区切り（実線は4象限の境界）"],
@@ -365,5 +415,5 @@
     );
   }
 
-  ASC.mapView = { render, renderLegend, renderStats, renderConstraintStatus, constraintTable, criteriaRows, log10Det };
+  ASC.mapView = { render, renderLegend, renderStats, renderConstraintStatus, constraintTable, criteriaRows, log10Det, drawInvalidLayer };
 })(typeof window !== "undefined" ? window : globalThis);

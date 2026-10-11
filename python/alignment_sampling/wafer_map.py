@@ -2,9 +2,11 @@
 
 マップは辞書で持つ。
   shots: [{"id", "x", "y", "scan", "markIndices", "definedMarkCount"}]  x, y はShot中心 [mm]
-    definedMarkCount はShotに定義したMarkの数（有効範囲外も含む）。markIndices の数より多ければ「Markが揃わない端のShot」
+    definedMarkCount はShotに定義したMarkの数（有効範囲外と無効マークも含む）。markIndices の数より多ければ「Markが揃わない端のShot」
   marks: [{"shotIndex", "markNo", "x", "y", "u", "v"}]  x, y はWafer座標 [mm]、u, v は正規化座標
-marks には有効範囲（r < 有効半径）のMarkだけを入れる。
+marks には有効範囲（r < 有効半径）の、無効でないMarkだけを入れる。
+  invalidMarks: [{"shotId", "markNo", "x", "y"}] 無効マーク（計測データのファイルで、どれかのWaferで測れていないMark。表示だけ）
+  inactiveShots: [{"id", "x", "y", "scan"}] 有効範囲の中のMarkがすべて無効マークのShot（表示だけ）
 """
 
 import csv
@@ -34,22 +36,29 @@ def _scan_from_pattern(pattern, column, row):
 
 
 def build_map(shot_records, options):
-    """Shot・Markの記録からマップを組み立てる（生成とCSV読込で共通）。"""
+    """Shot・Markの記録からマップを組み立てる（生成・CSV読込・計測データのファイルで共通）。
+
+    Markの記録に "invalid": True があれば無効マーク（計測の対象にしない。表示用に invalidMarks に入れる）。
+    """
     valid_radius = options["validRadiusMm"]
-    shots, marks = [], []
+    shots, marks, invalid_marks, inactive_shots = [], [], [], []
     excluded_marks = excluded_shots = 0
     mark_numbers = set()
     for record in shot_records:
-        valid = []
+        valid, invalid_inside = [], []
         for mark in record["marks"]:
             x = record["x"] + mark["localX"]
             y = record["y"] + mark["localY"]
             if math.hypot(x, y) < valid_radius:
-                valid.append({"markNo": mark["markNo"], "x": x, "y": y})
+                (invalid_inside if mark.get("invalid") else valid).append({"shotId": str(record["id"]), "markNo": mark["markNo"], "x": x, "y": y})
+        invalid_marks.extend(sorted(invalid_inside, key=lambda entry: entry["markNo"]))
         if not valid:
-            excluded_shots += 1
+            if invalid_inside:
+                inactive_shots.append({"id": str(record["id"]), "x": record["x"], "y": record["y"], "scan": record["scan"]})
+            else:
+                excluded_shots += 1
             continue
-        excluded_marks += len(record["marks"]) - len(valid)
+        excluded_marks += len(record["marks"]) - len(valid) - len(invalid_inside)
         shot_index = len(shots)
         shot = {"id": str(record["id"]), "x": record["x"], "y": record["y"], "scan": record["scan"], "markIndices": [], "definedMarkCount": len(record["marks"])}
         for mark in sorted(valid, key=lambda entry: entry["markNo"]):
@@ -69,6 +78,8 @@ def build_map(shot_records, options):
     return {
         "shots": shots,
         "marks": marks,
+        "invalidMarks": invalid_marks,
+        "inactiveShots": inactive_shots,
         "markNumbers": sorted(mark_numbers),
         "validRadiusMm": valid_radius,
         "shotWidthMm": options.get("shotWidthMm"),

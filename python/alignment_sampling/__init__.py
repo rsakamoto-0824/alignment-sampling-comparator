@@ -8,31 +8,41 @@
     wafer_map = asc.generate_wafer_map(settings["map"])
     data = asc.generate_evaluation_data(wafer_map, settings["evaluationData"])
     output = asc.run_evaluation(wafer_map, data, settings)
+
+計測データのファイル（csv・xlsx）で評価するとき:
+
+    result = asc.load_measurement_file("計測.xlsx", settings["map"])
+    output = asc.run_evaluation(result["map"], result["data"], settings)
 """
 
 from .constants import default_settings
 from .evaluation_data import default_term_settings, generate_evaluation_data
 from .evaluator import estimation_label, run_evaluation, run_plan, run_sweep, summarize, summarize_store
+from .measurement_data import build_from_table, describe_report, load_measurement_file, read_table_bytes
 from .sampling import design_criteria, efficiencies
 from .settings_io import copy_settings, load_settings_file, manual_plan_inputs, map_from_loaded, plan_from_shot_ids
 from .wafer_map import build_map_from_settings, generate_wafer_map, map_to_csv, parse_map_csv, selection_to_csv
 
 __all__ = [
+    "build_from_table",
     "build_map_from_settings",
     "copy_settings",
     "default_settings",
     "default_term_settings",
+    "describe_report",
     "design_criteria",
     "efficiencies",
     "estimation_label",
     "generate_evaluation_data",
     "generate_wafer_map",
+    "load_measurement_file",
     "load_settings_file",
     "manual_plan_inputs",
     "map_from_loaded",
     "map_to_csv",
     "parse_map_csv",
     "plan_from_shot_ids",
+    "read_table_bytes",
     "run_evaluation",
     "run_plan",
     "run_sweep",

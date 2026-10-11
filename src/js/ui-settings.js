@@ -26,6 +26,10 @@
   let notifyChange = null;
 
   function changeKindOf(path) {
+    // 評価データの用意のしかたを変えると、マップの作り方（ファイルから作るか）も変わる
+    if (path === "evaluationData.source") {
+      return "map";
+    }
     return CHANGE_KIND_BY_PREFIX[path.split(".")[0]] || "other";
   }
 
@@ -436,15 +440,25 @@
   /** 設定に応じて、欄の表示・無効化と補足の文を更新する。 */
   function updateDerivedTexts() {
     const settings = state.settings;
+    // 計測データのファイルを使うときは、マップもファイルから作る（生成・CSVの欄は使わない）
+    const fromFile = settings.evaluationData.source === C.DATA_SOURCE_FILE;
     const isCsv = settings.map.source === "csv";
-    ui.byId("generate-fields").hidden = isCsv;
-    ui.byId("csv-fields").hidden = !isCsv;
+    ui.byId("map-source-fieldset").disabled = fromFile;
+    ui.byId("map-file-note").hidden = !fromFile;
+    ui.byId("generate-fields").hidden = fromFile || isCsv;
+    ui.byId("csv-fields").hidden = fromFile || !isCsv;
     ui.byId("serpentine-fields").hidden = settings.map.scanPattern !== "serpentine";
+    ui.byId("zernike-fields").hidden = fromFile;
+    ui.byId("measurement-fields").hidden = !fromFile;
+    ui.byId("measurement-summary").textContent = measurementSummaryText();
 
     const map = state.map;
     const summary = ui.byId("map-summary");
     if (map) {
       const parts = [`Shot ${map.shots.length}個、有効なMark ${map.marks.length}個`];
+      if (map.invalidMarks.length > 0) {
+        parts.push(`無効マーク ${map.invalidMarks.length}個`);
+      }
       if (map.excludedMarkCount > 0) {
         parts.push(`有効範囲外で外したMark ${map.excludedMarkCount}個`);
       }
@@ -494,6 +508,18 @@
     ui.byId("constraint-table-error").textContent =
       new Set(priorities).size === priorities.length ? "" : "オンにした制約の優先度が重複しています。1〜4を1回ずつ使ってください。";
     updateZernikeStatus();
+  }
+
+  /** 計測データのファイルの読み込みの結果（ファイル名と、Wafer・Markの数）。 */
+  function measurementSummaryText() {
+    const measurement = state.measurement;
+    if (!measurement) {
+      return "ファイルをまだ選んでいません。";
+    }
+    if (measurement.errors.length > 0) {
+      return `「${measurement.fileName}」は読めませんでした: ${measurement.errors[0]}`;
+    }
+    return `読み込んだファイル: ${measurement.fileName}。${ASC.measurementData.describeReport(state.map || measurement.map, measurement.report).join("。")}。`;
   }
 
   /** 補正の流れと推定手法の組み合わせの誤り（なければ空文字）。 */

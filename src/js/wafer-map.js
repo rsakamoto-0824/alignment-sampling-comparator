@@ -3,11 +3,14 @@
  *
  * マップの形:
  *   shots: [{ id, x, y, scan, markIndices, definedMarkCount }]   x, y はShot中心 [mm]
- *     definedMarkCount はShotに定義したMarkの数（有効範囲外も含む）。markIndices の数より多ければ
+ *     definedMarkCount はShotに定義したMarkの数（有効範囲外と無効マークも含む）。markIndices の数より多ければ
  *     「Markが揃わない端のShot」
  *
  *   marks: [{ shotIndex, markNo, x, y, u, v }] x, y はWafer座標 [mm]、u, v は正規化座標
- * marks には有効範囲（r < 有効半径）のMarkだけを入れる。
+ * marks には有効範囲（r < 有効半径）の、無効でないMarkだけを入れる。
+ *   invalidMarks: [{ shotId, markNo, x, y }] 無効マーク（計測データのファイルで、どれかのWaferで測れていないMark）。
+ *     計測の対象にせず、マップに印を変えて表示するだけ
+ *   inactiveShots: [{ id, x, y, scan }] 有効範囲の中のMarkがすべて無効マークのShot（表示だけ）
  */
 (function (root) {
   "use strict";
@@ -85,13 +88,16 @@
   }
 
   /**
-   * Shot・Markの記録からマップを組み立てる（生成とCSV読込で共通）。
-   * shotRecords: [{ id, x, y, scan, marks: [{ markNo, localX, localY }] }]
+   * Shot・Markの記録からマップを組み立てる（生成・CSV読込・計測データのファイルで共通）。
+   * shotRecords: [{ id, x, y, scan, marks: [{ markNo, localX, localY, invalid }] }]
+   *   invalid が true のMarkは無効マーク（計測の対象にしない。表示用に invalidMarks に入れる）
    */
   function buildMap(shotRecords, options) {
     const validRadius = options.validRadiusMm;
     const shots = [];
     const marks = [];
+    const invalidMarks = [];
+    const inactiveShots = [];
     // 有効範囲外として外したMarkの数（Shotごと外れたものは excludedShotCount で数える）
     let excludedMarkCount = 0;
     let excludedShotCount = 0;
@@ -99,18 +105,25 @@
 
     for (const record of shotRecords) {
       const validMarks = [];
+      const invalidInside = [];
       for (const mark of record.marks) {
         const x = record.x + mark.localX;
         const y = record.y + mark.localY;
         if (Math.hypot(x, y) < validRadius) {
-          validMarks.push({ markNo: mark.markNo, x, y });
+          (mark.invalid ? invalidInside : validMarks).push({ shotId: String(record.id), markNo: mark.markNo, x, y });
         }
       }
+      invalidInside.sort((left, right) => left.markNo - right.markNo);
+      invalidMarks.push(...invalidInside);
       if (validMarks.length === 0) {
-        excludedShotCount++;
+        if (invalidInside.length > 0) {
+          inactiveShots.push({ id: String(record.id), x: record.x, y: record.y, scan: record.scan });
+        } else {
+          excludedShotCount++;
+        }
         continue;
       }
-      excludedMarkCount += record.marks.length - validMarks.length;
+      excludedMarkCount += record.marks.length - validMarks.length - invalidInside.length;
       const shotIndex = shots.length;
       const shot = { id: String(record.id), x: record.x, y: record.y, scan: record.scan, markIndices: [], definedMarkCount: record.marks.length };
       validMarks.sort((left, right) => left.markNo - right.markNo);
@@ -132,6 +145,8 @@
     return {
       shots,
       marks,
+      invalidMarks,
+      inactiveShots,
       markNumbers: Array.from(markNumberSet).sort((a, b) => a - b),
       validRadiusMm: validRadius,
       shotWidthMm: options.shotWidthMm,
@@ -215,35 +230,6 @@
     return { map, errors: [] };
   }
 
-  /** CSVの1行をカンマで分ける（ダブルクォートで囲んだ値にも対応）。 */
-  function splitCsvLine(line) {
-    const cells = [];
-    let current = "";
-    let quoted = false;
-    for (let i = 0; i < line.length; i++) {
-      const character = line[i];
-      if (quoted) {
-        if (character === '"' && line[i + 1] === '"') {
-          current += '"';
-          i++;
-        } else if (character === '"') {
-          quoted = false;
-        } else {
-          current += character;
-        }
-      } else if (character === '"') {
-        quoted = true;
-      } else if (character === ",") {
-        cells.push(current.trim());
-        current = "";
-      } else {
-        current += character;
-      }
-    }
-    cells.push(current.trim());
-    return cells;
-  }
-
   /**
    * CSV（1行1Mark）を読み込んでマップを作る。
    * 誤りは「何行目の何が、どう直せばよいか」を返す。
@@ -251,7 +237,7 @@
   function parseMapCsv(text, options) {
     const errors = [];
     const lines = text.replace(/^﻿/, "").split(/\r\n|\n|\r/);
-    const headerCells = splitCsvLine(lines[0] || "").map((cell) => cell.toLowerCase());
+    const headerCells = ASC.tableReader.splitCsvLine(lines[0] || "").map((cell) => cell.toLowerCase());
     const columnIndex = {};
     for (const name of CSV_COLUMNS) {
       const index = headerCells.indexOf(name.toLowerCase());
@@ -270,7 +256,7 @@
       if (line.trim() === "") {
         continue;
       }
-      const cells = splitCsvLine(line);
+      const cells = ASC.tableReader.splitCsvLine(line);
       const read = (name) => cells[columnIndex[name]] ?? "";
       const shotId = read("ShotId");
       const numbers = {};

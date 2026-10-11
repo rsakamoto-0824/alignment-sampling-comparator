@@ -28,6 +28,13 @@
     { key: "noise", label: "計測ノイズ", shortLabel: "ノイズ" },
     { key: "measured", label: "計測値（真のずれ＋ノイズ）", shortLabel: "計測値" },
   ];
+  // 計測データのファイルから読んだ評価データの成分（計測値だけ。成分には分けられない）
+  const FILE_COMPONENTS = [{ key: "measured", label: "計測値（ファイルの値）", shortLabel: "計測値" }];
+
+  /** 評価データの成分の一覧（乱数で作ったデータか、ファイルから読んだデータかで変わる）。 */
+  function componentsOf(data) {
+    return data && data.source === C.DATA_SOURCE_FILE ? FILE_COMPONENTS : COMPONENTS;
+  }
 
   /** Zernike各項の初期設定。5次以下と6次以上で大きさを分ける。 */
   function defaultTermSettings(lowOrderAmplitudeNm, highOrderAmplitudeNm) {
@@ -74,6 +81,7 @@
   /**
    * 評価データを作る。
    * 戻り値の truthX などは Float64Array で、並びは [wafer * markCount + markIndex]。
+   * （計測データのファイルから作る評価データは measurement-data.js。形は同じで source が "file"）
    */
   function generateEvaluationData(map, settings) {
     const errors = validateSettings(settings);
@@ -138,6 +146,7 @@
 
     return {
       data: {
+        source: C.DATA_SOURCE_ZERNIKE,
         waferCount,
         markCount,
         truthX,
@@ -165,6 +174,12 @@
    */
   function waferComponents(data, wafer) {
     const markCount = data.markCount;
+    if (data.source === C.DATA_SOURCE_FILE) {
+      const offset = wafer * markCount;
+      return {
+        measured: { x: data.truthX.slice(offset, offset + markCount), y: data.truthY.slice(offset, offset + markCount) },
+      };
+    }
     const termCount = data.fringeIndices.length;
     const expressible = data.fringeIndices.map((fringe) => ASC.zernike.termByFringe(fringe).polynomialExpressible);
     const result = {};
@@ -191,5 +206,5 @@
     return result;
   }
 
-  ASC.evaluationData = { defaultTermSettings, generateEvaluationData, waferComponents, COMPONENTS, MAX_WAFER_COUNT };
+  ASC.evaluationData = { defaultTermSettings, generateEvaluationData, waferComponents, componentsOf, COMPONENTS, MAX_WAFER_COUNT };
 })(typeof window !== "undefined" ? window : globalThis);

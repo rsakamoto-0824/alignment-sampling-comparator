@@ -1,14 +1,16 @@
 /**
  * ブラウザ版（JavaScript）の計算結果を、Python版・MATLAB版の照合用の基準データ（JSON）として書き出す。
  * 実行: node tools/export_reference.js
- * 出力: tests/reference/scenario_a.json, scenario_b.json, scenario_c.json
+ * 出力: tests/reference/scenario_a.json 〜 scenario_d.json
  *
- * 3つの場面を用意する。どの場面も、制約なし・制約付きのD最適・I最適を含む6つの選び方と手動プランを評価し、
- * 「計画を作成」（制約付きD最適・I最適）の点と、選択点のCSVも書き出す。
+ * 4つの場面を用意する。どの場面も、制約なし・制約付きのD最適・I最適を含む6つの選び方と手動プランを評価し、
+ * 「計画を作成」（制約なし・制約付きのD最適・I最適）の点と、選択点のCSVも書き出す。
  *   A: 初期設定を小さくしたもの（一筆書きのScan方向、端のShotも選ぶ。スイープを含む）
  *   B: 市松のScan方向・端のShotを選ばない・強制計測Shot・除外Shot（手動プランに除外Shotを入れる）・ソフト制約・
  *      比例配分・ガウス基底のRBF・Matérn のGP・正規分布・RMS正規化・Scanのずれ・XとYで違う多項式の項
  *   C: 一筆書きを右下から・最初はDown、強制計測Shot、スイープで選ぶ選び方を絞る（端のShotでMark数が選び方ごとに違う）
+ *   D: 計測データのファイル（samples/sample_measurements.csv）からマップと評価データを作る（無効マーク・重複行・
+ *      行のないMarkを含む。強制計測Shotに無効マークのあるShot、除外Shot）
  */
 "use strict";
 
@@ -17,7 +19,7 @@ const path = require("path");
 const vm = require("vm");
 
 const ROOT = path.join(__dirname, "..");
-for (const file of ["constants.js", "math-utils.js", "zernike.js", "wafer-map.js", "evaluation-data.js", "correction.js", "constraints.js", "sampling.js", "evaluator.js"]) {
+for (const file of ["constants.js", "math-utils.js", "zernike.js", "table-reader.js", "wafer-map.js", "evaluation-data.js", "measurement-data.js", "correction.js", "constraints.js", "sampling.js", "evaluator.js"]) {
   vm.runInThisContext(fs.readFileSync(path.join(ROOT, "src", "js", file), "utf8"), { filename: file });
 }
 const ASC = globalThis.ASC;
@@ -88,6 +90,36 @@ function scenarioC() {
   return { name: "C", settings, manualShotIds: ["1", "5", "16", "27", "38", "49", "60", "71", "82", "93", "14", "35", "56", "77", "88", "104"] };
 }
 
+function scenarioD() {
+  const settings = baseSettings();
+  settings.evaluationData.source = ASC.constants.DATA_SOURCE_FILE;
+  settings.sampling.shotCount = 16;
+  settings.sampling.draws = 3;
+  settings.sampling.optimalStarts = 2;
+  settings.constraints.mandatoryShotIds = ["30"];
+  settings.constraints.excludedShotIds = ["12"];
+  return {
+    name: "D",
+    settings,
+    measurementFile: "samples/sample_measurements.csv",
+    manualShotIds: ["5", "16", "27", "30", "38", "49", "60", "71", "82", "93", "104"],
+  };
+}
+
+/** 場面のマップと評価データ（計測データのファイルの場面なら、ファイルから作る）。 */
+function mapAndData(scenario) {
+  if (scenario.measurementFile) {
+    const table = ASC.tableReader.parseCsvText(fs.readFileSync(path.join(ROOT, scenario.measurementFile), "utf8"));
+    const built = ASC.measurementData.buildFromTable(table, scenario.settings.map);
+    if (built.errors.length > 0) {
+      throw new Error(built.errors.join(" / "));
+    }
+    return built;
+  }
+  const map = ASC.waferMap.generateWaferMap(scenario.settings.map).map;
+  return { map, data: ASC.evaluationData.generateEvaluationData(map, scenario.settings.evaluationData).data, report: null };
+}
+
 function round(value) {
   return Number.isFinite(value) ? value : null;
 }
@@ -146,8 +178,7 @@ function setsOf(output) {
 }
 
 async function exportScenario(scenario, withSweep) {
-  const map = ASC.waferMap.generateWaferMap(scenario.settings.map).map;
-  const data = ASC.evaluationData.generateEvaluationData(map, scenario.settings.evaluationData).data;
+  const { map, data, report } = mapAndData(scenario);
   const shotIndexById = new Map(map.shots.map((shot, index) => [shot.id, index]));
   const manualPlans = [{ key: "manual:1", label: "手動の例", shotIndices: scenario.manualShotIds.map((id) => shotIndexById.get(id)) }];
   const output = await ASC.evaluator.runEvaluation({ map, data, settings: scenario.settings, manualPlans }, () => {}, () => false);
@@ -158,6 +189,7 @@ async function exportScenario(scenario, withSweep) {
     scenario: scenario.name,
     generatedBy: "tools/export_reference.js",
     settings: scenario.settings,
+    measurementFile: scenario.measurementFile || null,
     manualShotIds: scenario.manualShotIds,
     map: {
       shotCount: map.shots.length,
@@ -166,7 +198,13 @@ async function exportScenario(scenario, withSweep) {
       shotIds: map.shots.map((shot) => shot.id),
       scans: map.shots.map((shot) => shot.scan),
       definedMarkCounts: map.shots.map((shot) => shot.definedMarkCount),
+      invalidMarks: map.invalidMarks.map((mark) => [mark.shotId, mark.markNo, mark.x, mark.y]),
+      inactiveShotIds: map.inactiveShots.map((shot) => shot.id),
+      excludedMarkCount: map.excludedMarkCount,
     },
+    measurement: report
+      ? { waferNames: report.waferNames, rowCount: report.rowCount, duplicateRows: report.duplicateRows, unmeasuredValues: report.unmeasuredValues, invalidMarks: report.invalidMarks, waferMissing: report.waferMissing }
+      : null,
     data: {
       truthX0: Array.from(data.truthX.subarray(0, data.markCount)),
       truthYLast: Array.from(data.truthY.subarray((data.waferCount - 1) * data.markCount)),
@@ -184,7 +222,7 @@ async function exportScenario(scenario, withSweep) {
     criteriaReference: output.criteriaReference,
     baseline: ASC.evaluator.summarizeStore(output.baselines.allMarks.howa).x.rms.mean,
   };
-  // 「計画を作成」の点（評価の制約付きD最適・I最適と同じになる）と、選択点のCSV（計画の制約付きD最適）
+  // 「計画を作成」の点（評価の同じ選び方と同じになる）と、選択点のCSV（計画の最初の選び方）
   const plan = ASC.evaluator.runPlan({ map, settings: scenario.settings });
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join(" / "));
@@ -208,7 +246,7 @@ async function exportScenario(scenario, withSweep) {
 async function main() {
   const outputDirectory = path.join(ROOT, "tests", "reference");
   fs.mkdirSync(outputDirectory, { recursive: true });
-  for (const [scenario, withSweep] of [[scenarioA(), true], [scenarioB(), false], [scenarioC(), true]]) {
+  for (const [scenario, withSweep] of [[scenarioA(), true], [scenarioB(), false], [scenarioC(), true], [scenarioD(), false]]) {
     const started = Date.now();
     const result = await exportScenario(scenario, withSweep);
     const file = path.join(outputDirectory, `scenario_${scenario.name.toLowerCase()}.json`);

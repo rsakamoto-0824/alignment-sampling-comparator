@@ -525,8 +525,9 @@
   }
 
   /**
-   * 制約付きD最適・I最適の「計画」だけを作る（評価データと補正は使わない）。
-   * 同じ設定なら、評価（runEvaluation）の制約付きD最適・I最適と同じ点を選ぶ。
+   * D最適・I最適（制約なし・制約付き）の「計画」だけを作る（評価データと補正は使わない）。
+   * 同じ設定なら、評価（runEvaluation）の同じ選び方と同じ点を選ぶ。制約の満たし具合は、制約なしの選び方でも
+   * 今の制約で判定する（評価と同じ）。
    * input: { map, settings }
    * 戻り値: { errors, context, relaxed, failedMethods, methods, sets, criteriaReference, criteriaSameTerms }
    *   sets は describeSet の形（results などの評価の値は持たない）

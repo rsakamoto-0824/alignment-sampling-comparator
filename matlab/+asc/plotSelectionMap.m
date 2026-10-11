@@ -1,5 +1,5 @@
 function ax = plotSelectionMap(waferMap, selectionSet, titleText, zones, ax, mandatoryShots)
-%PLOTSELECTIONMAP Waferマップに、選んだShot（塗り）・測るMark（濃い点）・Shot番号・Scan方向（▲▼）を描く。
+%PLOTSELECTIONMAP Waferマップに、選んだShot（塗り）・測るMark（濃い点）・Shot番号・Scan方向（▲▼）・無効マーク（✕）を描く。
 %   selectionSet は output.sets(s)（shotIndices, markIndices を持つ構造体）。zones を渡すと同心円の区切りも描く。
 %   mandatoryShots（Shotの番号。省略可）を渡すと、強制計測Shotを太い枠で示す。
 
@@ -40,6 +40,15 @@ for shot = 1:numel(waferMap.shotIds)
 end
 plot(ax, waferMap.markX(~measured), waferMap.markY(~measured), 'o', 'MarkerSize', 2, 'MarkerEdgeColor', colors.guide, 'MarkerFaceColor', 'w');
 plot(ax, waferMap.markX(measured), waferMap.markY(measured), 'o', 'MarkerSize', 3.5, 'MarkerEdgeColor', colors.measured, 'MarkerFaceColor', colors.measured);
+% 計測データのファイルで作ったマップ: 無効マークを ✕ で、Markがすべて無効のShotを破線の枠で描く（計測の対象にしない）
+if isfield(waferMap, 'invalidMarkX')
+    for k = 1:numel(waferMap.inactiveShotIds)
+        rectangle(ax, 'Position', [waferMap.inactiveShotX(k) - width / 2, waferMap.inactiveShotY(k) - height / 2, width, height], ...
+            'EdgeColor', colors.shotEdge, 'LineStyle', '--', 'LineWidth', 0.5);
+        text(ax, waferMap.inactiveShotX(k), waferMap.inactiveShotY(k) + 5.5, waferMap.inactiveShotIds{k}, 'HorizontalAlignment', 'center', 'FontSize', 5, 'Color', colors.guide);
+    end
+    plot(ax, waferMap.invalidMarkX, waferMap.invalidMarkY, 'x', 'MarkerSize', 4, 'Color', colors.invalidMark, 'LineWidth', 0.8);
+end
 drawWafer(ax, zones, C, colors);
 title(ax, titleText);
 hold(ax, 'off');

@@ -432,6 +432,26 @@ legend {
   margin: var(--space-1) 0 var(--space-3);
 }
 
+.hint-list {
+  color: var(--ink-2);
+  margin: var(--space-1) 0 var(--space-3);
+  padding-left: var(--space-5);
+}
+
+.hint-list li {
+  margin-bottom: var(--space-1);
+}
+
+/* 設定欄の中の注意書き（ほかの欄の設定で、この欄の一部が使われないときなど） */
+.notice-inline {
+  margin: var(--space-2) 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 4px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent-wash);
+  color: var(--ink-1);
+}
+
 .field-error {
   color: var(--critical-ink);
   margin: var(--space-1) 0 0;
@@ -783,6 +803,28 @@ th.number {
   pointer-events: none;
 }
 
+/* 無効マーク（計測データのファイルで、どれかのWaferで測れていないMark）は ✕ で示す */
+.map-invalid-mark {
+  stroke: var(--critical-ink);
+  stroke-width: 0.7;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.map-shot-label.inactive {
+  fill: var(--ink-muted);
+  font-weight: 400;
+}
+
+/* Markがすべて無効マークのShot（選べない）は、破線の枠だけ描く */
+.map-inactive-shot {
+  fill: none;
+  stroke: var(--axis);
+  stroke-width: 0.5;
+  stroke-dasharray: 2 1.5;
+  pointer-events: none;
+}
+
 .map-mandatory {
   fill: none;
   stroke: var(--ink-1);
@@ -1092,10 +1134,95 @@ th[scope="row"] {
   font-size: 13px;
 }
 
-.chart-box:hover,
-.chart-box:focus-visible {
+/* ---- 分布の図（箱ひげ図に分布の形を重ねたもの） ---- */
+
+/* 選び方ごとの帯（1つおき）。区切り線の代わりに薄い面で群を分ける */
+.chart-band {
+  fill: var(--surface-2);
+  opacity: 0.55;
+}
+
+.chart-group-label {
+  fill: var(--ink-1);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.chart-axis-title {
+  fill: var(--ink-2);
+  font-size: 13px;
+}
+
+.chart-row-hit {
+  fill: transparent;
+}
+
+.chart-row:hover .chart-row-hit,
+.chart-row:focus-visible .chart-row-hit {
+  fill: var(--accent-wash);
+}
+
+.chart-row:focus-visible {
   outline: none;
-  filter: brightness(1.12);
+}
+
+.chart-row:focus-visible .chart-row-hit {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+/* 分布の形は面を薄く、縁だけ少し濃くする（データの棒より目立たせない） */
+.chart-violin {
+  fill-opacity: 0.16;
+  stroke-opacity: 0.55;
+  stroke-width: 1;
+}
+
+.chart-dot {
+  fill-opacity: 0.6;
+  stroke: var(--surface-1);
+  stroke-width: 1;
+}
+
+/* 中央値は背景色で抜いた丸（棒の上でも見えるように、系列の色の縁を付ける） */
+.chart-median {
+  fill: var(--surface-1);
+  stroke-width: 2;
+}
+
+.chart-reference-line {
+  stroke: var(--ink-2);
+  stroke-width: 1.2;
+  stroke-dasharray: 5 4;
+}
+
+.chart-reference-label {
+  fill: var(--ink-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-2);
+  font-size: var(--font-size-small);
+}
+
+.chart-key li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.chart-key-symbol {
+  width: 44px;
+  height: 20px;
+  flex: none;
 }
 
 .chart-tooltip {

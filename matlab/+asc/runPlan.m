@@ -1,6 +1,7 @@
 function plan = runPlan(waferMap, settings)
-%RUNPLAN 制約付きD最適・I最適の「計画」だけを作る（評価データと補正は使わない）。
-%   同じ設定なら、評価（asc.runEvaluation）の制約付きD最適・I最適と同じ点を選ぶ（アプリの「計画を作成」と同じ）。
+%RUNPLAN D最適・I最適（制約なし・制約付き）の「計画」だけを作る（評価データと補正は使わない）。
+%   同じ設定なら、評価（asc.runEvaluation）の同じ選び方と同じ点を選ぶ（アプリの「計画を作成」と同じ）。
+%   制約の満たし具合は、制約なしの選び方でも今の制約で判定する（評価と同じ）。
 %
 %   plan.methods(m)      選んだ選び方（key, label, usesDraws, manual）
 %   plan.sets(s)         選んだ点（method, draw, shotIndices, markIndices, criteria, status など。評価の値は持たない）

@@ -7,13 +7,16 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+const zlib = require("zlib");
 
 const SOURCE_FILES = [
   "constants.js",
   "math-utils.js",
   "zernike.js",
+  "table-reader.js",
   "wafer-map.js",
   "evaluation-data.js",
+  "measurement-data.js",
   "correction.js",
   "constraints.js",
   "sampling.js",
@@ -47,6 +50,150 @@ function assertClose(actual, expected, tolerance, label) {
 }
 
 // ---- 共通の準備 --------------------------------------------------------------
+
+const SAMPLE_MEASUREMENTS = path.join(__dirname, "..", "samples", "sample_measurements.csv");
+const NUMBER_TEXT = /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/;
+
+function xmlEscape(text) {
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** 列の番号（0始まり）をExcelの列の文字にする。 */
+function columnLetters(index) {
+  let letters = "";
+  for (let value = index + 1; value > 0; value = Math.floor((value - 1) / 26)) {
+    letters = String.fromCharCode(65 + ((value - 1) % 26)) + letters;
+  }
+  return letters;
+}
+
+/** ZIP（deflate）にまとめる。files: [{ name, text }] */
+function makeZip(files) {
+  const locals = [];
+  const directory = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = Buffer.from(file.name, "utf8");
+    const raw = Buffer.from(file.text, "utf8");
+    const compressed = zlib.deflateRawSync(raw);
+    const crc = zlib.crc32(raw);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(raw.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    locals.push(local, name, compressed);
+    const entry = Buffer.alloc(46);
+    entry.writeUInt32LE(0x02014b50, 0);
+    entry.writeUInt16LE(20, 4);
+    entry.writeUInt16LE(20, 6);
+    entry.writeUInt16LE(8, 10);
+    entry.writeUInt32LE(crc, 16);
+    entry.writeUInt32LE(compressed.length, 20);
+    entry.writeUInt32LE(raw.length, 24);
+    entry.writeUInt16LE(name.length, 28);
+    entry.writeUInt32LE(offset, 42);
+    directory.push(entry, name);
+    offset += 30 + name.length + compressed.length;
+  }
+  const directoryBuffer = Buffer.concat(directory);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(directoryBuffer.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return new Uint8Array(Buffer.concat([...locals, directoryBuffer, end]));
+}
+
+/**
+ * 小さなxlsxを作る（テスト用）。sheets: [{ name, rows: [[値]] }]。値は文字か、{ number: "数値の文字" }、
+ * { inline: "文字" }（セルの中に直接書く文字）、{ text, phonetic }（ふりがな付きの共有文字列）。
+ */
+function makeXlsx(sheets) {
+  const shared = [];
+  const sharedIndex = new Map();
+  const sharedOf = (key, xml) => {
+    if (!sharedIndex.has(key)) {
+      sharedIndex.set(key, shared.length);
+      shared.push(xml);
+    }
+    return sharedIndex.get(key);
+  };
+  const sheetXml = (rows) =>
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows
+      .map((row, rowIndex) => {
+        const cells = row
+          .map((value, columnIndex) => {
+            const ref = `${columnLetters(columnIndex)}${rowIndex + 1}`;
+            if (value === "" || value === null) {
+              return "";
+            }
+            if (typeof value === "object" && value.number !== undefined) {
+              return `<c r="${ref}" s="1"><v>${value.number}</v></c>`;
+            }
+            if (typeof value === "object" && value.inline !== undefined) {
+              return `<c r="${ref}" t="inlineStr"><is><t>${xmlEscape(value.inline)}</t></is></c>`;
+            }
+            if (typeof value === "object" && value.phonetic !== undefined) {
+              const index = sharedOf(`p:${value.text}`, `<si><r><t>${xmlEscape(value.text)}</t></r><rPh sb="0" eb="1"><t>${xmlEscape(value.phonetic)}</t></rPh></si>`);
+              return `<c r="${ref}" t="s"><v>${index}</v></c>`;
+            }
+            const index = sharedOf(`s:${value}`, `<si><t xml:space="preserve">${xmlEscape(value)}</t></si>`);
+            return `<c r="${ref}" t="s"><v>${index}</v></c>`;
+          })
+          .join("");
+        return `<row r="${rowIndex + 1}">${cells}</row>`;
+      })
+      .join("")}</sheetData></worksheet>`;
+  const sheetFiles = sheets.map((sheet, index) => ({ name: `xl/worksheets/sheet${index + 1}.xml`, text: sheetXml(sheet.rows) }));
+  return makeZip([
+    { name: "[Content_Types].xml", text: '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>' },
+    {
+      name: "xl/workbook.xml",
+      text: `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><workbookPr/><sheets>${sheets
+        .map((sheet, index) => `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`)
+        .join("")}</sheets></workbook>`,
+    },
+    {
+      name: "xl/_rels/workbook.xml.rels",
+      text: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets
+        .map((sheet, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`)
+        .join("")}</Relationships>`,
+    },
+    ...sheetFiles,
+    { name: "xl/sharedStrings.xml", text: `<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${shared.join("")}</sst>` },
+  ]);
+}
+
+/** 見本の計測データ（CSV）を表として読む。 */
+async function sampleMeasurementTable() {
+  return ASC.tableReader.readTableBytes("sample_measurements.csv", new Uint8Array(fs.readFileSync(SAMPLE_MEASUREMENTS)));
+}
+
+/** 見本の計測データの値（重複を平均した値）。key: "Wafer|shotNo|markNo" → { x: [値], y: [値] }（有効な値だけ） */
+function sampleMeasuredValues() {
+  const lines = fs.readFileSync(SAMPLE_MEASUREMENTS, "utf8").trim().split(/\r\n/);
+  const header = lines[0].split(",");
+  const column = (name) => header.indexOf(name);
+  const values = new Map();
+  for (const line of lines.slice(1)) {
+    const cells = line.split(",");
+    const key = `${cells[column("Wafer")]}|${cells[column("shotNo")]}|${cells[column("markNo")]}`;
+    const entry = values.get(key) || { x: [], y: [] };
+    if (cells[column("StsX")] === "0") {
+      entry.x.push(Number(cells[column("measX")]));
+    }
+    if (cells[column("StsY")] === "0") {
+      entry.y.push(Number(cells[column("measY")]));
+    }
+    values.set(key, entry);
+  }
+  return values;
+}
 
 function defaultMap() {
   const settings = ASC.defaultSettings();
@@ -973,24 +1120,26 @@ async function main() {
     assert(freeSet.status.mandatory && freeSet.status.rows.length === 3, "制約なしの選び方にも制約の満たし具合を出していません");
   });
 
-  await test("計画を作成: 評価データを使わずに制約付きD最適・I最適を選び、評価と同じ点になる", async () => {
+  await test("計画を作成: 評価データを使わずに制約なし・制約付きのD最適・I最適を選び、評価と同じ点になる", async () => {
     const map = defaultMap();
     const settings = ASC.defaultSettings();
     settings.evaluationData = defaultEvaluationSettings({ waferCount: 2 });
     settings.sampling.optimalStarts = 2;
-    settings.sampling.methods = { random: false, poisson: false, dOptimal: false, iOptimal: false, constrainedD: true, constrainedI: true };
+    settings.sampling.methods = { random: false, poisson: false, dOptimal: true, iOptimal: true, constrainedD: true, constrainedI: true };
     settings.model.flows = { howa: true, estimateThenHowa: false };
     settings.constraints.mandatoryShotIds = ["30", "75"];
     settings.constraints.excludedShotIds = ["52"];
     const plan = ASC.evaluator.runPlan({ map, settings });
     assert(plan.errors.length === 0, plan.errors.join(" / "));
-    assert(plan.sets.map((set) => set.method).join(",") === "constrainedD,constrainedI", "計画の選び方が違います");
+    assert(plan.sets.map((set) => set.method).join(",") === "dOptimal,iOptimal,constrainedD,constrainedI", "計画の選び方が違います");
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
     const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
     for (const set of plan.sets) {
       const evaluated = output.sets.find((entry) => entry.method === set.method);
       assert(set.shotIndices.join(",") === evaluated.shotIndices.join(","), `${set.method}: 計画と評価で選んだShotが違います`);
-      assert(ASC.constraints.statusRows(set.status).every((row) => row.ok), `${set.method}: 制約を満たしていません`);
+      if (ASC.constants.METHODS.find((method) => method.key === set.method).constrained) {
+        assert(ASC.constraints.statusRows(set.status).every((row) => row.ok), `${set.method}: 制約を満たしていません`);
+      }
       assert(!set.results, "計画に評価の値が入っています");
     }
     const broken = ASC.evaluator.runPlan({ map, settings: Object.assign({}, settings, { constraints: Object.assign({}, settings.constraints, { mandatoryShotIds: ["0"] }) }) });
@@ -1013,6 +1162,124 @@ async function main() {
     }
     const parsed = ASC.waferMap.parseMapCsv(csv, { validRadiusMm: 150, shotWidthMm: 26, shotHeightMm: 33 });
     assert(parsed.errors.length === 0 && parsed.map.marks.length === rows.length, "選択点のCSVをマップのCSVとして読めません");
+  });
+
+  // ---- 計測データのファイル ----
+
+  await test("計測データのファイル（CSV）: マップと評価データを作り、無効マーク・重複行・未測定を扱う", async () => {
+    const settings = ASC.defaultSettings();
+    const result = ASC.measurementData.buildFromTable(await sampleMeasurementTable(), settings.map);
+    assert(result.errors.length === 0, result.errors.join(" / "));
+    const { map, data, report } = result;
+    assert(data.waferCount === 5 && report.waferNames[0] === "SAMPLE01-01", "Waferの数か名前が違います");
+    const invalid = report.invalidMarks.map((mark) => `${mark.shotId}-${mark.markNo}`).join(",");
+    assert(invalid === "30-3,45-1,45-2,45-3,45-4,61-2", `無効マークが違います: ${invalid}`);
+    assert(map.inactiveShots.length === 1 && map.inactiveShots[0].id === "45", "すべて無効マークのShotを選べないShotにしていません");
+    assert(!map.shots.some((shot) => shot.id === "45"), "すべて無効マークのShotがマップに入っています");
+    assert(report.duplicateRows === 1, "重複行の数が違います");
+    const shot30 = map.shots.find((shot) => shot.id === "30");
+    assert(shot30.markIndices.length === 3 && shot30.definedMarkCount === 4 && ASC.constraints.isIncompleteShot(shot30), "無効マークのあるShotをMarkが揃わないShotにしていません");
+    assert(!shot30.markIndices.some((index) => map.marks[index].markNo === 3), "無効マークを計測の対象に入れています");
+    // 生成したマップ（初期設定）と比べると、無効マークの6個とすべて無効のShotの1個だけ少ない
+    const generated = ASC.waferMap.generateWaferMap(settings.map).map;
+    assert(map.marks.length === generated.marks.length - 6 && map.shots.length === generated.shots.length - 1, "Mark・Shotの数が違います");
+    assert(map.shots.map((shot) => shot.scan).join() === generated.shots.filter((shot) => shot.id !== "45").map((shot) => shot.scan).join(), "Direction（1 = Up、2 = Down）の読み方が違います");
+    // 計測値は、有効な値の平均（重複行はX・Yそれぞれ平均）
+    const expected = sampleMeasuredValues();
+    data.waferNames.forEach((name, wafer) => {
+      map.marks.forEach((mark, markIndex) => {
+        const entry = expected.get(`${name}|${map.shots[mark.shotIndex].id}|${mark.markNo}`);
+        const mean = (values) => values.reduce((sum, value) => sum + value, 0) / values.length;
+        assertClose(data.truthX[wafer * data.markCount + markIndex], mean(entry.x), 1e-12, `Wafer ${name} Mark ${markIndex} X`);
+        assertClose(data.truthY[wafer * data.markCount + markIndex], mean(entry.y), 1e-12, `Wafer ${name} Mark ${markIndex} Y`);
+      });
+    });
+    assert(data.noiseX.every((value) => value === 0), "ファイルの評価データにノイズが入っています");
+  });
+
+  await test("計測データのファイル（xlsx）: CSVと同じ値を読む（共有文字列・ふりがな・日時の数値・空のセル・2枚目のシート）", async () => {
+    const lines = fs.readFileSync(SAMPLE_MEASUREMENTS, "utf8").trim().split(/\r\n/).slice(0, 600);
+    const header = lines[0].split(",");
+    const dateColumn = header.indexOf("DateTime");
+    // 見本の日時（2026/10/01 09:00:00）をExcelの日付の数値にする
+    const serial = String((Date.UTC(2026, 9, 1, 9) - Date.UTC(1899, 11, 30)) / 86400000);
+    const rows = lines.map((line, lineIndex) =>
+      line.split(",").map((cell, column) => {
+        if (lineIndex === 0) {
+          return column === 0 ? { text: cell, phonetic: "ウェハ" } : cell;
+        }
+        if (column === dateColumn) {
+          return { number: serial };
+        }
+        if (column === 0 && lineIndex % 2 === 0) {
+          return { inline: cell };
+        }
+        return NUMBER_TEXT.test(cell) ? { number: cell } : cell;
+      })
+    );
+    const bytes = makeXlsx([
+      { name: "メモ", rows: [["このシートは説明です"], ["見出しのない表"]] },
+      { name: "data", rows },
+    ]);
+    const xlsxTable = await ASC.tableReader.readTableBytes("計測.xlsx", bytes);
+    const csvTable = ASC.tableReader.parseCsvText(lines.join("\r\n"));
+    const settings = ASC.defaultSettings();
+    const fromXlsx = ASC.measurementData.buildFromTable(xlsxTable, settings.map);
+    const fromCsv = ASC.measurementData.buildFromTable(csvTable, settings.map);
+    assert(fromXlsx.errors.length === 0, fromXlsx.errors.join(" / "));
+    assert(fromXlsx.report.sheetName === "data", "見出しのあるシートを選んでいません");
+    assert(xlsxTable.sheets[1].rows[1].cells[dateColumn] === serial, "日時のセルの値が違います");
+    assert(JSON.stringify(fromXlsx.report.waferNames) === JSON.stringify(fromCsv.report.waferNames), "Waferの名前がCSVと違います");
+    assert(JSON.stringify(fromXlsx.map.marks) === JSON.stringify(fromCsv.map.marks), "マップがCSVと違います");
+    assert(Array.from(fromXlsx.data.truthX).join() === Array.from(fromCsv.data.truthX).join(), "計測値XがCSVと違います");
+    assert(Array.from(fromXlsx.data.truthY).join() === Array.from(fromCsv.data.truthY).join(), "計測値YがCSVと違います");
+    assert(ASC.measurementData.excelSerialText(45346.939583333, false) === "2024/02/24 22:33:00", "Excelの日付の数値の読み方が違います");
+    let rejected = false;
+    try {
+      await ASC.tableReader.readTableBytes("古い.xls", bytes);
+    } catch (error) {
+      rejected = true;
+    }
+    assert(rejected, ".xls を読めないと知らせていません");
+  });
+
+  await test("計測データのファイル: 列の不足・読めない値・Shotの座標の食い違いを、行番号つきで知らせる", () => {
+    const options = ASC.defaultSettings().map;
+    const build = (text) => ASC.measurementData.buildFromTable(ASC.tableReader.parseCsvText(text), options);
+    const header = "Wafer,DateTime,shotNo,Direction,Xmm,Ymm,markNo,markXmm,markYmm,measX,measY,StsX,StsY";
+    const missing = build("Wafer,shotno,Direction\r\nW1,1,1\r\n");
+    assert(missing.errors.some((text) => text.includes("shotNo")), `列の不足を知らせていません: ${missing.errors.join(" / ")}`);
+    const badDirection = build(`${header}\r\nW1,,1,3,0,0,1,1,1,0.1,0.2,0,0\r\n`);
+    assert(badDirection.errors.some((text) => text.startsWith("2行目") && text.includes("Direction")), "Directionの誤りを知らせていません");
+    const moved = build(`${header}\r\nW1,,1,1,0,0,1,1,1,0.1,0.2,0,0\r\nW2,,1,1,5,0,1,1,1,0.1,0.2,0,0\r\n`);
+    assert(moved.errors.some((text) => text.startsWith("3行目") && text.includes("Xmm")), "Shotの座標の食い違いを知らせていません");
+    const ok = build(`${header}\r\nW1,,1,1,0,0,1,1,1,0.1,0.2,0,0\r\nW1,,1,1,0,0,2,-1,-1,0.3,0.4,0,-1\r\n`);
+    assert(ok.errors.length === 0 && ok.map.marks.length === 1 && ok.map.invalidMarks.length === 1, "StsY = -1 のMarkを無効マークにしていません");
+  });
+
+  await test("計測データのファイル: 読んだデータで評価と計画ができ、無効マークは選ばない", async () => {
+    const settings = ASC.defaultSettings();
+    settings.evaluationData.source = ASC.constants.DATA_SOURCE_FILE;
+    settings.sampling.draws = 2;
+    settings.sampling.optimalStarts = 1;
+    settings.model.flows = { howa: true, estimateThenHowa: false };
+    const { map, data } = ASC.measurementData.buildFromTable(await sampleMeasurementTable(), settings.map);
+    const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
+    assert(output.errors.length === 0, output.errors.join(" / "));
+    assert(output.waferCount === 5, "Wafer数が違います");
+    for (const method of output.methods) {
+      const rms = output.summary[method.key].variants.howa.x.rms.all.mean;
+      assert(Number.isFinite(rms) && rms > 0, `${method.key}: 残差を計算できていません`);
+    }
+    const plan = ASC.evaluator.runPlan({ map, settings });
+    assert(plan.errors.length === 0 && plan.sets.length === 4, "計画を作れません");
+    const shot30 = map.shots.findIndex((shot) => shot.id === "30");
+    for (const set of output.sets.concat(plan.sets)) {
+      assert(set.markIndices.every((index) => index < map.marks.length), "マップにないMarkを選んでいます");
+      if (set.shotIndices.includes(shot30)) {
+        assert(set.markIndices.filter((index) => map.marks[index].shotIndex === shot30).length === 3, "無効マークのあるShotで有効なMarkだけを測っていません");
+      }
+    }
   });
 
   // ---- 結果の表示 ----
