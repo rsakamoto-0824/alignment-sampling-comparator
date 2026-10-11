@@ -1,70 +1,42 @@
-function evaluation = evaluateSampleSet(waferMap, data, modelSettings, sampleIndices, variants, cache, withEstimation)
-%EVALUATESAMPLESET 1組の計測Markについて、補正ごと・軸ごとの残差の指標と、推定手法ごとの推定精度を求める。
-%   evaluation.results(v).x / .y      補正 variants(v) の残差の指標（rms, mean3sigma, max。各 Wafer数×1）
-%   evaluation.estimationKeys          推定精度を求めた推定手法（'howa' は多項式の予測）
-%   evaluation.estimation(e).x / .y    未計測Markでの推定誤差の指標
-%   evaluation.estimationSquares(e).x  Markごとの推定誤差の2乗和（全Wafer。計測Markは NaN）
-%   evaluation.gpChoices(v)            GPの流れで選んだ相関の長さ [mm] とノイズ比（全Wafer分）
+function evaluation = evaluateSampleSet(waferMap, data, modelSettings, sampleIndices, variants, cache)
+%EVALUATESAMPLESET 1組の計測Markについて、補正ごと・軸ごとの残差の指標と、GPRが選んだ調整値を求める。
+%   evaluation.results(v).x / .y   補正 variants(v) の残差の指標（rms, mean3sigma, max。各 Wafer数×1）
+%   evaluation.gpChoices(v)        GPRで選んだ相関の長さ [mm] とノイズ比（全Wafer分。GPR以外は空）
+%   補正できなかったとき（点が少ないなど）は、0のままだと「残差0」と誤解されるので値なし（NaN）にする。
 
 if nargin < 6 || isempty(cache)
     cache = asc.modelCache(waferMap);
 end
-if nargin < 7
-    withEstimation = true;
-end
 C = asc.constants();
 uv = cache.uv;
-markCount = size(uv, 1);
 sample = sampleIndices(:);
-unmeasured = setdiff((1:markCount)', sample);
-withEstimation = withEstimation && ~isempty(unmeasured);
 warnings = {};
 nanMetrics = struct('rms', NaN(data.waferCount, 1), 'mean3sigma', NaN(data.waferCount, 1), 'max', NaN(data.waferCount, 1));
+rbfSettings = struct('kernel', modelSettings.rbfKernel, 'lambda', modelSettings.rbfLambda, 'shapeFactor', modelSettings.rbfShapeFactor);
 
-selected = C.ESTIMATORS(arrayfun(@(e) isfield(modelSettings.estimators, e.key) && modelSettings.estimators.(e.key), C.ESTIMATORS));
-if withEstimation
-    estimatorList = selected;
-else
-    estimatorList = C.ESTIMATORS([]);
-end
+% 「予測」で使うRBF・GPRの予測の前準備（説明変数ごとに1回。XとYで共通）
+predictors = containers.Map('KeyType', 'char', 'ValueType', 'any');
 for v = 1:numel(variants)
-    estimator = variants(v).estimator;
-    if ~isempty(estimator) && ~any(strcmp({estimatorList.key}, estimator.key))
-        estimatorList(end + 1) = estimator; %#ok<AGROW>
+    variant = variants(v);
+    key = [variant.type ':' variant.features];
+    if ~strcmp(variant.mode, 'predict') || isKey(predictors, key)
+        continue
     end
-end
-prepared = struct();
-for estimator = estimatorList
-    if strcmp(estimator.type, 'rbf')
-        rbfSettings = struct('kernel', modelSettings.rbfKernel, 'lambda', modelSettings.rbfLambda, 'shapeFactor', modelSettings.rbfShapeFactor);
-        operator = asc.rbfOperator(uv, sample, rbfSettings, estimator.features);
-        entry = [];
-        if ~isempty(operator)
-            entry = struct('type', 'linear', 'operator', operator);
-        end
+    if strcmp(variant.type, 'rbf')
+        entry = asc.rbfOperator(uv, sample, rbfSettings, variant.features);
     else
-        gp = asc.prepareGp(uv, sample, estimator.features, modelSettings.gpKernel);
-        entry = [];
-        if ~isempty(gp)
-            entry = struct('type', 'gp', 'gp', gp);
-        end
+        entry = asc.prepareGp(uv, sample, variant.features, modelSettings.gpKernel);
     end
-    prepared.(estimator.key) = entry;
+    predictors(key) = entry;
     if isempty(entry)
-        warnings{end + 1} = sprintf('%s: 推定できませんでした（計測点が少なすぎるか、並びが偏っています）。', estimator.longLabel); %#ok<AGROW>
+        warnings{end + 1} = sprintf('%s: 予測できませんでした（計測点が少なすぎるか、並びが偏っています）。', variant.label); %#ok<AGROW>
     end
 end
 
-if withEstimation
-    estimationKeys = [{'howa'}, {selected.key}];
-else
-    estimationKeys = {};
-end
 results = repmat(struct('x', [], 'y', []), 1, numel(variants));
-estimation = repmat(struct('x', [], 'y', []), 1, numel(estimationKeys));
-estimationSquares = repmat(struct('x', [], 'y', []), 1, numel(estimationKeys));
 gpChoices = repmat(struct('lengthMm', [], 'noiseRatio', []), 1, numel(variants));
-howaCache = containers.Map('KeyType', 'char', 'ValueType', 'any');
+gprKernels = containers.Map('KeyType', 'char', 'ValueType', 'any');
+axisCache = containers.Map('KeyType', 'char', 'ValueType', 'any');
 
 for axisCell = {'x', 'y'}
     axisName = axisCell{1};
@@ -78,84 +50,103 @@ for axisCell = {'x', 'y'}
         noise = data.noiseY';
     end
     termKey = sprintf('%d,', terms);
-    if ~isKey(howaCache, termKey)
-        [allDesign, allLeastSquares] = cachedDesign(cache, terms);
-        parts = asc.prepareHowa(uv, sample, terms, allDesign, allLeastSquares);
-        warnings = [warnings, parts.warnings]; %#ok<AGROW>
-        operators = cell(1, numel(variants));
-        for v = 1:numel(variants)
-            estimator = variants(v).estimator;
-            if isempty(estimator)
-                operators{v} = parts.howa;
-            elseif ~isempty(prepared.(estimator.key)) && strcmp(prepared.(estimator.key).type, 'linear')
-                operators{v} = asc.estimateThenHowaOperator(parts, prepared.(estimator.key).operator, sample);
-            end
-        end
-        howaCache(termKey) = {parts, operators};
+    if ~isKey(axisCache, termKey)
+        axisCache(termKey) = prepareAxisModels(terms);
     end
-    cached = howaCache(termKey);
-    [parts, operators] = cached{:};
+    models = axisCache(termKey);
+    parts = models.parts;
     measured = truth(sample, :) + noise(sample, :);
-    howaCorrection = parts.howa * measured;
-
-    recordEstimation('howa', howaCorrection);
-    rawGp = struct();
-    for estimator = estimatorList
-        entry = prepared.(estimator.key);
-        if isempty(entry)
-            position = find(strcmp(estimationKeys, estimator.key), 1);
-            if ~isempty(position)
-                estimation(position).(axisName) = nanMetrics;
+    ols = [];
+    predicted = containers.Map('KeyType', 'char', 'ValueType', 'any');
+    for v = 1:numel(variants)
+        variant = variants(v);
+        model = models.entries{v};
+        if ~strcmp(variant.type, 'gp')
+            if isempty(model)
+                results(v).(axisName) = nanMetrics;
+            else
+                results(v).(axisName) = asc.residualMetrics(truth - model * measured);
             end
             continue
         end
-        if strcmp(entry.type, 'gp')
-            [values, lengths, ratios] = asc.gpPredict(entry.gp, measured);
-            rawGp.(estimator.key) = struct('values', values, 'lengths', lengths, 'ratios', ratios);
-            recordEstimation(estimator.key, values);
-        else
-            recordEstimation(estimator.key, entry.operator * measured);
+        if isempty(model)
+            results(v).(axisName) = nanMetrics;
+            continue
         end
-    end
-
-    for v = 1:numel(variants)
-        variant = variants(v);
-        if ~isempty(operators{v})
-            correction = operators{v} * measured;
-        else
-            entry = prepared.(variant.estimator.key);
-            if isempty(entry)
-                results(v).(axisName) = nanMetrics;
-                continue
+        if strcmp(variant.mode, 'predict')
+            % GPRで未計測Markを予測して全Markを埋め、全Markに多項式を当てはめる（学習は説明変数ごとに1回）
+            if ~isKey(predicted, variant.features)
+                [values, lengths, ratios] = asc.gpPredict(model, measured);
+                predicted(variant.features) = {values, lengths, ratios};
             end
-            % 推定→HOWA: 未計測Markを推定値で埋め、全Markに多項式を当てはめる（GPの学習は推定精度と同じ結果を使う）
-            raw = rawGp.(variant.estimator.key);
-            filled = raw.values;
+            fit = predicted(variant.features);
+            [values, lengths, ratios] = fit{:};
+            filled = values;
             filled(sample, :) = measured;
-            correction = parts.allDesign * (parts.allLeastSquares * filled);
-            lengths = raw.lengths;
-            ratios = raw.ratios;
-            finite = isfinite(lengths);
-            gpChoices(v).lengthMm = [gpChoices(v).lengthMm; lengths(finite)' * C.NORMALIZATION_RADIUS_MM];
-            gpChoices(v).noiseRatio = [gpChoices(v).noiseRatio; ratios(finite)'];
+            coefficients = parts.allLeastSquares * filled;
+        else
+            if isempty(ols)
+                olsCoefficients = parts.leastSquares * measured;
+                residual = measured - parts.sampleDesign * olsCoefficients;
+                exact = ~(sum(residual .^ 2, 1) > sum(measured .^ 2, 1) * C.EXACT_FIT_RATIO);
+                ols = struct('coefficients', olsCoefficients, 'residual', residual, 'exact', exact);
+            end
+            [coefficients, lengths, ratios] = asc.gprFit(model.kernelPart, model.prepared, measured, ols.residual, ols.coefficients, ols.exact);
         end
-        results(v).(axisName) = asc.residualMetrics(truth - correction);
+        results(v).(axisName) = asc.residualMetrics(truth - parts.allDesign * coefficients);
+        finite = isfinite(lengths);
+        gpChoices(v).lengthMm = [gpChoices(v).lengthMm; lengths(finite)' * C.NORMALIZATION_RADIUS_MM];
+        gpChoices(v).noiseRatio = [gpChoices(v).noiseRatio; ratios(finite)'];
     end
 end
-evaluation = struct('results', results, 'estimationKeys', {estimationKeys}, 'estimation', estimation, ...
-    'estimationSquares', estimationSquares, 'gpChoices', gpChoices);
+evaluation = struct('results', results, 'gpChoices', gpChoices);
 evaluation.warnings = unique(warnings, 'stable');
 
-    function recordEstimation(name, prediction)
-        position = find(strcmp(estimationKeys, name), 1);
-        if isempty(position)
-            return
+    function models = prepareAxisModels(terms)
+        % 1つの軸の、補正ごとの部品（線形の補正は 計測値 → 全Markの補正量 の行列、GPRは前準備）
+        [allDesign, allLeastSquares] = cachedDesign(cache, terms);
+        parts = asc.prepareHowa(uv, sample, terms, allDesign, allLeastSquares);
+        warnings = [warnings, parts.warnings];
+        entries = cell(1, numel(variants));
+        for k = 1:numel(variants)
+            variant = variants(k);
+            switch variant.type
+                case 'howa'
+                    entries{k} = parts.howa;
+                case 'measured'
+                    entries{k} = asc.measuredOperator(parts.howa, sample);
+                otherwise
+                    if strcmp(variant.mode, 'predict')
+                        predictor = predictors([variant.type ':' variant.features]);
+                        if isempty(predictor) || strcmp(variant.type, 'gp')
+                            entries{k} = predictor;
+                        else
+                            entries{k} = asc.estimateThenHowaOperator(parts, predictor, sample);
+                        end
+                    elseif strcmp(variant.type, 'rbf')
+                        polynomial = asc.rbfPolynomialOperator(uv, sample, parts.sampleDesign, rbfSettings, variant.features);
+                        if isempty(polynomial)
+                            warnings{end + 1} = sprintf('%s: RBFで多項式の係数を決められません（計測点が少なすぎるか、並びが偏っています）。', variant.label);
+                            entries{k} = [];
+                        else
+                            entries{k} = allDesign * polynomial;
+                        end
+                    else
+                        if ~isKey(gprKernels, variant.features)
+                            gprKernels(variant.features) = asc.prepareGprKernel(uv, sample, variant.features, modelSettings.gpKernel);
+                        end
+                        kernelPart = gprKernels(variant.features);
+                        prepared = asc.prepareGprPolynomial(kernelPart, parts.sampleDesign);
+                        if isempty(prepared)
+                            warnings{end + 1} = sprintf('%s: 多項式の項より2点以上多い計測点が必要です。', variant.label);
+                            entries{k} = [];
+                        else
+                            entries{k} = struct('kernelPart', kernelPart, 'prepared', prepared);
+                        end
+                    end
+            end
         end
-        errors = prediction(unmeasured, :) - truth(unmeasured, :);
-        squares = NaN(markCount, 1);
-        squares(unmeasured) = sum(errors.^2, 2);
-        estimationSquares(position).(axisName) = squares;
-        estimation(position).(axisName) = asc.residualMetrics(errors);
+        models = struct('parts', parts, 'entries', {entries});
     end
 end
 

@@ -6,7 +6,7 @@
 %
 % 流れ
 %   1. 準備  2. 設定  3. Waferマップと評価データ（乱数か、計測データのファイル）  4. 手動プランと、D・I最適の計画  5. 評価
-%   6. 表（残差・D/I基準と制約・推定精度）  7. 図  8. 計測点数のスイープ  9. CSVで保存
+%   6. 表（残差・D/I基準と制約）  7. 図  8. 計測点数のスイープ  9. CSVで保存
 %
 % 番号（Shot・Mark・選び方など）は MATLAB 版ではすべて1始まりです。
 
@@ -27,6 +27,7 @@ end
 % 選んだShotでは、そのShotに紐づくMark（有効範囲の中にあるもの）をすべて測ります。
 % Markが揃わない端のShotを選ばないときは settings.sampling.excludeIncompleteShots = true にします。
 % 強制計測Shot・除外Shotは settings.constraints.mandatoryShotIds・excludedShotIds に Shot番号の cell（{'30'; '45'}）で入れます。
+% 比べる補正（HOWA、RBF・GPRの式内と予測、計測値＋HOWA）は settings.model.corrections で選びます（例: settings.model.corrections.gpXY = false）。
 % アプリの「設定をJSONで保存」で作ったファイルがあれば、settingsFile に置き場所を書くと、そのまま読み込みます
 % （CSVのマップや手動プランも入ります）。
 settingsFile = '';  % 例: fullfile(scriptFolder, '設定_20261004-1200.json')
@@ -102,7 +103,7 @@ end
 
 %% 5. 評価を実行する
 % 選び方（ランダム・ポアソンディスク・D最適（制約なし）・I最適（制約なし）・制約付きD最適・制約付きI最適・手動プラン）
-% × 補正（HOWAのみ、推定→HOWA の推定手法ごと）で、全Waferの残差を求めます。数秒〜十数秒かかります。
+% × 補正（HOWA、RBF・GPRの式内と予測、計測値＋HOWA）で、全Waferの残差を求めます。十数秒かかります。
 tic;
 output = asc.runEvaluation(waferMap, data, settings, manualPlans);
 fprintf('評価にかかった時間: %.1f 秒\n', toc);
@@ -131,7 +132,7 @@ for m = 1:numel(output.methods)
 end
 disp(array2table(round(residualTable, 3), 'RowNames', methodNames, 'VariableNames', {output.variants.label}));
 baseline = asc.summarizeStore(output.baselines.allMarks);
-fprintf('全点計測（HOWAのみ）: %.3f nm\n', baseline.x.rms.mean);
+fprintf('全点計測（HOWA）: %.3f nm\n', baseline.x.rms.mean);
 
 %% 6-2 表: D基準・I基準と制約の満たし具合
 % D基準 log₁₀det(XᵀX) は大きいほど、I基準（予測分散の平均÷σ²）は小さいほど良い選び方です。
@@ -149,20 +150,7 @@ for m = 1:numel(output.methods)
 end
 disp(cell2table(criteriaRows, 'RowNames', methodNames, 'VariableNames', {'D基準', 'D効率_pct', 'I基準', 'I効率_pct', '制約'}));
 
-%% 6-3 表: 推定精度（未計測Markでの 推定値 − 真のずれ）
-% 「HOWA（多項式の予測）」より小さい推定手法なら、未計測Markを当てる力が多項式より上です。
-estimationTable = NaN(numel(output.methods), numel(output.estimationKeys));
-for m = 1:numel(output.methods)
-    for e = 1:numel(output.estimationKeys)
-        if ~isempty(output.summary(m).estimation(e).x)
-            estimationTable(m, e) = output.summary(m).estimation(e).x.rms.all.mean;
-        end
-    end
-end
-estimationNames = cellfun(@asc.estimationLabel, output.estimationKeys, 'UniformOutput', false);
-disp(array2table(round(estimationTable, 3), 'RowNames', methodNames, 'VariableNames', estimationNames));
-
-%% 7-1 図: 残差の分布（HOWAのみ と 推定→HOWA の各推定手法）
+%% 7-1 図: 残差の分布（補正ごと）
 % 各行に、分布の形（薄い山。値が20個より少なければ値の点）、5〜95%点の線、25〜75%点の太い棒、中央値の白丸を重ねます。
 % 縦の破線は全点計測の中央値です。useLogScale = true にすると横軸が対数になり、値の小さい選び方どうしの差が見やすくなります。
 useLogScale = false;
@@ -170,7 +158,7 @@ figure('Name', '残差の分布', 'Position', [100, 100, 1000, 1100]);
 asc.plotResidualBoxes(output, 'x', 'rms', gca, useLogScale);
 
 %% 7-2 図: 選び方ごとに選んだ点
-% ランダム・ポアソンは、残差（HOWAのみ）が中央の試行を表示します。
+% ランダム・ポアソンは、残差（HOWA）が中央の試行を表示します。
 figure('Name', '選んだ点', 'Position', [100, 100, 1500, 1500]);
 layout = tiledlayout(3, 3, 'TileSpacing', 'compact');
 for m = 1:numel(output.methods)
@@ -181,13 +169,6 @@ for m = 1:numel(output.methods)
     asc.plotSelectionMap(waferMap, entry, sprintf('%s（Mark %d個）', methodNames{m}, numel(entry.markIndices)), settings.zones, ...
         nexttile(layout), mandatoryShots);
 end
-
-%% 7-3 図: 推定誤差のマップ
-% 未計測Markごとに、全Waferの推定誤差をRMSにして色で示します。Wafer端など、推定を外しやすい場所が分かります。
-figure('Name', '推定誤差のマップ', 'Position', [100, 100, 1200, 550]);
-layout = tiledlayout(1, 2, 'TileSpacing', 'compact');
-asc.plotEstimationErrorMap(output, 'random', 'howa', 'x', [], nexttile(layout));
-asc.plotEstimationErrorMap(output, 'random', 'gpXYR', 'x', [], nexttile(layout));
 
 %% 8. 計測点数のスイープ（トレードオフカーブ）
 % 計測Shot数を変えながら評価します。比べる選び方は sweepSettings.methods で選びます（制約なしは破線、制約付きは実線）。

@@ -1,9 +1,8 @@
 """ノートブック用の図（matplotlib）。ブラウザ版の図に合わせた見た目にする。
 
   plot_selection_map   Waferマップに選んだShot・測るMark・Shot番号・無効マーク（✕）を描く
-  plot_residual_boxes  選び方 × 補正（HOWAのみ・推定→HOWA）の残差の分布の図（箱ひげ図に分布の形を重ねたもの）
+  plot_residual_boxes  選び方 × 補正（HOWA・RBF・GPR・計測値＋HOWA）の残差の分布の図（箱ひげ図に分布の形を重ねたもの）
   plot_sweep           計測Mark数（または計測Shot数）と精度のトレードオフカーブ
-  plot_estimation_error_map  未計測Markごとの推定誤差（全WaferのRMS）
 """
 
 import math
@@ -16,12 +15,12 @@ from matplotlib.patches import Circle, Rectangle
 from matplotlib.transforms import offset_copy
 
 from . import constants as C
-from .evaluator import estimation_label, summarize_store
+from .evaluator import summarize_store
 
 # 日本語を表示できるフォント（見つかった最初のものを使う。macOS・Windows の順）
 JAPANESE_FONTS = ["Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "BIZ UDGothic", "Noto Sans CJK JP", "IPAexGothic"]
-# 推定手法ごとの色（ブラウザ版と同じ）
-SERIES_COLORS = {"howa": "#2a78d6", "rbfXY": "#eb6834", "rbfXYR": "#1baf7a", "gpXY": "#eda100", "gpXYR": "#e87ba4"}
+# 補正の系統（family）ごとの色（ブラウザ版と同じ。RBF・GPRの式内と予測は同じ色で、式内を薄い塗りにする）
+SERIES_COLORS = {"howa": "#2a78d6", "rbfXY": "#eb6834", "rbfXYR": "#1baf7a", "gpXY": "#eda100", "gpXYR": "#e87ba4", "measured": "#008300"}
 # 選び方ごとの線の色・印・線の種類（ブラウザ版のスイープと同じ。ランダムは基準として灰色）。
 # D最適・I最適は、制約なしを破線と中抜きの印、制約付きを実線と塗りの印にする
 METHOD_STYLES = {
@@ -142,8 +141,11 @@ def _density_outline(values, transform):
     return grid, density / density.max()
 
 
-def _draw_distribution(ax, values, stats, position, color, log_scale):
-    """1行の分布: 分布の形（薄い山）か値の点、5〜95%点の線、25〜75%点の太い棒、中央値の白丸。"""
+def _draw_distribution(ax, values, stats, position, color, log_scale, outlined=False):
+    """1行の分布: 分布の形（薄い山）か値の点、5〜95%点の線、25〜75%点の太い棒、中央値の白丸。
+
+    outlined が真（RBF・GPRの式内）なら、25〜75%点の棒を薄い塗りと縁で描く（予測と同じ色で見分けるため）。
+    """
     finite = np.asarray([value for value in values if math.isfinite(value) and (value > 0 or not log_scale)])
     if finite.size >= MIN_VIOLIN_COUNT:
         transform = np.log10 if log_scale else (lambda array: array)
@@ -158,14 +160,19 @@ def _draw_distribution(ax, values, stats, position, color, log_scale):
         offsets = [(((index * GOLDEN_FRACTION) % 1) - 0.5) * 2 * DOT_SPREAD for index in range(finite.size)]
         ax.scatter(finite, position + np.asarray(offsets), s=14, color=color, alpha=0.6, edgecolors="white", linewidths=0.5, zorder=3)
     ax.plot([stats["p5"], stats["p95"]], [position, position], color=color, linewidth=2, solid_capstyle="round", zorder=3)
-    ax.plot([stats["p25"], stats["p75"]], [position, position], color=color, linewidth=7, solid_capstyle="round", zorder=4)
+    if outlined:
+        ax.plot([stats["p25"], stats["p75"]], [position, position], color=color, linewidth=7, solid_capstyle="round", zorder=4)
+        ax.plot([stats["p25"], stats["p75"]], [position, position], color="white", alpha=0.65, linewidth=4, solid_capstyle="round", zorder=4)
+    else:
+        ax.plot([stats["p25"], stats["p75"]], [position, position], color=color, linewidth=7, solid_capstyle="round", zorder=4)
     ax.scatter([stats["median"]], [position], s=30, color="white", edgecolors=color, linewidths=1.6, zorder=5)
 
 
 def plot_residual_boxes(output, axis="x", metric="rms", ax=None, log_scale=False):
-    """選び方ごとに、HOWAのみ と推定→HOWA（推定手法ごと）の残差の分布を並べる（ブラウザ版の評価結果の図と同じ見た目）。
+    """選び方ごとに、補正（HOWA・RBF・GPRの式内と予測・計測値＋HOWA）の残差の分布を並べる（ブラウザ版の評価結果の図と同じ見た目）。
 
     各行に、分布の形（薄い山。値が20個より少なければ値の点）、5〜95%点の線、25〜75%点の太い棒、中央値の白丸を重ねる。
+    色は補正の系統ごとで、RBF・GPRの式内は25〜75%点の棒を中抜き（縁取り）にする。
     縦の破線は全点計測（基準）の中央値。log_scale=True で横軸を対数にする（値の小さい選び方どうしの差が見やすい）。
     """
     variants = output["variants"]
@@ -181,19 +188,18 @@ def plot_residual_boxes(output, axis="x", metric="rms", ax=None, log_scale=False
         group_top = position + 0.5
         rows = []
         if key == "baseline":
-            rows.append(("HOWAのみ", SERIES_COLORS["howa"], baseline_values, baseline_stats))
+            rows.append(("HOWA", SERIES_COLORS["howa"], baseline_values, baseline_stats, False))
         else:
             for variant in variants:
                 values = []
                 for entry in output["sets"]:
                     if entry["method"] == key:
                         values.extend(np.asarray(entry["results"][variant["key"]][axis][metric]).tolist())
-                color = SERIES_COLORS[variant["estimator"]["key"] if variant["estimator"] else "howa"]
-                row_label = variant["estimator"]["label"] if variant["estimator"] else "HOWAのみ"
-                rows.append((row_label, color, values, output["summary"][key]["variants"][variant["key"]][axis][metric]["all"]))
-        for row_label, color, values, stats in rows:
+                stats = output["summary"][key]["variants"][variant["key"]][axis][metric]["all"]
+                rows.append((variant["label"], SERIES_COLORS[variant["family"]], values, stats, variant["mode"] == "embedded"))
+        for row_label, color, values, stats, outlined in rows:
             if math.isfinite(stats["median"]):
-                _draw_distribution(ax, values, stats, position, color, log_scale)
+                _draw_distribution(ax, values, stats, position, color, log_scale, outlined)
             ticks.append(position)
             labels.append(row_label)
             position -= 1
@@ -220,7 +226,10 @@ def plot_residual_boxes(output, axis="x", metric="rms", ax=None, log_scale=False
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.legend(
-        handles=[Rectangle((0, 0), 1, 1, color=SERIES_COLORS[variant["estimator"]["key"] if variant["estimator"] else "howa"]) for variant in variants],
+        handles=[
+            Rectangle((0, 0), 1, 1, facecolor=SERIES_COLORS[variant["family"]] if variant["mode"] != "embedded" else "white", edgecolor=SERIES_COLORS[variant["family"]], linewidth=1.5)
+            for variant in variants
+        ],
         labels=[variant["label"] for variant in variants],
         loc="upper center",
         bbox_to_anchor=(0.5, 0),
@@ -262,23 +271,4 @@ def plot_sweep(sweep, variant_key="howa", axis="x", metric="rms", stat="mean", l
     ax.set_ylabel(f"残差 {metric}（{axis.upper()}、{'95%点' if stat == 'p95' else 'Wafer平均'}）[nm]")
     ax.grid(color="#e1e0d9")
     ax.legend(fontsize=8)
-    return ax
-
-
-def plot_estimation_error_map(output, method_key, estimation_key, axis="x", scale_max=None, ax=None):
-    """未計測Markごとの推定誤差（全WaferのRMS）を色で示す（計測Markは小さい点）。ランダム系は最初の試行を使う。"""
-    entry = next(entry for entry in output["sets"] if entry["method"] == method_key)
-    squares = entry["estimationSquares"][estimation_key][axis]
-    rms = np.sqrt(squares / output["waferCount"])
-    wafer_map = output["map"]
-    marks = np.array([[mark["x"], mark["y"]] for mark in wafer_map["marks"]])
-    if ax is None:
-        _, ax = plt.subplots(figsize=(6, 6))
-    finite = np.isfinite(rms)
-    upper = scale_max or float(np.percentile(rms[finite], 95))
-    scatter = ax.scatter(marks[finite, 0], marks[finite, 1], c=np.minimum(rms[finite], upper), cmap="Blues", vmin=0, vmax=upper, s=ERROR_MARKER_SIZE, edgecolors="#4a4945", linewidths=0.3)
-    ax.scatter(marks[~finite, 0], marks[~finite, 1], s=4, color=MEASURED_COLOR)
-    _draw_wafer(ax, wafer_map)
-    ax.set_title(f"{_method_label(output, method_key)}・推定誤差（{estimation_label(estimation_key)}、{axis.upper()}）")
-    plt.colorbar(scatter, ax=ax, label="推定誤差RMS [nm]（上限は95%点）")
     return ax

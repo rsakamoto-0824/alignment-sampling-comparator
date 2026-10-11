@@ -10,7 +10,7 @@ from pathlib import Path
 from . import constants as C
 from .wafer_map import build_map_from_settings
 
-READABLE_VERSIONS = (1, 2, 3)
+READABLE_VERSIONS = (1, 2, 3, 4)
 
 
 def _merge(base, loaded):
@@ -29,23 +29,36 @@ def _merge(base, loaded):
 
 
 def _migrate_old_settings(loaded, version):
-    """版2以前の設定を版3の形に読み替える（ブラウザ版の migrateOldSettings と同じ）。
+    """以前の版の設定を今の形に読み替える（ブラウザ版の migrateOldSettings と同じ）。
 
-    以前のD最適・I最適は制約を守る選び方だったので、制約付きD最適・I最適として読む。
-    「必ず測るMark」「k個以上」「HOWA＋推定」は、なくなったので使わない（重ねるときに捨てられる）。
+    版2以前: 以前のD最適・I最適は制約を守る選び方だったので、制約付きD最適・I最適として読む。
+             「必ず測るMark」「k個以上」「HOWA＋推定」は、なくなったので使わない（重ねるときに捨てられる）。
+    版3以前: 補正の流れ「HOWAのみ」は HOWA、「推定→HOWA × 推定手法」は RBF・GPR の予測として読む。
+             選んでいた推定手法は式内も比べる。計測値＋HOWA は比べる。
     """
-    if version >= 3 or not isinstance(loaded, dict) or not isinstance(loaded.get("sampling"), dict) or not isinstance(loaded["sampling"].get("methods"), dict):
+    if not isinstance(loaded, dict):
         return loaded
-    old = loaded["sampling"]["methods"]
     loaded = copy.deepcopy(loaded)
-    loaded["sampling"]["methods"] = {
-        "random": old.get("random") is not False,
-        "poisson": old.get("poisson") is not False,
-        "dOptimal": False,
-        "iOptimal": False,
-        "constrainedD": old.get("dOptimal") is not False,
-        "constrainedI": old.get("iOptimal") is not False,
-    }
+    if version < 3 and isinstance(loaded.get("sampling"), dict) and isinstance(loaded["sampling"].get("methods"), dict):
+        old = loaded["sampling"]["methods"]
+        loaded["sampling"]["methods"] = {
+            "random": old.get("random") is not False,
+            "poisson": old.get("poisson") is not False,
+            "dOptimal": False,
+            "iOptimal": False,
+            "constrainedD": old.get("dOptimal") is not False,
+            "constrainedI": old.get("iOptimal") is not False,
+        }
+    if version < 4 and isinstance(loaded.get("model"), dict):
+        flows = loaded["model"].get("flows") or {}
+        estimators = loaded["model"].get("estimators") or {}
+        corrections = {"howa": flows.get("howa") is not False, "measured": True}
+        for correction in C.CORRECTIONS:
+            if correction["mode"] == "embedded":
+                selected = estimators.get(correction["family"]) is not False
+                corrections[correction["key"]] = selected
+                corrections[correction["key"] + "Predict"] = selected and flows.get("estimateThenHowa") is not False
+        loaded["model"]["corrections"] = corrections
     return loaded
 
 

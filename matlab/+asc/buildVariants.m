@@ -1,22 +1,8 @@
 function variants = buildVariants(modelSettings)
-%BUILDVARIANTS 比べる補正の一覧（HOWAのみ ＋ 推定→HOWA × 推定手法）。
-%   key は 'howa' か '流れ:推定手法'（例 'estimateThenHowa:gpXYR'）。estimator は推定手法の情報（HOWAのみは []）。
+%BUILDVARIANTS 比べる補正の一覧（設定で選んだもの。並びは C.CORRECTIONS の順）。
+%   variants(v): key, type（howa / rbf / gp / measured）, mode（embedded＝式内 / predict＝予測 / ''）, family, features, label, longLabel
 
 C = asc.constants();
-variants = struct('key', {}, 'flowType', {}, 'estimator', {}, 'label', {});
-if modelSettings.flows.howa
-    variants(end + 1) = struct('key', 'howa', 'flowType', 'howa', 'estimator', [], 'label', 'HOWAのみ');
-end
-for flow = C.FLOW_TYPES
-    if strcmp(flow.key, 'howa') || ~isfield(modelSettings.flows, flow.key) || ~modelSettings.flows.(flow.key)
-        continue
-    end
-    for estimator = C.ESTIMATORS
-        if ~isfield(modelSettings.estimators, estimator.key) || ~modelSettings.estimators.(estimator.key)
-            continue
-        end
-        variants(end + 1) = struct('key', [flow.key ':' estimator.key], 'flowType', flow.key, ...
-            'estimator', estimator, 'label', [estimator.label '→HOWA']); %#ok<AGROW>
-    end
-end
+selected = arrayfun(@(entry) isfield(modelSettings.corrections, entry.key) && logical(modelSettings.corrections.(entry.key)), C.CORRECTIONS);
+variants = C.CORRECTIONS(selected);
 end

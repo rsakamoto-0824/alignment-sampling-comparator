@@ -66,13 +66,11 @@ sweep = struct('points', points, 'manual', manual, 'waferCount', data.waferCount
 if isempty(last)
     sweep.methods = [];
     sweep.variants = [];
-    sweep.estimationKeys = {};
     sweep.baseline = [];
     sweep.uncorrected = [];
 else
     sweep.methods = last.methods;
     sweep.variants = last.variants;
-    sweep.estimationKeys = last.estimationKeys;
     sweep.baseline = asc.summarizeStore(last.baselines.allMarks);
     sweep.uncorrected = asc.summarizeStore(last.baselines.uncorrected);
 end

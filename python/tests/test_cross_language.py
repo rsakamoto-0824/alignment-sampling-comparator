@@ -136,10 +136,6 @@ class ScenarioTest:
                         stats = actual["variants"][variant_key][axis][metric]["all"]
                         for statistic in ["mean", "p95", "max"]:
                             assert_close(self, stats[statistic], values[statistic], f"{method_key} {variant_key} {axis} {metric} {statistic}")
-            for key, axes in expected["estimation"].items():
-                for axis, values in axes.items():
-                    assert_close(self, actual["estimation"][key][axis]["rms"]["all"]["mean"], values["rms"], f"{method_key} 推定精度 {key} {axis}")
-                    assert_close(self, actual["estimation"][key][axis]["max"]["all"]["mean"], values["max"], f"{method_key} 推定精度 {key} {axis} 最大")
             for key, values in expected["gpChoices"].items():
                 self.assertEqual(actual["gpChoices"][key]["lengthMm"]["count"], values["count"])
                 assert_close(self, actual["gpChoices"][key]["lengthMm"]["median"], values["lengthMedian"], f"{method_key} {key} 相関の長さ")
@@ -328,7 +324,12 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(sampling_settings["shotCount"], 12)
         self.assertNotIn("designatedMarkNos", sampling_settings)
         self.assertEqual(sampling_settings["methods"], {"random": False, "poisson": True, "dOptimal": False, "iOptimal": False, "constrainedD": True, "constrainedI": False})
-        self.assertEqual(loaded["settings"]["model"]["flows"], {"howa": True, "estimateThenHowa": False})
+        # 版3以前の補正の流れ: HOWAのみ は HOWA、推定→HOWA（ここでは使わない）は予測。選んだ推定手法は式内も比べる
+        self.assertEqual(
+            loaded["settings"]["model"]["corrections"],
+            {"howa": True, "rbfXY": True, "rbfXYPredict": False, "rbfXYR": True, "rbfXYRPredict": False, "gpXY": True, "gpXYPredict": False, "gpXYR": True, "gpXYRPredict": False, "measured": True},
+        )
+        self.assertNotIn("flows", loaded["settings"]["model"])
 
     def test_csv_round_trip(self):
         settings = C.default_settings()
