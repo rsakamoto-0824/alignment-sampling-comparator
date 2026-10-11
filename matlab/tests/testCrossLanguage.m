@@ -10,13 +10,22 @@ end
 function setupOnce(testCase)
 here = fileparts(mfilename('fullpath'));
 addpath(fileparts(here));
-referenceDirectory = fullfile(fileparts(fileparts(here)), 'tests', 'reference');
-for name = {'a', 'b', 'c'}
+repositoryRoot = fileparts(fileparts(here));
+referenceDirectory = fullfile(repositoryRoot, 'tests', 'reference');
+testCase.TestData.repositoryRoot = repositoryRoot;
+for name = {'a', 'b', 'c', 'd'}
     reference = jsondecode(fileread(fullfile(referenceDirectory, ['scenario_' name{1} '.json'])));
     settings = reference.settings;
+    scenario = struct();
     scenario.reference = reference;
-    scenario.map = asc.generateWaferMap(settings.map);
-    scenario.data = asc.generateEvaluationData(scenario.map, settings.evaluationData);
+    scenario.report = [];
+    if ~isempty(reference.measurementFile)
+        % 計測データのファイル（見本のCSV）からマップと評価データを作る場面
+        [scenario.map, scenario.data, scenario.report] = asc.loadMeasurementFile(fullfile(repositoryRoot, reference.measurementFile), settings.map);
+    else
+        scenario.map = asc.generateWaferMap(settings.map);
+        scenario.data = asc.generateEvaluationData(scenario.map, settings.evaluationData);
+    end
     scenario.plans = asc.planFromShotIds('手動の例', reference.manualShotIds, scenario.map, 'manual:1');
     started = tic;
     scenario.output = asc.runEvaluation(scenario.map, scenario.data, settings, scenario.plans);
@@ -91,6 +100,88 @@ function testScenarioCSweep(testCase)
 checkSweep(testCase, testCase.TestData.c);
 end
 
+function testScenarioDMapAndData(testCase)
+% 計測データのファイル: 無効マーク・重複行・行のないMark
+checkMapAndData(testCase, testCase.TestData.d);
+end
+
+function testScenarioDSelections(testCase)
+checkSelections(testCase, testCase.TestData.d);
+end
+
+function testScenarioDSummary(testCase)
+checkSummary(testCase, testCase.TestData.d);
+end
+
+function testScenarioDPlan(testCase)
+checkPlan(testCase, testCase.TestData.d);
+end
+
+function testMeasurementXlsxSameAsCsv(testCase)
+% xlsx（MATLABで書いたもの。日時はExcelの日付、2枚目のシート）をCSVと同じ値として読む
+lines = splitlines(strtrim(fileread(fullfile(testCase.TestData.repositoryRoot, 'samples', 'sample_measurements.csv'))));
+lines = lines(1:600);
+header = strsplit(lines{1}, ',');
+dateColumn = find(strcmp(header, 'DateTime'));
+cells = cell(numel(lines), numel(header));
+for k = 1:numel(lines)
+    values = strsplit(lines{k}, ',', 'CollapseDelimiters', false);
+    for c = 1:numel(values)
+        number = str2double(values{c});
+        if k > 1 && c == dateColumn
+            cells{k, c} = datetime(2026, 10, 1, 9, 0, 0);
+        elseif k > 1 && ~isnan(number) && ~isempty(regexp(values{c}, '^[-+]?[0-9.]+$', 'once'))
+            cells{k, c} = number;
+        else
+            cells{k, c} = values{c};
+        end
+    end
+end
+path = [tempname '.xlsx'];
+cleanup = onCleanup(@() delete(path));
+writecell({'このシートは説明です'; '見出しのない表'}, path, 'Sheet', 'メモ');
+writecell(cells, path, 'Sheet', 'data');
+csvPath = [tempname '.csv'];
+cleanupCsv = onCleanup(@() delete(csvPath));
+fid = fopen(csvPath, 'w', 'n', 'UTF-8');
+fprintf(fid, '%s\r\n', lines{:});
+fclose(fid);
+settings = asc.defaultSettings();
+[mapXlsx, dataXlsx, reportXlsx] = asc.loadMeasurementFile(path, settings.map);
+[mapCsv, dataCsv, reportCsv] = asc.loadMeasurementFile(csvPath, settings.map);
+verifyEqual(testCase, reportXlsx.sheetName, 'data', '見出しのあるシートを選んでいません');
+verifyEqual(testCase, reportXlsx.waferNames, reportCsv.waferNames);
+verifyEqual(testCase, [mapXlsx.markX, mapXlsx.markY], [mapCsv.markX, mapCsv.markY]);
+verifyEqual(testCase, dataXlsx.truthX, dataCsv.truthX);
+verifyEqual(testCase, dataXlsx.truthY, dataCsv.truthY);
+table = asc.readTableFile(path);
+verifyEqual(testCase, asc.excelSerialText(str2double(table.sheets(2).rows(2).cells{dateColumn}), table.date1904), '2026/10/01 09:00:00');
+verifyEqual(testCase, asc.excelSerialText(45346.939583333, false), '2024/02/24 22:33:00');
+end
+
+function testMeasurementErrors(testCase)
+% 列の不足・読めない値・Shotの座標の食い違いを、行番号つきで知らせる
+options = asc.defaultSettings().map;
+header = 'Wafer,DateTime,shotNo,Direction,Xmm,Ymm,markNo,markXmm,markYmm,measX,measY,StsX,StsY';
+build = @(text) asc.buildMeasurementData(asc.readTableFileText(text), options);
+verifyError(testCase, @() build(sprintf('Wafer,shotno,Direction\r\nW1,1,1\r\n')), 'asc:invalidMeasurement');
+message = errorMessage(@() build(sprintf('%s\r\nW1,,1,3,0,0,1,1,1,0.1,0.2,0,0\r\n', header)));
+verifyTrue(testCase, startsWith(message, '2行目: Direction'), message);
+message = errorMessage(@() build(sprintf('%s\r\nW1,,1,1,0,0,1,1,1,0.1,0.2,0,0\r\nW2,,1,1,5,0,1,1,1,0.1,0.2,0,0\r\n', header)));
+verifyTrue(testCase, startsWith(message, '3行目: shotNo 1 の Xmm'), message);
+[waferMap, ~, ~] = build(sprintf('%s\r\nW1,,1,1,0,0,1,1,1,0.1,0.2,0,0\r\nW1,,1,1,0,0,2,-1,-1,0.3,0.4,0,-1\r\n', header));
+verifyEqual(testCase, [numel(waferMap.markX), numel(waferMap.invalidMarkNo)], [1, 1]);
+end
+
+function message = errorMessage(action)
+message = '';
+try
+    action();
+catch error
+    message = error.message;
+end
+end
+
 function testDefaultSettingsMatchBrowser(testCase)
 reference = testCase.TestData.a.reference.settings;
 settings = asc.defaultSettings();
@@ -100,6 +191,8 @@ end
 verifyEqual(testCase, settings.evaluationData.terms, reference.evaluationData.terms);
 verifyEqual(testCase, settings.sweep.methods, reference.sweep.methods);
 verifyEqual(testCase, sort(fieldnames(settings.sampling)), sort(fieldnames(reference.sampling)));
+verifyEqual(testCase, sort(fieldnames(settings.evaluationData)), sort(fieldnames(reference.evaluationData)));
+verifyEqual(testCase, settings.evaluationData.source, reference.evaluationData.source);
 end
 
 function testOldSettingsFile(testCase)
@@ -145,6 +238,33 @@ checkVector(testCase, data.truthX(1, :)', reference.data.truthX0, 1e-9, 'truthX 
 checkVector(testCase, data.truthY(end, :)', reference.data.truthYLast, 1e-9, 'truthY 最後');
 checkVector(testCase, data.noiseX(1, :)', reference.data.noiseX0, 1e-12, 'noiseX 1枚目');
 checkVector(testCase, data.noiseY(end, :)', reference.data.noiseYLast, 1e-12, 'noiseY 最後');
+% 無効マーク（計測データのファイルの場面だけにある）と、Markがすべて無効のShot
+expectedInvalid = reference.map.invalidMarks;
+verifyEqual(testCase, numel(waferMap.invalidMarkNo), numel(expectedInvalid), '無効マークの数が違います');
+for k = 1:numel(expectedInvalid)
+    entry = expectedInvalid{k};
+    verifyEqual(testCase, waferMap.invalidMarkShotIds{k}, entry{1});
+    verifyEqual(testCase, waferMap.invalidMarkNo(k), entry{2});
+    verifyLessThanOrEqual(testCase, abs([waferMap.invalidMarkX(k), waferMap.invalidMarkY(k)] - [entry{3}, entry{4}]), 1e-12);
+end
+if isempty(reference.map.inactiveShotIds)
+    verifyEmpty(testCase, waferMap.inactiveShotIds, 'Markがすべて無効のShotがあります');
+else
+    verifyEqual(testCase, waferMap.inactiveShotIds, cellstr(reference.map.inactiveShotIds), 'Markがすべて無効のShotが違います');
+end
+verifyEqual(testCase, waferMap.excludedMarkCount, reference.map.excludedMarkCount);
+if ~isempty(reference.measurement)
+    expected = reference.measurement;
+    report = scenario.report;
+    verifyEqual(testCase, report.waferNames, expected.waferNames);
+    for name = {'rowCount', 'duplicateRows', 'unmeasuredValues'}
+        verifyEqual(testCase, report.(name{1}), expected.(name{1}), ['読み込みの結果 ' name{1} ' が違います']);
+    end
+    verifyEqual(testCase, {report.invalidMarks.shotId}', {expected.invalidMarks.shotId}');
+    verifyEqual(testCase, [report.invalidMarks.missingWafers]', [expected.invalidMarks.missingWafers]');
+    verifyEqual(testCase, {report.waferMissing.name}', {expected.waferMissing.name}');
+    verifyEqual(testCase, [report.waferMissing.count]', [expected.waferMissing.count]');
+end
 end
 
 function checkSelections(testCase, scenario)
@@ -160,7 +280,7 @@ checkSets(testCase, output.sets, reference.sets);
 end
 
 function checkPlan(testCase, scenario)
-% 「計画を作成」の点（制約付きD最適・I最適）と、選択点のCSVの文字が同じ
+% 「計画を作成」の点（制約なし・制約付きのD最適・I最適）と、選択点のCSVの文字が同じ
 reference = scenario.reference;
 plan = asc.runPlan(scenario.map, reference.settings);
 verifyRelaxed(testCase, plan.relaxed, reference.plan.relaxed);

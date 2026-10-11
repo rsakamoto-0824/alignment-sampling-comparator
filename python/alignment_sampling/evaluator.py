@@ -363,9 +363,10 @@ def run_evaluation(wafer_map, data, settings, manual_plans=None, progress=None):
 
 
 def run_plan(wafer_map, settings):
-    """制約付きD最適・I最適の「計画」だけを作る（評価データと補正は使わない）。
+    """D最適・I最適（制約なし・制約付き）の「計画」だけを作る（評価データと補正は使わない）。
 
-    同じ設定なら、評価（run_evaluation）の制約付きD最適・I最適と同じ点を選ぶ。
+    同じ設定なら、評価（run_evaluation）の同じ選び方と同じ点を選ぶ。制約の満たし具合は、制約なしの選び方でも
+    今の制約で判定する（評価と同じ）。
     戻り値: {"context", "relaxed", "failedMethods", "methods", "sets", "criteriaReference", "criteriaSameTerms"}
     """
     context, free_context, relaxed = _prepare_context(wafer_map, settings)

@@ -19,6 +19,26 @@ C.SCAN_DOWN = 'Down';
 % 一筆書き（露光順）の開始の角。行ごとに蛇行し、1 Shot進むごとにUp/Downを交互にする
 C.SERPENTINE_STARTS = {'topLeft', 'topRight', 'bottomLeft', 'bottomRight'};
 
+% ---- 評価データの用意のしかた ----
+% zernike: Zernike項の乱数で作る。file: 計測データのファイル（csv・xlsx）を読む（Waferマップもファイルから作る）
+C.DATA_SOURCE_ZERNIKE = 'zernike';
+C.DATA_SOURCE_FILE = 'file';
+
+% ---- 計測データのファイル（アライメント・OVL計測の標準の表）----
+% 項目名は大文字・小文字を区別する。必須の列がないと読めない
+C.MEASUREMENT_REQUIRED_COLUMNS = {'Wafer', 'shotNo', 'Direction', 'Xmm', 'Ymm', 'markNo', 'markXmm', 'markYmm', 'measX', 'measY'};
+C.MEASUREMENT_OPTIONAL_COLUMNS = {'DateTime', 'Radius', 'StsX', 'StsY'};
+% Direction の値（1, 2）とScan方向
+C.MEASUREMENT_DIRECTIONS = {'Up', 'Down'};
+% StsX・StsY でこの値だけが有効（-1 は未測定。それ以外も有効とみなさない）
+C.MEASUREMENT_VALID_STATUS = 0;
+% 同じShot・Markの座標が行によって違うとみなす差 [mm]
+C.MEASUREMENT_COORDINATE_TOLERANCE_MM = 1e-6;
+% Radius の列と sqrt(Xmm^2 + Ymm^2) の差がこれより大きければ知らせる [mm]
+C.MEASUREMENT_RADIUS_TOLERANCE_MM = 1e-3;
+% 誤りの説明を並べる上限
+C.MEASUREMENT_MAX_ERRORS = 20;
+
 % ---- Zernike ----
 C.MAX_FRINGE_INDEX = 36;
 % この次数以下のZernike項は、5次までの多項式（21項）で正確に表せる
@@ -54,8 +74,8 @@ C.METHODS = struct( ...
     'usesDraws', {true, true, false, false, false, false}, ...
     'constrained', {true, true, false, false, true, true}, ...
     'criterion', {'', '', 'D', 'I', 'D', 'I'});
-% 「計画を作成」で選ぶ方法（評価データを使わずに、選んだ点だけを出す）
-C.PLAN_METHOD_KEYS = {'constrainedD', 'constrainedI'};
+% 「計画を作成」で選ぶ方法（評価データを使わずに、選んだ点だけを出す）。制約なしと制約付きのD最適・I最適
+C.PLAN_METHOD_KEYS = {'dOptimal', 'iOptimal', 'constrainedD', 'constrainedI'};
 C.MANUAL_PREFIX = 'manual:';
 % 選び方の乱数列の番号（評価データとは別）
 C.STREAM_METHOD_BASE = 1000;
