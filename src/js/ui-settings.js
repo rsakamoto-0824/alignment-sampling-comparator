@@ -376,13 +376,35 @@
     }
   }
 
-  function renderEstimatorChoices() {
-    const container = ui.byId("estimator-choices");
+  /**
+   * 比べる補正のチェックボックス。RBF・GPRは説明変数ごとに1行にまとめ、式内・予測を横に並べる。
+   */
+  function renderCorrectionChoices() {
+    const container = ui.byId("correction-choices");
     container.replaceChildren();
-    for (const estimator of C.ESTIMATORS) {
-      const input = ui.create("input", { type: "checkbox", "data-setting": `model.estimators.${estimator.key}` });
+    const checkbox = (correction, text) => {
+      const input = ui.create("input", { type: "checkbox", "data-setting": `model.corrections.${correction.key}`, "aria-label": correction.label });
       input.addEventListener("change", handleBoundInput);
-      container.append(ui.create("label", { className: "choice" }, [input, ` ${estimator.longLabel}`]));
+      return ui.create("label", { className: "choice" }, [input, ` ${text}`]);
+    };
+    const families = [];
+    for (const correction of C.CORRECTIONS) {
+      if (!correction.mode) {
+        container.append(checkbox(correction, correction.longLabel));
+        continue;
+      }
+      if (families.includes(correction.family)) {
+        continue;
+      }
+      families.push(correction.family);
+      const members = C.CORRECTIONS.filter((entry) => entry.family === correction.family);
+      const title = correction.label.replace(/式内$|予測$/, "");
+      container.append(
+        ui.create("div", { className: "choice-row" }, [
+          ui.create("span", { className: "choice-row-title", text: title }),
+          ...members.map((member) => checkbox(member, member.mode === "embedded" ? "式内" : "予測")),
+        ])
+      );
     }
   }
 
@@ -495,7 +517,7 @@
     ui.byId("polynomial-summary").textContent = `X: ${model.termsX.length}項、Y: ${model.termsY.length}項を使います。`;
     ui.byId("polynomial-table-error").textContent =
       model.termsX.length === 0 || model.termsY.length === 0 ? "X・Yとも1項以上選んでください。" : "";
-    ui.byId("flows-error").textContent = flowSettingError(model);
+    ui.byId("corrections-error").textContent = correctionSettingError(model);
     ui.byId("rbf-shape").disabled = model.rbfKernel === "tps";
 
     const zones = settings.zones;
@@ -522,17 +544,9 @@
     return `読み込んだファイル: ${measurement.fileName}。${ASC.measurementData.describeReport(state.map || measurement.map, measurement.report).join("。")}。`;
   }
 
-  /** 補正の流れと推定手法の組み合わせの誤り（なければ空文字）。 */
-  function flowSettingError(model) {
-    const estimatorFlow = model.flows.estimateThenHowa;
-    const anyEstimator = C.ESTIMATORS.some((estimator) => model.estimators[estimator.key]);
-    if (!model.flows.howa && !estimatorFlow) {
-      return "補正の流れを1つ以上選んでください。";
-    }
-    if (estimatorFlow && !anyEstimator) {
-      return "推定を使う流れを選んだときは、推定手法を1つ以上選んでください。";
-    }
-    return "";
+  /** 比べる補正の選び方の誤り（なければ空文字）。 */
+  function correctionSettingError(model) {
+    return C.CORRECTIONS.some((correction) => model.corrections[correction.key]) ? "" : "比べる補正を1つ以上選んでください。";
   }
 
   /** 設定欄を作り、入力と settings を結ぶ。 */
@@ -544,12 +558,12 @@
     fillSelect(ui.byId("serpentine-first-scan"), { [C.SCAN_UP]: "Up", [C.SCAN_DOWN]: "Down" });
     fillSelect(ui.byId("rbf-kernel"), C.RBF_KERNELS);
     fillSelect(ui.byId("gp-kernel"), C.GP_KERNELS);
-    renderEstimatorChoices();
+    renderCorrectionChoices();
     renderMethodChoices();
     renderConstraintTable();
     for (const input of document.querySelectorAll("[data-setting]")) {
       const eventName = input.type === "number" ? "input" : "change";
-      if (!input.closest("#constraint-table") && !input.closest("#method-choices") && !input.closest("#sweep-method-choices") && !input.closest("#estimator-choices")) {
+      if (!input.closest("#constraint-table") && !input.closest("#method-choices") && !input.closest("#sweep-method-choices") && !input.closest("#correction-choices")) {
         input.addEventListener(eventName, handleBoundInput);
       }
     }
@@ -580,5 +594,5 @@
     updateDerivedTexts();
   }
 
-  ASC.settingsForm = { initialize, writeAll, updateDerivedTexts, flowSettingError };
+  ASC.settingsForm = { initialize, writeAll, updateDerivedTexts, correctionSettingError };
 })(typeof window !== "undefined" ? window : globalThis);

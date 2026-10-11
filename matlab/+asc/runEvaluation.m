@@ -10,9 +10,8 @@ function output = runEvaluation(waferMap, data, settings, manualPlans, progress)
 %
 %   おもな戻り値（番号はすべて1始まり）
 %     output.methods(m)                   選び方（key, label, usesDraws, manual）
-%     output.variants(v)                  補正（key, flowType, estimator, label）
+%     output.variants(v)                  補正（key, type, mode, family, features, label, longLabel）
 %     output.summary(m).variants(v).x.rms.all.mean   選び方 m・補正 v の X の RMS のWafer平均
-%     output.summary(m).estimation(e)     推定精度（output.estimationKeys{e}）
 %     output.summary(m).criteriaX / constraints      D・I基準と制約の満たし具合
 %     output.sets(s)                      選んだ点（method, draw, shotIndices, markIndices, results など）
 %     output.failedMethods                制約を満たす点を選べなかった選び方の名前（cell）
@@ -81,8 +80,6 @@ end
 for s = 1:numel(sets)
     evaluation = asc.evaluateSampleSet(waferMap, data, settings.model, sets{s}.markIndices, variants, cache);
     sets{s}.results = evaluation.results;
-    sets{s}.estimation = evaluation.estimation;
-    sets{s}.estimationSquares = evaluation.estimationSquares;
     sets{s}.gpChoices = evaluation.gpChoices;
     sets{s}.warnings = [sets{s}.warnings, evaluation.warnings(:)'];
     done = done + 1;
@@ -94,12 +91,11 @@ end
 sets = [sets{:}];
 
 uncorrected = struct('x', asc.residualMetrics(data.truthX'), 'y', asc.residualMetrics(data.truthY'));
-howaOnly = struct('key', 'howa', 'flowType', 'howa', 'estimator', [], 'label', 'HOWAのみ');
-allMarks = asc.evaluateSampleSet(waferMap, data, settings.model, 1:numel(waferMap.markX), howaOnly, cache, false);
+howaOnly = asc.buildVariants(struct('corrections', struct('howa', true)));
+allMarks = asc.evaluateSampleSet(waferMap, data, settings.model, 1:numel(waferMap.markX), howaOnly, cache);
 allMarks = allMarks.results(1);
 done = totalSteps;
 report('集計しています');
-estimationKeys = [{'howa'}, selectedEstimatorKeys(settings.model, C)];
 usedMethods = methodList(arrayfun(@(method) any(strcmp({sets.method}, method.key)), methodList));
 
 output = struct();
@@ -111,8 +107,7 @@ output.variants = variants;
 output.criteriaReference = asc.criteriaReference(sets);
 output.criteriaSameTerms = isequal(settings.model.termsX(:), settings.model.termsY(:));
 output.methods = usedMethods;
-output.estimationKeys = estimationKeys;
-output.summary = summarizeResults(sets, variants, estimationKeys, usedMethods, axisNames);
+output.summary = summarizeResults(sets, variants, usedMethods, axisNames);
 output.baselines = struct('uncorrected', uncorrected, 'allMarks', allMarks);
 output.waferCount = data.waferCount;
 output.map = waferMap;
@@ -122,15 +117,6 @@ output.map = waferMap;
             progress(done, totalSteps, label);
         end
     end
-end
-
-function keys = selectedEstimatorKeys(modelSettings, C)
-keys = {};
-for estimator = C.ESTIMATORS
-    if isfield(modelSettings.estimators, estimator.key) && modelSettings.estimators.(estimator.key)
-        keys{end + 1} = estimator.key; %#ok<AGROW>
-    end
-end
 end
 
 function result = summarizeStores(stores, axisNames)
@@ -172,7 +158,7 @@ for k = 1:numel(keys)
 end
 end
 
-function summary = summarizeResults(sets, variants, estimationKeys, methodList, axisNames)
+function summary = summarizeResults(sets, variants, methodList, axisNames)
 % 選び方 × 補正 × 軸 × 指標ごとに、全試行・全Waferの値をまとめる（methodList と同じ並び）
 entries = cell(1, numel(methodList));
 for m = 1:numel(methodList)
@@ -182,27 +168,16 @@ for m = 1:numel(methodList)
     for v = 1:numel(variants)
         stores = arrayfun(@(s) s.results(v), methodSets, 'UniformOutput', false);
         variantSummary{v} = summarizeStores(stores, axisNames);
-        estimator = variants(v).estimator;
-        if ~isempty(estimator) && strcmp(estimator.type, 'gp')
+        if strcmp(variants(v).type, 'gp')
             lengths = arrayfun(@(s) s.gpChoices(v).lengthMm, methodSets, 'UniformOutput', false);
             ratios = arrayfun(@(s) s.gpChoices(v).noiseRatio, methodSets, 'UniformOutput', false);
             gpChoices(end + 1) = struct('key', variants(v).key, 'lengthMm', asc.summarizeValues(vertcat(lengths{:})), ...
                 'noiseRatio', asc.summarizeValues(vertcat(ratios{:}))); %#ok<AGROW>
         end
     end
-    estimationSummary = cell(1, numel(estimationKeys));
-    for e = 1:numel(estimationKeys)
-        if e <= numel(methodSets(1).estimation) && ~isempty(methodSets(1).estimation(e).x)
-            stores = arrayfun(@(s) s.estimation(e), methodSets, 'UniformOutput', false);
-            estimationSummary{e} = summarizeStores(stores, axisNames);
-        else
-            estimationSummary{e} = struct('x', [], 'y', []);
-        end
-    end
     entry = struct();
     entry.drawCount = numel(methodSets);
     entry.variants = [variantSummary{:}];
-    entry.estimation = [estimationSummary{:}];
     entry.gpChoices = gpChoices;
     for k = 1:numel(axisNames)
         criteria = arrayfun(@(s) s.criteria.(axisNames{k}), methodSets, 'UniformOutput', false);

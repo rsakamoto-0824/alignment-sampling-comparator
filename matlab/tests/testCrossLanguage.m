@@ -211,7 +211,10 @@ verifyEqual(testCase, loaded.settings.sampling.shotCount, 12);
 verifyFalse(testCase, isfield(loaded.settings.sampling, 'designatedMarkNos'));
 verifyEqual(testCase, loaded.settings.sampling.methods, struct('random', false, 'poisson', true, 'dOptimal', false, 'iOptimal', false, ...
     'constrainedD', true, 'constrainedI', false));
-verifyEqual(testCase, loaded.settings.model.flows, struct('howa', true, 'estimateThenHowa', false));
+% 版3以前の補正の流れ: HOWAのみ は HOWA、推定→HOWA（ここでは使わない）は予測。選んだ推定手法は式内も比べる
+verifyEqual(testCase, loaded.settings.model.corrections, struct('howa', true, 'rbfXY', true, 'rbfXYPredict', false, ...
+    'rbfXYR', true, 'rbfXYRPredict', false, 'gpXY', true, 'gpXYPredict', false, 'gpXYR', true, 'gpXYRPredict', false, 'measured', true));
+verifyFalse(testCase, isfield(loaded.settings.model, 'flows'));
 end
 
 function testCsvRoundTrip(testCase)
@@ -340,14 +343,6 @@ for m = 1:numel(output.methods)
                         sprintf('%s %s %s %s %s', methodKey, output.variants(v).key, axisName{1}, metric{1}, statistic{1}));
                 end
             end
-        end
-    end
-    for e = 1:numel(output.estimationKeys)
-        key = output.estimationKeys{e};
-        for axisName = {'x', 'y'}
-            values = expected.estimation.(key).(axisName{1});
-            assertClose(testCase, actual.estimation(e).(axisName{1}).rms.all.mean, values.rms, sprintf('%s 推定精度 %s %s', methodKey, key, axisName{1}));
-            assertClose(testCase, actual.estimation(e).(axisName{1}).max.all.mean, values.max, sprintf('%s 推定精度 %s %s 最大', methodKey, key, axisName{1}));
         end
     end
     for g = 1:numel(actual.gpChoices)

@@ -1,7 +1,7 @@
 function ax = plotResidualBoxes(output, axisName, metric, ax, logScale)
-%PLOTRESIDUALBOXES 選び方ごとに、HOWAのみ と推定→HOWA（推定手法ごと）の残差の分布を並べる（ブラウザ版の評価結果の図と同じ見た目）。
+%PLOTRESIDUALBOXES 選び方ごとに、補正（HOWA・RBF・GPRの式内と予測・計測値＋HOWA）の残差の分布を並べる（ブラウザ版の評価結果の図と同じ見た目）。
 %   各行に、分布の形（薄い山。値が20個より少なければ値の点）、5〜95%点の線、25〜75%点の太い棒、中央値の白丸を重ねる。
-%   縦の破線は全点計測（基準）の中央値。logScale = true で横軸を対数にする（値の小さい選び方どうしの差が見やすい）。
+%   色は補正の系統ごとで、RBF・GPRの式内は25〜75%点の棒を薄い塗りにする。縦の破線は全点計測（基準）の中央値。logScale = true で横軸を対数にする（値の小さい選び方どうしの差が見やすい）。
 %   統計の追加機能は使わずに描く（分布の形はガウス核の密度推定を自前で計算する）。
 
 if nargin < 2, axisName = 'x'; end
@@ -12,28 +12,22 @@ colors = asc.plotColors();
 style = chartStyle();
 
 % 行（選び方 × 補正）と最後の全点計測の行を、上から順に並べる
-rows = struct('group', {}, 'label', {}, 'color', {}, 'values', {}, 'stats', {});
+rows = struct('group', {}, 'label', {}, 'color', {}, 'values', {}, 'stats', {}, 'outlined', {});
 groupLabels = {};
 for m = 1:numel(output.methods)
     methodSets = output.sets(strcmp({output.sets.method}, output.methods(m).key));
     groupLabels{end + 1} = asc.methodLabel(output, output.methods(m).key); %#ok<AGROW>
     for v = 1:numel(output.variants)
         values = cell2mat(arrayfun(@(s) reshape(s.results(v).(axisName).(metric), [], 1), methodSets(:), 'UniformOutput', false));
-        estimator = output.variants(v).estimator;
-        if isempty(estimator)
-            color = colors.series.howa;
-            label = 'HOWAのみ';
-        else
-            color = colors.series.(estimator.key);
-            label = estimator.label;
-        end
-        rows(end + 1) = struct('group', m, 'label', label, 'color', color, 'values', values, 'stats', asc.summarizeValues(values)); %#ok<AGROW>
+        variant = output.variants(v);
+        rows(end + 1) = struct('group', m, 'label', variant.label, 'color', colors.series.(variant.family), 'values', values, ...
+            'stats', asc.summarizeValues(values), 'outlined', strcmp(variant.mode, 'embedded')); %#ok<AGROW>
     end
 end
 baselineValues = reshape(output.baselines.allMarks.(axisName).(metric), [], 1);
 groupLabels{end + 1} = '全点計測（基準）';
-rows(end + 1) = struct('group', numel(groupLabels), 'label', 'HOWAのみ', 'color', colors.series.howa, ...
-    'values', baselineValues, 'stats', asc.summarizeValues(baselineValues));
+rows(end + 1) = struct('group', numel(groupLabels), 'label', 'HOWA', 'color', colors.series.howa, ...
+    'values', baselineValues, 'stats', asc.summarizeValues(baselineValues), 'outlined', false);
 
 % 横軸の範囲（5〜95%点。点で描く行は全部の値）
 [low, high] = valueRange(rows, style, logScale);
@@ -88,13 +82,13 @@ if logScale
 end
 legendHandles = gobjects(numel(output.variants), 1);
 for v = 1:numel(output.variants)
-    estimator = output.variants(v).estimator;
-    if isempty(estimator)
-        color = colors.series.howa;
+    variant = output.variants(v);
+    color = colors.series.(variant.family);
+    if strcmp(variant.mode, 'embedded')
+        legendHandles(v) = patch(ax, NaN, NaN, color, 'FaceAlpha', 0.3, 'EdgeColor', color, 'LineWidth', 1.5);
     else
-        color = colors.series.(estimator.key);
+        legendHandles(v) = patch(ax, NaN, NaN, color, 'EdgeColor', 'none');
     end
-    legendHandles(v) = patch(ax, NaN, NaN, color, 'EdgeColor', 'none');
 end
 legend(ax, legendHandles, {output.variants.label}, 'Location', 'southoutside', 'Orientation', 'horizontal', 'Box', 'off', 'FontSize', 8);
 hold(ax, 'off');
@@ -187,7 +181,13 @@ else
     scatter(ax, values, position + offsets, 14, color, 'filled', 'MarkerFaceAlpha', 0.6, 'MarkerEdgeColor', 'w', 'LineWidth', 0.5);
 end
 plot(ax, [stats.p5, stats.p95], [position, position], '-', 'Color', color, 'LineWidth', 2);
-patch(ax, [stats.p25, stats.p75, stats.p75, stats.p25], position + style.boxHalfHeight * [-1, -1, 1, 1], color, 'EdgeColor', color, 'LineWidth', 1);
+if row.outlined
+    faceAlpha = 0.3;
+else
+    faceAlpha = 1;
+end
+patch(ax, [stats.p25, stats.p75, stats.p75, stats.p25], position + style.boxHalfHeight * [-1, -1, 1, 1], color, ...
+    'FaceAlpha', faceAlpha, 'EdgeColor', color, 'LineWidth', 1.2);
 plot(ax, stats.median, position, 'o', 'MarkerSize', 5, 'MarkerFaceColor', 'w', 'MarkerEdgeColor', color, 'LineWidth', 1.4);
 end
 

@@ -57,6 +57,8 @@ file_output = asc.run_evaluation(result["map"], result["data"], settings)
 
 選んだShotでは、そのShotの有効なMarkをすべて測ります。選び方のキーは `random`・`poisson`・`dOptimal`・`iOptimal`（制約なし）・`constrainedD`・`constrainedI`（制約付き）です。
 
+補正（`settings["model"]["corrections"]` で選ぶ。キーは `output["variants"]` の key）は、`howa`（HOWA）、`rbfXY`・`rbfXYR`・`gpXY`・`gpXYR`（RBF・GPRの式内: 式の中の多項式を補正値にする）、`rbfXYPredict`・`rbfXYRPredict`・`gpXYPredict`・`gpXYRPredict`（予測: 全Markを予測してから多項式を当てはめる）、`measured`（計測値＋HOWA）の10通りです。補正値はどれも X,Y の高次多項式です（計測値＋HOWA の測ったMarkだけ計測値）。
+
 ブラウザ版の「設定をJSONで保存」で作ったファイルは、`asc.load_settings_file(path)` で読み込めます（CSVのマップ・手動プランも入ります）。
 
 ## 主な関数
@@ -74,7 +76,7 @@ file_output = asc.run_evaluation(result["map"], result["data"], settings)
 | `run_sweep(wafer_map, data, settings, sweep_settings, manual_plans)` | 計測Shot数を変えた評価（トレードオフカーブ。比べる選び方は `sweep_settings["methods"]`） |
 | `selection_to_csv(wafer_map, mark_indices)` | 選択点の座標のCSV（ShotId, ShotX, ShotY, ScanDir, MarkNo, MarkX, MarkY, WaferX, WaferY） |
 | `load_settings_file(path)` | ブラウザ版で保存した設定JSONを読む（版3。版1・2も読み、以前のD最適・I最適は制約付きとして読む） |
-| `plots.*` | 選んだ点のマップ（無効マークは ✕）・残差の分布の図（`plot_residual_boxes(output, log_scale=True)` で横軸を対数）・トレードオフカーブ・推定誤差マップ |
+| `plots.*` | 選んだ点のマップ（無効マークは ✕）・残差の分布の図（`plot_residual_boxes(output, log_scale=True)` で横軸を対数）・トレードオフカーブ |
 
 ## テスト（ブラウザ版との照合）
 

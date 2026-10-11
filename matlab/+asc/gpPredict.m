@@ -1,5 +1,5 @@
 function [values, lengths, ratios] = gpPredict(prepared, measured)
-%GPPREDICT 全Waferの計測値（計測点数×Wafer数）から全Markのずれを推定する（事後平均）。
+%GPPREDICT GPRの予測: 全Waferの計測値（計測点数×Wafer数）から全Markのずれを予測する（事後平均）。
 %   調整値（相関の長さ・ノイズ比）は、Waferごとにその計測点での周辺尤度が最大になる候補を選ぶ。
 %   差がごくわずかなら同点とみなし、先の候補を残す（ブラウザ版の isClearlyGreater と同じ）。
 %   戻り値: 推定値（全Mark数×Wafer数）、選んだ相関の長さ（1×Wafer数。1次式だけのときは NaN）、ノイズ比

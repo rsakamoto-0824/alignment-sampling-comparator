@@ -2,7 +2,7 @@
 
   1. サンプリングの前提を作り、ハード制約を同時に満たせるか確かめる
   2. 選び方ごとに計測Markを選ぶ（ランダム系は試行回数ぶん）。手動プランも同列に扱う
-  3. 選んだ点ごとに全Waferを補正し、全Markの残差と、未計測Markの推定誤差を求める
+  3. 選んだ点ごとに全Waferを補正し（HOWA・RBF・GPR・計測値＋HOWA）、全Markの残差を求める
   4. 選び方 × 補正 × 軸 × 指標で集計する
 """
 
@@ -50,14 +50,8 @@ def residual_metrics(residual):
     return {"rms": np.sqrt(mean_square), "mean3sigma": np.abs(mean) + 3 * np.sqrt(variance), "max": np.abs(residual).max(axis=0)}
 
 
-def _selected_estimators(model_settings):
-    return [estimator for estimator in C.ESTIMATORS if model_settings["estimators"].get(estimator["key"])]
-
-
-def estimation_label(key):
-    if key == "howa":
-        return "HOWA（多項式の予測）"
-    return next(estimator["label"] for estimator in C.ESTIMATORS if estimator["key"] == key)
+# 計測値が多項式でほぼ完全に表せるとみなす、最小二乗の残差の2乗和の割合（GPRの調整値を選ぶ意味がないとき）
+EXACT_FIT_RATIO = 1e-20
 
 
 class ModelCache:
@@ -76,100 +70,124 @@ class ModelCache:
         return self._cache[key]
 
 
-def evaluate_sample_set(wafer_map, data, model_settings, sample_indices, variants, model_cache=None, estimation=True):
-    """1組の計測Markについて、補正ごと・軸ごとの残差の指標と、推定手法ごとの推定精度を求める。"""
+def _prepare_predictors(uv, sample, variants, model_settings, warnings):
+    """「予測」で使うRBF・GPRの予測の前準備（選んだ点・説明変数ごとに1回。XとYで共通）。"""
+    rbf_settings = {"kernel": model_settings["rbfKernel"], "lambda": model_settings["rbfLambda"], "shapeFactor": model_settings["rbfShapeFactor"]}
+    predictors = {}
+    for variant in variants:
+        key = (variant["type"], variant["features"])
+        if variant["mode"] != "predict" or key in predictors:
+            continue
+        if variant["type"] == "rbf":
+            operator = correction.rbf_operator(uv, sample, rbf_settings, variant["features"])
+            predictors[key] = {"operator": operator} if operator is not None else None
+        else:
+            gp = correction.prepare_gp(uv, sample, variant["features"], model_settings["gpKernel"])
+            predictors[key] = {"gp": gp} if gp is not None else None
+        if predictors[key] is None:
+            warnings.append(f"{variant['label']}: 予測できませんでした（計測点が少なすぎるか、並びが偏っています）。")
+    return predictors
+
+
+def _prepare_axis_models(uv, sample, terms, cache, variants, model_settings, predictors, gpr_kernels, warnings):
+    """1つの軸の、補正ごとの部品（線形の補正の演算子と、GPRの前準備）。選んだ点・多項式の項ごとに1回。"""
+    all_design, all_least_squares = cache.get(terms)
+    parts = correction.prepare_howa(uv, sample, terms, all_design, all_least_squares)
+    warnings.extend(parts["warnings"])
+    rbf_settings = {"kernel": model_settings["rbfKernel"], "lambda": model_settings["rbfLambda"], "shapeFactor": model_settings["rbfShapeFactor"]}
+    operators, gpr = {}, {}
+    for variant in variants:
+        key = variant["key"]
+        if variant["type"] == "howa":
+            operators[key] = parts["howa"]
+        elif variant["type"] == "measured":
+            operators[key] = correction.measured_operator(parts["howa"], sample)
+        elif variant["mode"] == "predict":
+            predictor = predictors[(variant["type"], variant["features"])]
+            if predictor is None:
+                operators[key] = None
+            elif variant["type"] == "rbf":
+                operators[key] = correction.estimate_then_howa_operator(parts, predictor["operator"], sample)
+            else:
+                gpr[key] = {"predictor": predictor}
+        elif variant["type"] == "rbf":
+            coefficients = correction.rbf_polynomial_operator(uv, sample, parts["sampleDesign"], rbf_settings, variant["features"])
+            if coefficients is None:
+                warnings.append(f"{variant['label']}: RBFで多項式の係数を決められません（計測点が少なすぎるか、並びが偏っています）。")
+                operators[key] = None
+            else:
+                operators[key] = all_design @ coefficients
+        else:
+            if variant["features"] not in gpr_kernels:
+                gpr_kernels[variant["features"]] = correction.prepare_gpr_kernel(uv, sample, variant["features"], model_settings["gpKernel"])
+            prepared = correction.prepare_gpr_polynomial(gpr_kernels[variant["features"]], parts["sampleDesign"])
+            if prepared is None:
+                warnings.append(f"{variant['label']}: 多項式の項より2点以上多い計測点が必要です。")
+            gpr[key] = {"kernelPart": gpr_kernels[variant["features"]], "prepared": prepared}
+    return parts, operators, gpr
+
+
+def evaluate_sample_set(wafer_map, data, model_settings, sample_indices, variants, model_cache=None):
+    """1組の計測Markについて、補正ごと・軸ごとの残差の指標と、GPRが選んだ調整値を求める。
+
+    補正できなかったとき（点が少ないなど）は、0のままだと「残差0」と誤解されるので値なし（NaN）にする。
+    """
     cache = model_cache or ModelCache(wafer_map)
     uv = cache.uv
-    mark_count = len(uv)
     sample = np.asarray(sample_indices, dtype=int)
-    unmeasured = np.setdiff1d(np.arange(mark_count), sample)
-    with_estimation = estimation and unmeasured.size > 0
     warnings = []
-
-    estimator_list = list(_selected_estimators(model_settings)) if with_estimation else []
-    for variant in variants:
-        if variant["estimator"] is not None and variant["estimator"] not in estimator_list:
-            estimator_list.append(variant["estimator"])
-    prepared = {}
-    for estimator in estimator_list:
-        if estimator["type"] == "rbf":
-            settings = {"kernel": model_settings["rbfKernel"], "lambda": model_settings["rbfLambda"], "shapeFactor": model_settings["rbfShapeFactor"]}
-            operator = correction.rbf_operator(uv, sample, settings, estimator["features"])
-            prepared[estimator["key"]] = {"type": "linear", "operator": operator} if operator is not None else None
-        else:
-            gp = correction.prepare_gp(uv, sample, estimator["features"], model_settings["gpKernel"])
-            prepared[estimator["key"]] = {"type": "gp", "gp": gp} if gp is not None else None
-        if prepared[estimator["key"]] is None:
-            warnings.append(f"{estimator['longLabel']}: 推定できませんでした（計測点が少なすぎるか、並びが偏っています）。")
-
+    predictors = _prepare_predictors(uv, sample, variants, model_settings, warnings)
+    gpr_kernels = {}
     results = {variant["key"]: {} for variant in variants}
-    gp_choices = {variant["key"]: {"lengthMm": [], "noiseRatio": []} for variant in variants if variant["estimator"] and variant["estimator"]["type"] == "gp"}
-    estimation_keys = ["howa"] + [estimator["key"] for estimator in _selected_estimators(model_settings)] if with_estimation else []
-    estimation_results = {key: {} for key in estimation_keys}
-    estimation_squares = {key: {} for key in estimation_keys}
-    howa_cache = {}
+    gp_choices = {variant["key"]: {"lengthMm": [], "noiseRatio": []} for variant in variants if variant["type"] == "gp"}
+    axis_cache = {}
 
     for axis in AXES:
         terms = model_settings["termsX"] if axis == "x" else model_settings["termsY"]
-        key = tuple(terms)
-        if key not in howa_cache:
-            all_design, all_least_squares = cache.get(terms)
-            parts = correction.prepare_howa(uv, sample, terms, all_design, all_least_squares)
-            warnings.extend(parts["warnings"])
-            operators = {}
-            for variant in variants:
-                if variant["estimator"] is None:
-                    operators[variant["key"]] = parts["howa"]
-                elif prepared.get(variant["estimator"]["key"]) and prepared[variant["estimator"]["key"]]["type"] == "linear":
-                    operators[variant["key"]] = correction.estimate_then_howa_operator(parts, prepared[variant["estimator"]["key"]]["operator"], sample)
-            howa_cache[key] = (parts, operators)
-        parts, operators = howa_cache[key]
+        if tuple(terms) not in axis_cache:
+            axis_cache[tuple(terms)] = _prepare_axis_models(uv, sample, terms, cache, variants, model_settings, predictors, gpr_kernels, warnings)
+        parts, operators, gpr = axis_cache[tuple(terms)]
         truth = (data["truthX"] if axis == "x" else data["truthY"]).T
         noise = (data["noiseX"] if axis == "x" else data["noiseY"]).T
         measured = truth[sample] + noise[sample]
-        howa_correction = parts["howa"] @ measured
-
-        def record_estimation(name, prediction):
-            if name not in estimation_results:
-                return
-            errors = prediction[unmeasured] - truth[unmeasured]
-            squares = np.full(mark_count, np.nan)
-            squares[unmeasured] = (errors**2).sum(axis=1)
-            estimation_squares[name][axis] = squares
-            estimation_results[name][axis] = residual_metrics(errors)
-
-        record_estimation("howa", howa_correction)
-        raw_gp = {}
-        for estimator in estimator_list:
-            entry = prepared[estimator["key"]]
-            if entry is None:
-                if estimator["key"] in estimation_results:
-                    estimation_results[estimator["key"]][axis] = {metric: np.full(data["waferCount"], np.nan) for metric in METRIC_KEYS}
-                continue
-            if entry["type"] == "gp":
-                raw_gp[estimator["key"]] = correction.gp_predict(entry["gp"], measured)
-                record_estimation(estimator["key"], raw_gp[estimator["key"]][0])
-            else:
-                record_estimation(estimator["key"], entry["operator"] @ measured)
-
+        missing = {metric: np.full(data["waferCount"], np.nan) for metric in METRIC_KEYS}
+        ols = None
+        predicted = {}
         for variant in variants:
-            if variant["key"] in operators:
-                correction_values = operators[variant["key"]] @ measured
-            else:
-                entry = prepared.get(variant["estimator"]["key"])
-                if entry is None:
-                    results[variant["key"]][axis] = {metric: np.full(data["waferCount"], np.nan) for metric in METRIC_KEYS}
+            key = variant["key"]
+            if variant["type"] != "gp":
+                if operators[key] is None:
+                    results[key][axis] = dict(missing)
                     continue
-                # 推定→HOWA: 未計測Markを推定値で埋め、全Markに多項式を当てはめる（GPの学習は推定精度と同じ結果を使う）
-                values, lengths, ratios = raw_gp[variant["estimator"]["key"]]
+                results[key][axis] = residual_metrics(truth - operators[key] @ measured)
+                continue
+            model = gpr[key]
+            if variant["mode"] == "predict":
+                if model["predictor"] is None:
+                    results[key][axis] = dict(missing)
+                    continue
+                # GPRで未計測Markを予測して全Markを埋め、全Markに多項式を当てはめる（学習は説明変数ごとに1回）
+                if variant["features"] not in predicted:
+                    predicted[variant["features"]] = correction.gp_predict(model["predictor"]["gp"], measured)
+                values, lengths, ratios = predicted[variant["features"]]
                 filled = values.copy()
                 filled[sample] = measured
-                correction_values = parts["allDesign"] @ (parts["allLeastSquares"] @ filled)
-                finite = np.isfinite(lengths)
-                gp_choices[variant["key"]]["lengthMm"].extend((lengths[finite] * C.NORMALIZATION_RADIUS_MM).tolist())
-                gp_choices[variant["key"]]["noiseRatio"].extend(ratios[finite].tolist())
-            results[variant["key"]][axis] = residual_metrics(truth - correction_values)
-    return {"results": results, "estimation": estimation_results, "estimationSquares": estimation_squares, "gpChoices": gp_choices, "warnings": list(dict.fromkeys(warnings))}
+                coefficients = parts["allLeastSquares"] @ filled
+            else:
+                if model["prepared"] is None:
+                    results[key][axis] = dict(missing)
+                    continue
+                if ols is None:
+                    ols_coefficients = parts["leastSquares"] @ measured
+                    residual = measured - parts["sampleDesign"] @ ols_coefficients
+                    exact = ~((residual**2).sum(axis=0) > (measured**2).sum(axis=0) * EXACT_FIT_RATIO)
+                    ols = (ols_coefficients, residual, exact)
+                coefficients, lengths, ratios = correction.gpr_fit(model["kernelPart"], model["prepared"], measured, ols[1], ols[0], ols[2])
+            results[key][axis] = residual_metrics(truth - parts["allDesign"] @ coefficients)
+            finite = np.isfinite(lengths)
+            gp_choices[key]["lengthMm"].extend((lengths[finite] * C.NORMALIZATION_RADIUS_MM).tolist())
+            gp_choices[key]["noiseRatio"].extend(ratios[finite].tolist())
+    return {"results": results, "gpChoices": gp_choices, "warnings": list(dict.fromkeys(warnings))}
 
 
 def criteria_of(wafer_map, mark_indices, model_settings):
@@ -225,24 +243,21 @@ def _summarize_constraints(method_sets):
     return summary
 
 
-def summarize_results(sets, variants, estimation_keys, methods):
+def summarize_results(sets, variants, methods):
     """選び方 × 補正 × 軸 × 指標ごとに、全試行・全Waferの値をまとめる。"""
     summary = {}
     for method in methods:
         method_sets = [entry for entry in sets if entry["method"] == method["key"] and entry.get("results")]
         if not method_sets:
             continue
-        entry = {"drawCount": len(method_sets), "variants": {}, "estimation": {}, "gpChoices": {}}
+        entry = {"drawCount": len(method_sets), "variants": {}, "gpChoices": {}}
         for variant in variants:
             entry["variants"][variant["key"]] = _summarize_stores([s["results"][variant["key"]] for s in method_sets])
-            if variant["estimator"] and variant["estimator"]["type"] == "gp":
+            if variant["type"] == "gp":
                 entry["gpChoices"][variant["key"]] = {
                     "lengthMm": summarize([v for s in method_sets for v in s["gpChoices"][variant["key"]]["lengthMm"]]),
                     "noiseRatio": summarize([v for s in method_sets for v in s["gpChoices"][variant["key"]]["noiseRatio"]]),
                 }
-        for key in estimation_keys:
-            if key in method_sets[0]["estimation"]:
-                entry["estimation"][key] = _summarize_stores([s["estimation"][key] for s in method_sets])
         for axis in AXES:
             entry[f"criteria{axis.upper()}"] = {
                 "logDet": summarize([s["criteria"][axis]["logDet"] for s in method_sets]),
@@ -333,18 +348,17 @@ def run_evaluation(wafer_map, data, settings, manual_plans=None, progress=None):
 
     for entry in sets:
         evaluation = evaluate_sample_set(wafer_map, data, settings["model"], entry["markIndices"], variants, cache)
-        entry.update({"results": evaluation["results"], "estimation": evaluation["estimation"], "estimationSquares": evaluation["estimationSquares"], "gpChoices": evaluation["gpChoices"]})
+        entry.update({"results": evaluation["results"], "gpChoices": evaluation["gpChoices"]})
         entry["warnings"].extend(evaluation["warnings"])
         done += 1
         if progress:
             progress(done, total_steps, "補正して残差を求めています")
 
     uncorrected = {axis: residual_metrics((data["truthX"] if axis == "x" else data["truthY"]).T) for axis in AXES}
-    howa_only = [{"key": "howa", "flowType": "howa", "estimator": None, "label": "HOWAのみ"}]
-    all_marks = evaluate_sample_set(wafer_map, data, settings["model"], list(range(len(wafer_map["marks"]))), howa_only, cache, estimation=False)
+    howa_only = correction.build_variants({"corrections": {"howa": True}})
+    all_marks = evaluate_sample_set(wafer_map, data, settings["model"], list(range(len(wafer_map["marks"]))), howa_only, cache)
     if progress:
         progress(total_steps, total_steps, "集計しています")
-    estimation_keys = ["howa"] + [estimator["key"] for estimator in _selected_estimators(settings["model"])]
     return {
         "context": context,
         "relaxed": relaxed,
@@ -354,8 +368,7 @@ def run_evaluation(wafer_map, data, settings, manual_plans=None, progress=None):
         "criteriaReference": criteria_reference(sets),
         "criteriaSameTerms": list(settings["model"]["termsX"]) == list(settings["model"]["termsY"]),
         "methods": [m for m in methods if any(s["method"] == m["key"] for s in sets)],
-        "estimationKeys": estimation_keys,
-        "summary": summarize_results(sets, variants, estimation_keys, methods),
+        "summary": summarize_results(sets, variants, methods),
         "baselines": {"uncorrected": uncorrected, "allMarks": all_marks["results"]},
         "waferCount": data["waferCount"],
         "map": wafer_map,
@@ -455,7 +468,6 @@ def run_sweep(wafer_map, data, settings, sweep_settings=None, manual_plans=None,
         "methods": last["methods"] if last else [],
         "manual": manual,
         "variants": last["variants"] if last else [],
-        "estimationKeys": last["estimationKeys"] if last else [],
         "baseline": summarize_store(last["baselines"]["allMarks"]["howa"]) if last else None,
         "uncorrected": summarize_store(last["baselines"]["uncorrected"]) if last else None,
         "waferCount": data["waferCount"],

@@ -555,6 +555,72 @@
    * value が best より「はっきり」大きいか。差が相対 tolerance 以下なら同点として false を返す。
    * best が −∞ のときは、有限の値なら true。
    */
+  /**
+   * 細いQR分解（ハウスホルダー変換）。a は rows×cols（rows ≥ cols）。
+   * 戻り値: { q（rows×cols。列が正規直交）, r（cols×cols の上三角） }。
+   * 正規方程式（AᵀA）を作らないので、条件の悪い行列でも精度が落ちにくい（GPRの一般化最小二乗に使う）。
+   */
+  function householderQr(a, rows, cols) {
+    const work = Float64Array.from(a);
+    const vectors = new Float64Array(rows * cols);
+    const betas = new Float64Array(cols);
+    for (let k = 0; k < cols; k++) {
+      let normSquared = 0;
+      for (let i = k; i < rows; i++) {
+        normSquared += work[i * cols + k] * work[i * cols + k];
+      }
+      const head = work[k * cols + k];
+      const alpha = head >= 0 ? -Math.sqrt(normSquared) : Math.sqrt(normSquared);
+      let vectorSquared = 0;
+      for (let i = k; i < rows; i++) {
+        const value = i === k ? head - alpha : work[i * cols + k];
+        vectors[i * cols + k] = value;
+        vectorSquared += value * value;
+      }
+      if (!(vectorSquared > 0)) {
+        continue;
+      }
+      betas[k] = 2 / vectorSquared;
+      for (let j = k; j < cols; j++) {
+        let dot = 0;
+        for (let i = k; i < rows; i++) {
+          dot += vectors[i * cols + k] * work[i * cols + j];
+        }
+        const factor = betas[k] * dot;
+        for (let i = k; i < rows; i++) {
+          work[i * cols + j] -= factor * vectors[i * cols + k];
+        }
+      }
+    }
+    const r = new Float64Array(cols * cols);
+    for (let i = 0; i < cols; i++) {
+      for (let j = i; j < cols; j++) {
+        r[i * cols + j] = work[i * cols + j];
+      }
+    }
+    // Q の最初の cols 列 = H₀H₁…H_{cols−1} を単位行列の最初の cols 列に掛けたもの
+    const q = new Float64Array(rows * cols);
+    for (let j = 0; j < cols; j++) {
+      q[j * cols + j] = 1;
+    }
+    for (let k = cols - 1; k >= 0; k--) {
+      if (betas[k] === 0) {
+        continue;
+      }
+      for (let j = 0; j < cols; j++) {
+        let dot = 0;
+        for (let i = k; i < rows; i++) {
+          dot += vectors[i * cols + k] * q[i * cols + j];
+        }
+        const factor = betas[k] * dot;
+        for (let i = k; i < rows; i++) {
+          q[i * cols + j] -= factor * vectors[i * cols + k];
+        }
+      }
+    }
+    return { q, r };
+  }
+
   function isClearlyGreater(value, best, tolerance) {
     if (best === -Infinity) {
       return value > best;
@@ -624,6 +690,7 @@
     luSolve,
     determinant,
     symmetricEigen,
+    householderQr,
     isClearlyGreater,
     mean,
     percentileOfSorted,

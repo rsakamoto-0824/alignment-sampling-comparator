@@ -8,7 +8,8 @@
  *   A: 初期設定を小さくしたもの（一筆書きのScan方向、端のShotも選ぶ。スイープを含む）
  *   B: 市松のScan方向・端のShotを選ばない・強制計測Shot・除外Shot（手動プランに除外Shotを入れる）・ソフト制約・
  *      比例配分・ガウス基底のRBF・Matérn のGP・正規分布・RMS正規化・Scanのずれ・XとYで違う多項式の項
- *   C: 一筆書きを右下から・最初はDown、強制計測Shot、スイープで選ぶ選び方を絞る（端のShotでMark数が選び方ごとに違う）
+ *   C: 一筆書きを右下から・最初はDown、強制計測Shot、スイープで選ぶ選び方を絞る（端のShotでMark数が選び方ごとに違う）、
+ *      比べる補正を絞る（HOWA・RBF（X,Y,半径）式内・GPR（X,Y）予測・計測値＋HOWA）
  *   D: 計測データのファイル（samples/sample_measurements.csv）からマップと評価データを作る（無効マーク・重複行・
  *      行のないMarkを含む。強制計測Shotに無効マークのあるShot、除外Shot）
  */
@@ -80,6 +81,18 @@ function scenarioC() {
   settings.sampling.draws = 1;
   settings.sampling.optimalStarts = 1;
   settings.constraints.mandatoryShotIds = ["58"];
+  settings.model.corrections = {
+    howa: true,
+    rbfXY: false,
+    rbfXYPredict: false,
+    rbfXYR: true,
+    rbfXYRPredict: false,
+    gpXY: false,
+    gpXYPredict: true,
+    gpXYR: false,
+    gpXYRPredict: false,
+    measured: true,
+  };
   settings.sweep = {
     startShots: 11,
     endShots: 13,
@@ -139,13 +152,6 @@ function summaryOf(output) {
         }
       }
     }
-    const estimation = {};
-    for (const key of Object.keys(summary.estimation)) {
-      estimation[key] = {};
-      for (const axis of ["x", "y"]) {
-        estimation[key][axis] = { rms: round(summary.estimation[key][axis].rms.all.mean), max: round(summary.estimation[key][axis].max.all.mean) };
-      }
-    }
     const gpChoices = {};
     for (const [key, value] of Object.entries(summary.gpChoices)) {
       gpChoices[key] = { lengthMedian: round(value.lengthMm.median), ratioMedian: round(value.noiseRatio.median), count: value.lengthMm.count };
@@ -154,7 +160,6 @@ function summaryOf(output) {
       label: method.label,
       drawCount: summary.drawCount,
       variants,
-      estimation,
       gpChoices,
       constraints: summary.constraints.map((entry) => ({ key: entry.key, satisfied: entry.satisfied, total: entry.total, meanShift: entry.meanShift })),
     };

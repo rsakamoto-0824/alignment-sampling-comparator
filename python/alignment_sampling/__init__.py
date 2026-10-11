@@ -17,7 +17,7 @@
 
 from .constants import default_settings
 from .evaluation_data import default_term_settings, generate_evaluation_data
-from .evaluator import estimation_label, run_evaluation, run_plan, run_sweep, summarize, summarize_store
+from .evaluator import run_evaluation, run_plan, run_sweep, summarize, summarize_store
 from .measurement_data import build_from_table, describe_report, load_measurement_file, read_table_bytes
 from .sampling import design_criteria, efficiencies
 from .settings_io import copy_settings, load_settings_file, manual_plan_inputs, map_from_loaded, plan_from_shot_ids
@@ -32,7 +32,6 @@ __all__ = [
     "describe_report",
     "design_criteria",
     "efficiencies",
-    "estimation_label",
     "generate_evaluation_data",
     "generate_wafer_map",
     "load_measurement_file",

@@ -44,16 +44,25 @@ MAX_POLYNOMIAL_ORDER = 5
 NORMALIZATION_RMS = "rms"
 DISTRIBUTION_NORMAL = "normal"
 
-# ---- 補正の流れと推定手法 ----
-FLOW_TYPES = [
-    {"key": "howa", "label": "HOWAのみ"},
-    {"key": "estimateThenHowa", "label": "推定→HOWA"},
-]
-ESTIMATORS = [
-    {"key": "rbfXY", "type": "rbf", "features": "xy", "label": "RBF（X,Y）", "longLabel": "RBF（説明変数 X,Y）"},
-    {"key": "rbfXYR", "type": "rbf", "features": "xyr", "label": "RBF（X,Y,半径）", "longLabel": "RBF（説明変数 X,Y,半径）"},
-    {"key": "gpXY", "type": "gp", "features": "xy", "label": "GP（X,Y）", "longLabel": "ガウス過程回帰（説明変数 X,Y）"},
-    {"key": "gpXYR", "type": "gp", "features": "xyr", "label": "GP（X,Y,半径）", "longLabel": "ガウス過程回帰（説明変数 X,Y,半径）"},
+# ---- 補正（比べる補正値の求め方）----
+# 補正値はどれも X,Y の高次多項式（HOWAの項）。違いは多項式の係数の決め方:
+#   howa      計測したMarkに最小二乗で当てはめる
+#   RBF・GPR（mode）
+#     embedded（式内）  RBF・GPRの式の中に多項式を入れて計測値を表し、その多項式の部分を補正値にする
+#     predict（予測）   RBF・GPRで未計測Markのずれを予測して全Markを埋め、全Markに多項式を当てはめる
+#   measured  測ったMarkは計測値そのものを補正値にし、測っていないMarkだけHOWAの多項式で補正する
+# family は色を決める系統（式内と予測は同じ色）。並び順は結果の表やグラフの並び順
+CORRECTIONS = [
+    {"key": "howa", "type": "howa", "mode": None, "family": "howa", "features": None, "label": "HOWA", "longLabel": "HOWA（計測したMarkに最小二乗で多項式を当てはめる）"},
+    {"key": "rbfXY", "type": "rbf", "mode": "embedded", "family": "rbfXY", "features": "xy", "label": "RBF（X,Y）式内", "longLabel": "RBF（説明変数 X,Y）の式の中の多項式"},
+    {"key": "rbfXYPredict", "type": "rbf", "mode": "predict", "family": "rbfXY", "features": "xy", "label": "RBF（X,Y）予測", "longLabel": "RBF（説明変数 X,Y）の全Markの予測に多項式を当てはめる"},
+    {"key": "rbfXYR", "type": "rbf", "mode": "embedded", "family": "rbfXYR", "features": "xyr", "label": "RBF（X,Y,半径）式内", "longLabel": "RBF（説明変数 X,Y,半径）の式の中の多項式"},
+    {"key": "rbfXYRPredict", "type": "rbf", "mode": "predict", "family": "rbfXYR", "features": "xyr", "label": "RBF（X,Y,半径）予測", "longLabel": "RBF（説明変数 X,Y,半径）の全Markの予測に多項式を当てはめる"},
+    {"key": "gpXY", "type": "gp", "mode": "embedded", "family": "gpXY", "features": "xy", "label": "GPR（X,Y）式内", "longLabel": "GPR（説明変数 X,Y）の式の中の多項式（一般化最小二乗）"},
+    {"key": "gpXYPredict", "type": "gp", "mode": "predict", "family": "gpXY", "features": "xy", "label": "GPR（X,Y）予測", "longLabel": "GPR（説明変数 X,Y）の全Markの予測に多項式を当てはめる"},
+    {"key": "gpXYR", "type": "gp", "mode": "embedded", "family": "gpXYR", "features": "xyr", "label": "GPR（X,Y,半径）式内", "longLabel": "GPR（説明変数 X,Y,半径）の式の中の多項式（一般化最小二乗）"},
+    {"key": "gpXYRPredict", "type": "gp", "mode": "predict", "family": "gpXYR", "features": "xyr", "label": "GPR（X,Y,半径）予測", "longLabel": "GPR（説明変数 X,Y,半径）の全Markの予測に多項式を当てはめる"},
+    {"key": "measured", "type": "measured", "mode": None, "family": "measured", "features": None, "label": "計測値＋HOWA", "longLabel": "計測値＋HOWA（測ったMarkは計測値、測っていないMarkはHOWA）"},
 ]
 
 # ---- ガウス過程回帰の調整値の探索範囲（相関の長さは正規化座標、ノイズ比は ノイズの分散 ÷ 信号の分散）----
@@ -141,8 +150,19 @@ _DEFAULT_SETTINGS = {
     "model": {
         "termsX": list(range(21)),
         "termsY": list(range(21)),
-        "flows": {"howa": True, "estimateThenHowa": True},
-        "estimators": {"rbfXY": True, "rbfXYR": True, "gpXY": True, "gpXYR": True},
+        # 比べる補正（キーは CORRECTIONS と同じ）
+        "corrections": {
+            "howa": True,
+            "rbfXY": True,
+            "rbfXYPredict": True,
+            "rbfXYR": True,
+            "rbfXYRPredict": True,
+            "gpXY": True,
+            "gpXYPredict": True,
+            "gpXYR": True,
+            "gpXYRPredict": True,
+            "measured": True,
+        },
         "rbfKernel": "tps",
         "rbfLambda": 0,
         "rbfShapeFactor": 2,
