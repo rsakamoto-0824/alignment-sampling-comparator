@@ -13,7 +13,7 @@
 ### 手順スクリプトで使う
 
 MATLAB で `alignment_sampling_evaluation.m` を開き、セクション（`%%`）ごとに「セクションの実行」で進めます。
-計画の作成（制約付きD・I最適）→ 評価 → 表 → 図 → 計測点数のスイープ → CSV保存 まで進みます。CSVは `output/`（Gitの管理外）に保存されます。
+計画の作成（制約なし・制約付きのD・I最適）→ 評価 → 表 → 図 → 計測点数のスイープ → CSV保存 まで進みます。計測データのファイル（csv・xlsx）で評価するセクションもあります。CSVは `output/`（Gitの管理外）に保存されます。
 
 ### 自分のスクリプトで使う
 
@@ -28,11 +28,18 @@ m = find(strcmp({output.methods.key}, 'constrainedD'));
 v = find(strcmp({output.variants.key}, 'howa'));
 output.summary(m).variants(v).x.rms.all.mean              % 制約付きD最適・HOWAのみ・X の RMS のWafer平均
 
-% 制約付きD最適・I最適の点だけを作り（評価データは使わない）、座標をCSVの文字にする
+% D最適・I最適（制約なし・制約付き）の点だけを作り（評価データは使わない）、座標をCSVの文字にする
 settings.constraints.mandatoryShotIds = {'46'; '47'};     % 強制計測Shot（Shot番号）
-designPlan = asc.runPlan(waferMap, settings);
-csvText = asc.selectionToCsv(waferMap, designPlan.sets(1).markIndices);
+designPlan = asc.runPlan(waferMap, settings);             % sets は dOptimal, iOptimal, constrainedD, constrainedI の順
+csvText = asc.selectionToCsv(waferMap, designPlan.sets(3).markIndices);
+
+% 計測データのファイル（csv・xlsx）で評価する（マップもファイルから作る。実データは data/ に置き、コミットしない）
+[fileMap, fileData, report] = asc.loadMeasurementFile(fullfile('..', 'data', '計測.xlsx'), settings.map);
+disp(strjoin(asc.describeMeasurementReport(fileMap, report), newline));
+fileOutput = asc.runEvaluation(fileMap, fileData, settings);
 ```
+
+計測データのファイルの列は、ブラウザ版と同じアライメント・OVL計測の標準の表です（リポジトリ直下の README を参照）。xlsx は Excel や追加の Toolbox がなくても読めます（ZIPを展開してXMLを読みます）。
 
 選んだShotでは、そのShotの有効なMarkをすべて測ります。選び方のキーは `random`・`poisson`・`dOptimal`・`iOptimal`（制約なし）・`constrainedD`・`constrainedI`（制約付き）です。
 
@@ -51,13 +58,15 @@ csvText = asc.selectionToCsv(waferMap, designPlan.sets(1).markIndices);
 | `defaultSettings()` | 初期設定（ブラウザ版の設定JSONと同じ形の構造体） |
 | `generateWaferMap(mapSettings)` / `parseMapCsv(text, mapSettings)` / `mapToCsv(waferMap)` | Waferマップを作る／CSVから読む／CSVにする |
 | `generateEvaluationData(waferMap, dataSettings)` | Zernikeの乱数係数とノイズで評価データを作る |
+| `loadMeasurementFile(path, mapSettings)` | 計測データのファイル（.csv・.xlsx）から、マップと評価データを作る（`[waferMap, data, report]`。無効マークは `waferMap.invalidMark*`） |
+| `describeMeasurementReport(waferMap, report)` | 読み込みの結果（Wafer数・無効マーク・重複行など）を文の一覧にする |
 | `planFromShotIds(name, shotIds, waferMap)` | Shot番号の一覧から手動プランを作る |
 | `runEvaluation(waferMap, data, settings, manualPlans)` | 選び方 × 補正の評価 |
-| `runPlan(waferMap, settings)` | 制約付きD最適・I最適の点だけを選ぶ（アプリの「計画を作成」と同じ。評価データは使わない） |
+| `runPlan(waferMap, settings)` | D最適・I最適（制約なし・制約付き）の点だけを選ぶ（アプリの「計画を作成」と同じ。評価データは使わない） |
 | `runSweep(waferMap, data, settings, sweepSettings, manualPlans)` | 計測Shot数を変えた評価（トレードオフカーブ。比べる選び方は `sweepSettings.methods`） |
 | `selectionToCsv(waferMap, markIndices)` | 選択点の座標のCSVの文字（ShotId, ShotX, ShotY, ScanDir, MarkNo, MarkX, MarkY, WaferX, WaferY） |
 | `loadSettingsFile(path)` | ブラウザ版で保存した設定JSONを読む（版3。版1・2も読み、以前のD最適・I最適は制約付きとして読む） |
-| `plotSelectionMap` / `plotResidualBoxes` / `plotSweep` / `plotEstimationErrorMap` | 選んだ点のマップ・箱ひげ図・トレードオフカーブ・推定誤差マップ |
+| `plotSelectionMap` / `plotResidualBoxes` / `plotSweep` / `plotEstimationErrorMap` | 選んだ点のマップ（無効マークは ✕）・残差の分布の図（5つ目の引数 `true` で横軸を対数）・トレードオフカーブ・推定誤差マップ |
 
 ## テスト（ブラウザ版との照合）
 
@@ -74,4 +83,4 @@ results = runtests('tests'); table(results)
 
 - 計算の中身を変えるときは、ブラウザ版・Python版も同じように直し、基準データを作り直してテストしてください。
 - このMacの MATLAB（Rosetta経由）では、初期設定の評価に約16秒、手順スクリプト全体に数分かかります（選んだShotのMarkをすべて測り、6つの選び方を比べるため）。Windows の会社PCでの速さと図の見た目は未確認です。
-- 評価データは乱数で作る模擬データです。実データを使う場合も、リポジトリにはコミットしないでください。
+- 乱数の評価データは模擬データです。実際の計測データのファイルを使う場合は、リポジトリ直下の `data/`（Gitの管理外）に置き、コミットしないでください。

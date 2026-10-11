@@ -28,7 +28,7 @@ Windows では `.venv\Scripts\pip install -e ".[notebook]"` です。
 .venv/bin/jupyter lab notebooks/alignment_sampling_evaluation.ipynb
 ```
 
-上から順に実行すると、計画の作成（制約付きD・I最適）→ 評価 → 表 → 図 → 計測点数のスイープ → CSV保存 まで進みます。CSVは `notebooks/output/`（Gitの管理外）に保存されます。
+上から順に実行すると、計画の作成（制約なし・制約付きのD・I最適）→ 評価 → 表 → 図 → 計測点数のスイープ → CSV保存 まで進みます。計測データのファイル（csv・xlsx）で評価する手順もあります。CSVは `notebooks/output/`（Gitの管理外）に保存されます。
 
 ### スクリプトで使う
 
@@ -42,11 +42,18 @@ plan = asc.plan_from_shot_ids("現行", ["11", "13", "20"], wafer_map)
 output = asc.run_evaluation(wafer_map, data, settings, [plan])
 print(output["summary"]["constrainedD"]["variants"]["howa"]["x"]["rms"]["all"]["mean"])
 
-# 制約付きD最適・I最適の点だけを作り（評価データは使わない）、座標をCSVにする
+# D最適・I最適（制約なし・制約付き）の点だけを作り（評価データは使わない）、座標をCSVにする
 settings["constraints"]["mandatoryShotIds"] = ["46", "47"]   # 強制計測Shot（Shot番号）
-design_plan = asc.run_plan(wafer_map, settings)
-csv_text = asc.selection_to_csv(wafer_map, design_plan["sets"][0]["markIndices"])
+design_plan = asc.run_plan(wafer_map, settings)                # sets は dOptimal, iOptimal, constrainedD, constrainedI の順
+csv_text = asc.selection_to_csv(wafer_map, design_plan["sets"][2]["markIndices"])
+
+# 計測データのファイル（csv・xlsx）で評価する（マップもファイルから作る。実データは data/ に置き、コミットしない）
+result = asc.load_measurement_file("../data/計測.xlsx", settings["map"])
+print("\n".join(asc.describe_report(result["map"], result["report"])))
+file_output = asc.run_evaluation(result["map"], result["data"], settings)
 ```
+
+計測データのファイルの列は、ブラウザ版と同じアライメント・OVL計測の標準の表（`Wafer, DateTime, shotNo, Direction, Xmm, Ymm, Radius, markNo, markXmm, markYmm, measX, measY, StsX, StsY`）です。詳しくはリポジトリ直下の README を見てください。xlsx も標準ライブラリだけで読みます（追加のパッケージは要りません）。
 
 選んだShotでは、そのShotの有効なMarkをすべて測ります。選び方のキーは `random`・`poisson`・`dOptimal`・`iOptimal`（制約なし）・`constrainedD`・`constrainedI`（制約付き）です。
 
@@ -59,13 +66,15 @@ csv_text = asc.selection_to_csv(wafer_map, design_plan["sets"][0]["markIndices"]
 | `default_settings()` | 初期設定（ブラウザ版と同じキー名） |
 | `generate_wafer_map(map_settings)` / `parse_map_csv(text, map_settings)` | Waferマップを作る／CSVから読む |
 | `generate_evaluation_data(wafer_map, data_settings)` | Zernikeの乱数係数とノイズで評価データを作る |
+| `load_measurement_file(path, map_settings)` | 計測データのファイル（.csv・.xlsx）から、マップと評価データを作る（`{"map", "data", "report"}`。無効マークは `map["invalidMarks"]`） |
+| `describe_report(wafer_map, report)` | 読み込みの結果（Wafer数・無効マーク・重複行など）を文の一覧にする |
 | `plan_from_shot_ids(name, shot_ids, wafer_map)` | Shot番号の一覧から手動プランを作る |
 | `run_evaluation(wafer_map, data, settings, manual_plans)` | 選び方 × 補正の評価（ブラウザ版と同じ形の辞書を返す） |
-| `run_plan(wafer_map, settings)` | 制約付きD最適・I最適の点だけを選ぶ（アプリの「計画を作成」と同じ。評価データは使わない） |
+| `run_plan(wafer_map, settings)` | D最適・I最適（制約なし・制約付き）の点だけを選ぶ（アプリの「計画を作成」と同じ。評価データは使わない） |
 | `run_sweep(wafer_map, data, settings, sweep_settings, manual_plans)` | 計測Shot数を変えた評価（トレードオフカーブ。比べる選び方は `sweep_settings["methods"]`） |
 | `selection_to_csv(wafer_map, mark_indices)` | 選択点の座標のCSV（ShotId, ShotX, ShotY, ScanDir, MarkNo, MarkX, MarkY, WaferX, WaferY） |
 | `load_settings_file(path)` | ブラウザ版で保存した設定JSONを読む（版3。版1・2も読み、以前のD最適・I最適は制約付きとして読む） |
-| `plots.*` | 選んだ点のマップ・箱ひげ図・トレードオフカーブ・推定誤差マップ |
+| `plots.*` | 選んだ点のマップ（無効マークは ✕）・残差の分布の図（`plot_residual_boxes(output, log_scale=True)` で横軸を対数）・トレードオフカーブ・推定誤差マップ |
 
 ## テスト（ブラウザ版との照合）
 
@@ -79,4 +88,4 @@ csv_text = asc.selection_to_csv(wafer_map, design_plan["sets"][0]["markIndices"]
 ## 注意事項
 
 - 計算の中身を変えるときは、ブラウザ版・MATLAB版も同じように直し、基準データを作り直してテストしてください。
-- 評価データは乱数で作る模擬データです。実データは入れていません。実データを使う場合も、リポジトリにはコミットしないでください。
+- 乱数の評価データは模擬データです。実際の計測データのファイルを使う場合は、リポジトリ直下の `data/`（Gitの管理外）に置き、コミットしないでください。
