@@ -37,6 +37,26 @@
     NORMALIZATION_NONE: "none",
     NORMALIZATION_RMS: "rms",
 
+    // ---- 評価データの用意のしかた ----
+    // zernike: Zernike項の乱数で作る。file: 計測データのファイル（csv・xlsx）を読む（Waferマップもファイルから作る）
+    DATA_SOURCE_ZERNIKE: "zernike",
+    DATA_SOURCE_FILE: "file",
+
+    // ---- 計測データのファイル（アライメント・OVL計測の標準の表）----
+    // 項目名は大文字・小文字を区別する。必須の列がないと読めない
+    MEASUREMENT_REQUIRED_COLUMNS: ["Wafer", "shotNo", "Direction", "Xmm", "Ymm", "markNo", "markXmm", "markYmm", "measX", "measY"],
+    MEASUREMENT_OPTIONAL_COLUMNS: ["DateTime", "Radius", "StsX", "StsY"],
+    // Direction の値とScan方向
+    MEASUREMENT_DIRECTIONS: { 1: "Up", 2: "Down" },
+    // StsX・StsY でこの値だけが有効（-1 は未測定。それ以外も有効とみなさない）
+    MEASUREMENT_VALID_STATUS: 0,
+    // 同じShot・Markの座標が行によって違うとみなす差 [mm]
+    MEASUREMENT_COORDINATE_TOLERANCE_MM: 1e-6,
+    // Radius の列と sqrt(Xmm² + Ymm²) の差がこれより大きければ知らせる [mm]
+    MEASUREMENT_RADIUS_TOLERANCE_MM: 1e-3,
+    // 誤りの説明を並べる上限（多すぎると読めないので）
+    MEASUREMENT_MAX_ERRORS: 20,
+
     // ---- 乱数の分布 ----
     DISTRIBUTION_UNIFORM: "uniform",
     DISTRIBUTION_NORMAL: "normal",
@@ -90,8 +110,10 @@
       { key: "constrainedD", label: "制約付きD最適", usesDraws: false, constrained: true, criterion: "D" },
       { key: "constrainedI", label: "制約付きI最適", usesDraws: false, constrained: true, criterion: "I" },
     ],
-    // 「計画を作成」で選ぶ方法（評価データを使わずに、選んだ点だけを出す）
-    PLAN_METHOD_KEYS: ["constrainedD", "constrainedI"],
+    // 「計画を作成」で選ぶ方法（評価データを使わずに、選んだ点だけを出す）。制約なしと制約付きのD最適・I最適
+    PLAN_METHOD_KEYS: ["dOptimal", "iOptimal", "constrainedD", "constrainedI"],
+    // 「計画を作成」のあとで最初に表示する選び方
+    PLAN_FIRST_VIEW_KEY: "constrainedD",
     PLAN_PREFIX: "plan:",
     MANUAL_PREFIX: "manual:",
     MAX_MANUAL_PLANS: 10,
@@ -156,6 +178,8 @@
       // 初期のマップで、選べるShotの数が3領域でほぼそろう値（36・32・36個）
       zones: { innerRadiusMm: 95, outerRadiusMm: 135 },
       evaluationData: {
+        // zernike: Zernike項の乱数で作る。file: 計測データのファイルを読む（ファイルの中身は設定に保存しない）
+        source: constants.DATA_SOURCE_ZERNIKE,
         waferCount: 100,
         seed: 1,
         distribution: constants.DISTRIBUTION_UNIFORM,

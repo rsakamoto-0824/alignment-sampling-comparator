@@ -20,12 +20,15 @@
     mapErrors: [],
     csvText: null,
     csvFileName: null,
+    // 計測データのファイル（評価データの用意のしかたが「ファイル」のときに使う。設定JSONには保存しない）
+    //   { fileName, table（読んだ表）, map, data, report, errors }。map・data は今のマップの設定で作ったもの
+    measurement: null,
     context: null,
     contextErrors: [],
     plans: createInitialPlans(),
     output: null,
     outputStale: false,
-    // 「計画を作成」の結果（制約付きD最適・I最適の選択点。評価データは使わない）
+    // 「計画を作成」の結果（制約なし・制約付きのD最適・I最適の選択点。評価データは使わない）
     plan: null,
     planStale: false,
     sweep: null,
@@ -40,6 +43,8 @@
       editing: false,
       metric: "rms",
       axis: "x",
+      // 評価結果の分布の図の横軸（linear: 等間隔、log: 対数）
+      chartScale: "linear",
       mapChoices: {},
       estimationMapMethod: null,
       sweep: { mode: "methods", metric: "rms", axis: "x", stat: "mean", scale: "linear", xAxis: "marks", target: NaN },
@@ -79,11 +84,45 @@
 
   // ---- マップと前提の作り直し --------------------------------------------
 
+  /** 計測データのファイルから、今のマップの設定（Shotの大きさ・有効半径）でマップと評価データを作る。 */
+  function buildMeasurementMap() {
+    const measurement = state.measurement;
+    if (!measurement) {
+      return { map: null, errors: ["計測データのファイルを選んでください（左の「2. 評価データ」）。"] };
+    }
+    if (!measurement.table) {
+      return { map: null, errors: measurement.errors };
+    }
+    const built = ASC.measurementData.buildFromTable(measurement.table, state.settings.map);
+    Object.assign(measurement, { map: built.map, data: built.data, report: built.report, errors: built.errors });
+    return { map: built.map, errors: built.errors };
+  }
+
+  function usesMeasurementFile() {
+    return state.settings.evaluationData.source === C.DATA_SOURCE_FILE;
+  }
+
+  /** 評価に使うデータ（Zernikeの乱数で作るか、計測データのファイルで読んだもの）。 */
+  function currentEvaluationData() {
+    if (!state.map) {
+      return { data: null, errors: state.mapErrors };
+    }
+    if (usesMeasurementFile()) {
+      const measurement = state.measurement;
+      return measurement && measurement.data && measurement.map === state.map
+        ? { data: measurement.data, errors: [] }
+        : { data: null, errors: ["計測データのファイルを選んでください（左の「2. 評価データ」）。"] };
+    }
+    return ASC.evaluationData.generateEvaluationData(state.map, state.settings.evaluationData);
+  }
+
   function rebuildMap() {
     const settings = state.settings.map;
     const previousIds = state.map ? state.map.shots.map((shot) => shot.id).join("|") : null;
     let result;
-    if (settings.source === "csv") {
+    if (usesMeasurementFile()) {
+      result = buildMeasurementMap();
+    } else if (settings.source === "csv") {
       result = state.csvText
         ? ASC.waferMap.parseMapCsv(state.csvText, settings)
         : { map: null, errors: ["CSVファイルを選んでください。"] };
@@ -149,8 +188,8 @@
     const key = JSON.stringify(state.settings.evaluationData);
     const cache = state.dataView;
     if (cache.map !== state.map || cache.key !== key) {
-      const generated = state.map ? ASC.evaluationData.generateEvaluationData(state.map, state.settings.evaluationData) : { data: null, errors: state.mapErrors };
-      state.dataView = { map: state.map, key, data: generated.data, errors: generated.errors };
+      const current = currentEvaluationData();
+      state.dataView = { map: state.map, key, data: current.data, errors: current.errors };
     }
     return state.dataView;
   }
@@ -383,6 +422,13 @@
     ASC.mapView.renderConstraintStatus(ui.byId("constraint-status"), selection.status, selection.relaxedKeys || new Set());
   }
 
+  /** 表示中の計画の選び方が、条件制約を守って選んだものかの説明。 */
+  function planConstraintText() {
+    const set = displayedSet();
+    const method = set ? methodInfo(set.method) : null;
+    return method && !method.constrained ? "制約なし。制約の表は、今の制約に照らした結果" : "制約付き";
+  }
+
   function mapHintText(editing, context, selection) {
     if (!context) {
       return "設定に誤りがあるため、手動プランの判定と制約の判定はできません: " + state.contextErrors.join(" ");
@@ -390,7 +436,7 @@
     if (isDesignPlanKey(state.view.selection)) {
       return state.planStale
         ? "「計画を作成」で選んだ点ですが、そのあとで設定が変わりました。今の設定で選ぶには、もう一度「計画を作成」を押してください。"
-        : "「計画を作成」で選んだ点です（制約付き。評価データは使っていません）。CSVで保存したり、新しい手動プランに写して手直ししたりできます。";
+        : `「計画を作成」で選んだ点です（${planConstraintText()}。評価データは使っていません）。CSVで保存したり、新しい手動プランに写して手直ししたりできます。`;
     }
     if (!activePlan()) {
       return "評価で選ばれた点です。「この選択を新しい手動プランにする」で写して手直しできます。";
@@ -614,7 +660,7 @@
     ui.byId("progress-area").hidden = !running;
   }
 
-  // ---- 計画を作成（制約付きD最適・I最適の選択点だけ） -------------------------
+  // ---- 計画を作成（制約なし・制約付きのD最適・I最適の選択点だけ） -------------
 
   /** 計画の作成に要る設定の誤り（評価データ・補正の流れ・比べる選び方は使わないので見ない）。 */
   function collectPlanErrors() {
@@ -635,8 +681,8 @@
   }
 
   /**
-   * Waferマップと制約から、制約付きD最適・I最適の選択点を作り、「マップと選択点」に表示する。
-   * 評価データを使わないので、すぐに終わる。同じ設定なら「評価を実行」の制約付きD最適・I最適と同じ点になる。
+   * Waferマップと制約から、制約なし・制約付きのD最適・I最適の選択点を作り、「マップと選択点」に表示する。
+   * 評価データを使わないので、すぐに終わる。同じ設定なら「評価を実行」の同じ選び方と同じ点になる。
    */
   function createDesignPlan() {
     if (state.running) {
@@ -668,7 +714,8 @@
     }
     ui.showMessage(plan.failedMethods.length > 0 ? "warning" : "success", "計画を作成しました。", details);
     if (plan.sets.length > 0) {
-      state.view.selection = `${C.PLAN_PREFIX}${plan.sets[0].method}`;
+      const firstSet = plan.sets.find((set) => set.method === C.PLAN_FIRST_VIEW_KEY) || plan.sets[0];
+      state.view.selection = `${C.PLAN_PREFIX}${firstSet.method}`;
       state.view.draw = 0;
     }
     renderMapTab();
@@ -710,9 +757,9 @@
       return;
     }
     ui.clearMessage();
-    const generated = ASC.evaluationData.generateEvaluationData(state.map, state.settings.evaluationData);
+    const generated = currentEvaluationData();
     if (generated.errors.length > 0) {
-      ui.showMessage("error", "評価データを作れません。次の点を直してください。", generated.errors);
+      ui.showMessage("error", "評価データを用意できません。次の点を直してください。", generated.errors);
       return;
     }
     // 計算中に設定が変わっても結果がずれないよう、設定を写してから使う
@@ -791,6 +838,14 @@
 
   // ---- 計測点数のスイープ --------------------------------------------------
 
+  /** 評価に使うWaferの枚数（ファイルなら読んだ枚数、まだ読んでいなければ0）。 */
+  function evaluationWaferCount() {
+    if (usesMeasurementFile()) {
+      return state.measurement && state.measurement.data ? state.measurement.data.waferCount : 0;
+    }
+    return state.settings.evaluationData.waferCount;
+  }
+
   /** スイープで評価する量の目安を表示する。 */
   function updateSweepEstimate() {
     const element = ui.byId("sweep-estimate");
@@ -805,7 +860,7 @@
     const markRange = marksPerShot > 0 ? `（計測Mark数 ${Math.round(sweep.startShots * marksPerShot)}〜${Math.round(sweep.endShots * marksPerShot)} 程度）` : "";
     element.textContent =
       pointCount > 0
-        ? `評価する点: ${pointCount}点${markRange}、1点あたり選択 ${setsPerPoint}組 × Wafer ${settings.evaluationData.waferCount}枚。点や試行回数が多いほど時間がかかります。`
+        ? `評価する点: ${pointCount}点${markRange}、1点あたり選択 ${setsPerPoint}組 × Wafer ${evaluationWaferCount()}枚。点や試行回数が多いほど時間がかかります。`
         : "";
     ui.byId("sweep-methods-error").textContent = methods.length === 0 ? "比べる選び方を1つ以上選んでください。" : "";
   }
@@ -823,9 +878,9 @@
       return;
     }
     ui.clearMessage();
-    const generated = ASC.evaluationData.generateEvaluationData(state.map, state.settings.evaluationData);
+    const generated = currentEvaluationData();
     if (generated.errors.length > 0) {
-      ui.showMessage("error", "評価データを作れません。次の点を直してください。", generated.errors);
+      ui.showMessage("error", "評価データを用意できません。次の点を直してください。", generated.errors);
       return;
     }
     const settings = JSON.parse(JSON.stringify(state.settings));
@@ -950,6 +1005,29 @@
     }
   }
 
+  /** 計測データのファイル（csv・xlsx）を読み、マップと評価データを作り直す。 */
+  async function loadMeasurementFile(event) {
+    const file = event.target.files[0];
+    if (!file) {
+      return;
+    }
+    try {
+      const table = await ASC.tableReader.readTableBytes(file.name, new Uint8Array(await file.arrayBuffer()));
+      state.measurement = { fileName: file.name, table, map: null, data: null, report: null, errors: [] };
+    } catch (error) {
+      state.measurement = { fileName: file.name, table: null, map: null, data: null, report: null, errors: [error.message] };
+    } finally {
+      event.target.value = "";
+    }
+    onSettingsChange("map");
+    const measurement = state.measurement;
+    if (measurement.errors.length > 0) {
+      ui.showMessage("error", `「${file.name}」を読み込めませんでした。次の点を直してください。`, measurement.errors);
+      return;
+    }
+    ui.showMessage("success", "計測データを読み込みました。マップもこのファイルから作りました。", ASC.measurementData.describeReport(state.map, measurement.report));
+  }
+
   function exportMap() {
     if (!state.map) {
       ui.showMessage("error", "保存できるマップがありません。", state.mapErrors);
@@ -1044,6 +1122,9 @@
       updateSweepEstimate();
       renderDataTab();
       const notes = [`ファイル: ${file.name}`];
+      if (settings.evaluationData.source === C.DATA_SOURCE_FILE && !state.measurement) {
+        notes.push("評価データは計測データのファイルを使う設定です。ファイルの中身は設定に含まれないので、「2. 評価データ」でファイルを読み込んでください。");
+      }
       if (content.version < 3) {
         notes.push("以前の版の設定です。D最適・I最適は「制約付きD最適・I最適」として読み、「必ず測るMark」「k個以上」「HOWA＋推定」の設定は使いません（選んだShotのMarkはすべて測ります）。");
       }
@@ -1107,6 +1188,7 @@
       ui.byId("progress-label").textContent = "中止しています…";
     });
     ui.byId("csv-file").addEventListener("change", loadCsvFile);
+    ui.byId("measurement-file").addEventListener("change", loadMeasurementFile);
     ui.byId("export-map-button").addEventListener("click", exportMap);
     ui.byId("save-settings-button").addEventListener("click", saveSettings);
     ui.byId("settings-file").addEventListener("change", loadSettingsFile);

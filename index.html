@@ -15,7 +15,7 @@
           <span id="progress-label" aria-live="polite"></span>
           <button type="button" class="button-secondary" id="cancel-button">中止</button>
         </div>
-        <button type="button" class="button-secondary" id="plan-button">計画を作成（制約付きD・I最適）</button>
+        <button type="button" class="button-secondary" id="plan-button">計画を作成（D・I最適）</button>
         <button type="button" class="button-primary" id="run-button">評価を実行</button>
       </div>
     </header>
@@ -28,13 +28,14 @@
         <details class="settings-section" open>
           <summary>1. Waferマップ</summary>
           <div class="section-body">
-            <fieldset>
+            <fieldset id="map-source-fieldset">
               <legend>マップの用意のしかた</legend>
               <div class="choice-group">
                 <label class="choice"><input type="radio" name="map-source" value="generate" data-setting="map.source" /> 生成する</label>
                 <label class="choice"><input type="radio" name="map-source" value="csv" data-setting="map.source" /> CSVを読み込む</label>
               </div>
             </fieldset>
+            <p class="notice-inline" id="map-file-note" hidden>今は「2. 評価データ」で読み込んだ計測データのファイルから、マップ（Shot・Mark・Scan方向）を作っています。ここで変えられるのは、Shotの幅・高さ（描画用）と有効半径です。</p>
 
             <div class="field-row">
               <div class="field">
@@ -121,6 +122,30 @@
         <details class="settings-section">
           <summary>2. 評価データ（Wafer高次傾向）</summary>
           <div class="section-body">
+            <fieldset>
+              <legend>評価データの用意のしかた</legend>
+              <div class="choice-group">
+                <label class="choice"><input type="radio" name="data-source" value="zernike" data-setting="evaluationData.source" /> Zernikeの乱数で作る</label>
+                <label class="choice"><input type="radio" name="data-source" value="file" data-setting="evaluationData.source" /> 計測データのファイル（csv・xlsx）を読み込む</label>
+              </div>
+            </fieldset>
+
+            <div id="measurement-fields" hidden>
+              <div class="field">
+                <label for="measurement-file">計測データのファイル（1行1Mark）</label>
+                <input type="file" id="measurement-file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+              </div>
+              <p class="hint">アライメント・OVL計測の標準の表です。1行目の見出しは Wafer, DateTime, shotNo, Direction, Xmm, Ymm, Radius, markNo, markXmm, markYmm, measX, measY, StsX, StsY（大文字・小文字も同じ。DateTime・Radius・StsX・StsY はなくても読めます）。</p>
+              <ul class="hint-list">
+                <li>Wafer と DateTime の組を1枚のWaferとして評価します。Waferマップも、このファイルのShot（shotNo, Xmm, Ymm）・Mark（markNo, markXmm, markYmm）・Scan方向（Direction: 1 = Up、2 = Down）から作ります。</li>
+                <li>StsX・StsY が 0 の値だけを使います（-1 は未測定）。どれかのWaferでXかYが測れていないMarkは<strong>無効マーク</strong>として、マップに ✕ で示し、計測の対象にしません。</li>
+                <li>同じWafer・同じMarkの行が重複していれば、X・Yそれぞれ平均します。座標は mm、計測値は nm です。</li>
+                <li>見本: samples/sample_measurements.csv（乱数で作った架空のデータ）。ファイルの中身は設定JSONに保存しません。</li>
+              </ul>
+              <p id="measurement-summary" class="hint" aria-live="polite"></p>
+            </div>
+
+            <div id="zernike-fields">
             <div class="field-row">
               <div class="field">
                 <label for="wafer-count">Wafer数</label>
@@ -199,6 +224,7 @@
               </div>
             </div>
             <p class="hint">Scan方向のずれは、UpのShotに +δ、DownのShotに −δ を足します。δはWaferごとに上の分布で決めます（大きさは ±a または σ）。</p>
+            </div>
           </div>
         </details>
 
@@ -485,18 +511,27 @@
 
         <section class="tab-panel help-content" role="tabpanel" id="panel-help" aria-labelledby="tab-help" hidden>
           <h2>このアプリでできること</h2>
-          <p>Wafer高次補正（HOWA）のアライメント計測で、どのMarkを測るかの選び方を、条件制約つきで比べます。アプリの中で乱数のWafer高次傾向（評価データ）を作り、選んだMarkの計測値から補正したときの残差で評価します。</p>
+          <p>Wafer高次補正（HOWA）のアライメント計測で、どのMarkを測るかの選び方を、条件制約つきで比べます。アプリの中で乱数のWafer高次傾向（評価データ）を作るか、全Markを測った計測データのファイル（csv・xlsx）を読み込み、選んだMarkの計測値から補正したときの残差で評価します。</p>
           <h2>使う順番</h2>
           <ol>
             <li>「1. Waferマップ」でShotとMarkを用意する（生成するか、CSVを読み込む）</li>
-            <li>「2. 評価データ」でZernike項の大きさ、計測ノイズ、Scan方向のずれを決める</li>
+            <li>「2. 評価データ」でZernike項の大きさ、計測ノイズ、Scan方向のずれを決める。実際の計測データで比べるときは、計測データのファイル（csv・xlsx）を読み込む（Waferマップもファイルから作ります）</li>
             <li>「3. 補正モデル」でHOWAの多項式の項、比べる補正の流れ、推定手法を選ぶ</li>
             <li>「4. サンプリング」と「5. 条件制約」で、計測Shot数・制約（強制計測Shot・除外Shotを含む）を決める</li>
-            <li>制約付きD最適・I最適で選んだ点だけを見たいときは「計画を作成」を押す（評価データは使わず、すぐに終わります）。「マップと選択点」に表示し、CSVで保存できます</li>
+            <li>D最適・I最適（制約なし・制約付き）で選んだ点だけを見たいときは「計画を作成」を押す（評価データは使わず、すぐに終わります）。4つの選び方の点を「マップと選択点」に表示し、CSVで保存できます</li>
             <li>現行のサンプリングなど、人が選んだ点と比べたいときは「マップと選択点」で手動プランを作る（Shotをクリック、またはShot番号を貼り付け）</li>
             <li>「評価を実行」を押し、「評価結果」で選び方と補正を比べ、「選び方ごとのマップ」で選ばれた点を見比べる</li>
             <li>計測点の数を決めたいときは「計測点数のスイープ」で、計測Mark数と精度のトレードオフを見る</li>
           </ol>
+          <h2>計測データのファイル（csv・xlsx）</h2>
+          <ul>
+            <li>アライメント・OVL計測の標準の表を読みます。1行目の見出しは Wafer, DateTime, shotNo, Direction, Xmm, Ymm, Radius, markNo, markXmm, markYmm, measX, measY, StsX, StsY（大文字・小文字も同じ）です。DateTime・Radius・StsX・StsY はなくても読めます。xlsxは、見出しのある最初のシートを読みます。</li>
+            <li>Wafer と DateTime の組を1枚のWaferとして評価します。Waferマップは、ファイルのShot（shotNo, Xmm, Ymm）・Mark（markNo, markXmm, markYmm）・Scan方向（Direction: 1 = Up、2 = Down）から作ります。座標は mm、計測値は nm です。</li>
+            <li>StsX・StsY が 0 の値だけを使います（-1 は未測定で、0 とはみなしません）。どれかのWaferでXかYが測れていない（未測定か、行がない）Markは<strong>無効マーク</strong>として、マップに ✕ で示し、計測の対象にしません。無効マークのあるShotは「Markが揃わないShot」になり、すべて無効マークのShotは破線の枠で示して選びません。</li>
+            <li>同じWafer・同じMarkの行が重複していれば、X・Yそれぞれ平均します。Radius が sqrt(Xmm² + Ymm²) と合わない行は、読み込みの結果で知らせます（計算には使いません）。</li>
+            <li>評価では、ファイルの計測値をそのまま「真のずれ」とみなし（計測ノイズは0として足しません）、選んだMarkの計測値から補正した残差を、無効マークを除く全Markで求めます。</li>
+            <li>見本は samples/sample_measurements.csv（乱数で作った架空のデータ）です。ファイルの中身は設定JSONに保存しないので、設定を読み込んだあとはファイルも読み込み直してください。</li>
+          </ul>
           <h2>選び方</h2>
           <p>どの選び方もShotを選び、選んだShotではそのShotに紐づくMark（有効範囲の中にあるもの）をすべて測ります。</p>
           <ul>
@@ -539,7 +574,7 @@
           <ul>
             <li>残差は、真のずれから補正量を引いた値です。全Waferの全Markで求め、Waferごとに RMS・|平均|+3σ・最大 を出します。</li>
             <li>「一覧」は、選び方（行）× 補正（列）のWafer平均です。行ごとに最も小さい値に ★ を付けています。</li>
-            <li>箱ひげ図は、選び方ごとにHOWAのみと各推定手法（推定→HOWA）を並べます。箱は25〜75%点、線は5〜95%点、箱の中の縦線は中央値です。ランダム系は全試行・全Waferの値をまとめています。</li>
+            <li>「残差の分布」の図（箱ひげ図）は、選び方ごとにHOWAのみと各推定手法（推定→HOWA）を並べます。薄い山はWaferごとの値の分布の形、太い棒は25〜75%点、線は5〜95%点、白丸は中央値です。値が20個より少ない行（Waferが少ないファイルなど）は、山の代わりに1つずつの値を点で描きます。ランダム系は全試行・全Waferの値をまとめています。縦の破線は全点計測の中央値です。「図の横軸」を対数にすると、値の小さい選び方どうしの差が見やすくなります。</li>
             <li>「GPが学習した値」は、ガウス過程回帰がWaferごとに選んだ相関の長さとノイズ比です。</li>
             <li>「選び方ごとのマップ」のタブで、選び方ごとに選んだ点を並べて見比べられます。ランダム・ポアソンは中央・最良・最悪の試行か、全試行で各Shotが選ばれた割合を表示できます。</li>
             <li>「全点計測」は全Markを測ってHOWAで補正した残差です。多項式で表せない成分だけが残るので、選び方による悪化を測る物差しになります。</li>
@@ -550,7 +585,7 @@
           </ul>
           <h2>推定精度</h2>
           <ul>
-            <li>推定手法（RBF・GP）が未計測Markのずれをどれだけ当てられるかを、<strong>推定値 − 真のずれ</strong>（ノイズのない値）で評価します。計測したMarkは評価に入れません。</li>
+            <li>推定手法（RBF・GP）が未計測Markのずれをどれだけ当てられるかを、<strong>推定値 − 真のずれ</strong>（ノイズのない値）で評価します。計測したMarkは評価に入れません。計測データのファイルでは、ファイルの計測値を真のずれとみなします。</li>
             <li>「HOWA（多項式の予測）」は、計測Markに当てはめた多項式で未計測Markを予測した場合です。これより悪い推定手法は、推定→HOWA で使っても補正を良くしにくいと考えられます。</li>
             <li>「推定誤差のマップ」は、未計測Markごとに全WaferのRMSを色で示します。Wafer端など、推定を外しやすい場所が分かります。</li>
           </ul>
@@ -564,7 +599,8 @@
           </ul>
           <h2>注意</h2>
           <ul>
-            <li>評価データはすべて乱数です。実測データは読み込みません。</li>
+            <li>「Zernikeの乱数で作る」の評価データは乱数です。実際の計測データで比べるときは、計測データのファイルを読み込みます（計算はすべてブラウザの中で行い、外部へは送りません）。</li>
+            <li>実際の計測データのファイルや、それを読み込んで保存した結果は、リポジトリにコミットしないでください（data フォルダに置くと、Gitの管理外になります）。</li>
             <li>多項式で表せる成分だけでノイズがないと、どの選び方でも残差はほぼ0になり差が出ません。6次以上のZernike項や計測ノイズを入れて比べてください。</li>
             <li>計測点数が多項式の項数より少ないと、補正が不安定になります（警告を出します）。項数の2倍以上が目安です。</li>
           </ul>
@@ -577,8 +613,10 @@
     <script src="src/js/constants.js"></script>
     <script src="src/js/math-utils.js"></script>
     <script src="src/js/zernike.js"></script>
+    <script src="src/js/table-reader.js"></script>
     <script src="src/js/wafer-map.js"></script>
     <script src="src/js/evaluation-data.js"></script>
+    <script src="src/js/measurement-data.js"></script>
     <script src="src/js/correction.js"></script>
     <script src="src/js/constraints.js"></script>
     <script src="src/js/sampling.js"></script>

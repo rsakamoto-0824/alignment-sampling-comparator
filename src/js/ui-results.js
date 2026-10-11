@@ -1,5 +1,5 @@
 /**
- * 評価結果の表示（一覧表・箱ひげ図・表）とCSVの書き出し。
+ * 評価結果の表示（一覧表・分布の図（箱ひげ図）・表）とCSVの書き出し。
  * 比べる補正は「HOWAのみ」と「推定→HOWA × 推定手法」。色は推定手法ごとに固定する
  * （推定手法を減らしても、残った手法の色は変えない）。
  */
@@ -10,6 +10,8 @@
   const ui = ASC.ui;
 
   const METRIC_LABELS = { rms: "RMS", mean3sigma: "|平均|+3σ", max: "最大" };
+  // 分布の図の横軸の目盛り。対数にすると、値の小さい選び方どうしの差が見やすい
+  const CHART_SCALES = { linear: "等間隔", log: "対数" };
   const AXIS_LABELS = { x: "X", y: "Y" };
   // 推定手法ごとの色。"howa" は HOWAのみ（推定精度では多項式の予測）
   const SERIES_COLORS = {
@@ -24,19 +26,36 @@
   // 一覧表の色の段階（値が大きいほど濃い）
   const HEAT_STEPS = 5;
 
-  // 箱ひげ図の寸法（SVGの単位）
+  // 分布の図（箱ひげ図に分布の形を重ねたもの）の寸法（SVGの単位）
   const CHART_WIDTH = 880;
   const GROUP_LABEL_WIDTH = 150;
   const ROW_LABEL_WIDTH = 150;
-  const RIGHT_PADDING = 24;
-  const TOP_PADDING = 28;
-  const AXIS_HEIGHT = 44;
-  const ROW_HEIGHT = 22;
-  const GROUP_GAP = 16;
-  const BOX_HEIGHT = 12;
+  const RIGHT_PADDING = 28;
+  const TOP_PADDING = 34;
+  const AXIS_HEIGHT = 48;
+  const ROW_HEIGHT = 30;
+  const GROUP_GAP = 8;
+  // 分布の形（山）の高さの半分、25〜75%点の棒の太さと角の丸み、5〜95%点の線の太さ、中央値の丸の半径
+  const VIOLIN_HALF_HEIGHT = 12;
+  const BOX_HEIGHT = 8;
+  const BOX_RADIUS = 4;
+  const WHISKER_WIDTH = 2;
+  const MEDIAN_RADIUS = 3.5;
+  // 値が少ない行は、分布の形の代わりに値を点で描く（点の半径と、重ならないように上下へずらす幅）
+  const MIN_VIOLIN_COUNT = 20;
+  const DOT_RADIUS = 3;
+  const DOT_SPREAD = 9;
+  // 分布の形を計算する点の数と、横軸の両端に足す余白（値の幅に対する割合）
+  const DENSITY_STEPS = 64;
+  const AXIS_PADDING_RATIO = 0.05;
+  const TICK_TARGET_COUNT = 6;
+  // 点をずらす量を決める数（黄金比の小数部。点が上下に均等に散らばる）
+  const GOLDEN_FRACTION = 0.6180339887;
 
   // 描いている結果の選び方の一覧（自動の選び方と手動プラン）。render で入れる
   let methodsInView = [];
+  // 図ごとに違う切り抜きの名前を付けるための番号
+  let chartCounter = 0;
 
   /** 表やグラフに出す選び方の名前。手動プランは自動の選び方と見分けられるように「（手動）」を添える。 */
   function displayName(method) {
@@ -76,13 +95,57 @@
     return { max, ticks };
   }
 
+  /** 1・2・5 の倍数のきりのよい刻みで、low〜high を含む等間隔の範囲と目盛り（0から始めない）。 */
+  function niceRange(low, high) {
+    const rough = (high - low) / TICK_TARGET_COUNT;
+    const power = Math.pow(10, Math.floor(Math.log10(rough)));
+    const step = [1, 2, 5, 10].map((factor) => factor * power).find((candidate) => candidate >= rough);
+    const min = Math.floor(low / step + 1e-9) * step;
+    const max = Math.ceil(high / step - 1e-9) * step;
+    const ticks = [];
+    for (let value = min; value <= max + step * 1e-9; value += step) {
+      ticks.push(Math.round(value / step) * step);
+    }
+    return { min, max, ticks, log: false, transform: (value) => value };
+  }
+
+  /** 対数の範囲と目盛り（1・2・5 × 10のべき）。low は正の値。 */
+  function niceLogRange(low, high) {
+    const candidates = [];
+    for (let exponent = Math.floor(Math.log10(low)) - 1; exponent <= Math.ceil(Math.log10(high)) + 1; exponent++) {
+      for (const factor of [1, 2, 5]) {
+        candidates.push(Number((factor * Math.pow(10, exponent)).toPrecision(12)));
+      }
+    }
+    const min = candidates.filter((value) => value <= low * (1 + 1e-9)).pop();
+    const max = candidates.find((value) => value >= high * (1 - 1e-9));
+    return { min, max, ticks: candidates.filter((value) => value >= min && value <= max), log: true, transform: Math.log10 };
+  }
+
   function baselineStats(output, axis, metric) {
     return ASC.evaluator.summarizeStore(output.baselines.allMarks.howa)[axis][metric];
   }
 
-  /** 箱ひげ図の1行。group は選び方、row は補正や推定手法。 */
-  function chartRow(methodKey, rowText, fullLabel, color, stats) {
-    return { method: methodKey, rowLabel: rowText, fullLabel, color, stats };
+  /** 値の一覧から、計算できた値だけを小さい順に並べる。 */
+  function sortedFinite(arrays) {
+    const values = [];
+    for (const array of arrays) {
+      for (const value of array) {
+        if (Number.isFinite(value)) {
+          values.push(value);
+        }
+      }
+    }
+    return Float64Array.from(values).sort();
+  }
+
+  /** 図の1行。group は選び方、row は補正や推定手法。values はWaferごと（全試行）の値（小さい順）。 */
+  function chartRow(methodKey, rowText, fullLabel, color, stats, values) {
+    return { method: methodKey, rowLabel: rowText, fullLabel, color, stats, values };
+  }
+
+  function setsOfMethod(output, methodKey) {
+    return output.sets.filter((set) => set.method === methodKey && set.results);
   }
 
   /** 残差の箱ひげ図に並べる行（選び方 × 補正）。最後に全点計測の基準を置く。 */
@@ -93,14 +156,26 @@
       if (!summary) {
         continue;
       }
+      const sets = setsOfMethod(output, method.key);
       groups.push({
         method: method.key,
-        rows: variants.map((variant) => chartRow(method.key, rowLabel(variant), variant.label, seriesColor(variant), summary.variants[variant.key][axis][metric].all)),
+        rows: variants.map((variant) =>
+          chartRow(
+            method.key,
+            rowLabel(variant),
+            variant.label,
+            seriesColor(variant),
+            summary.variants[variant.key][axis][metric].all,
+            sortedFinite(sets.map((set) => set.results[variant.key][axis][metric]))
+          )
+        ),
       });
     }
     groups.push({
       method: BASELINE_KEY,
-      rows: [chartRow(BASELINE_KEY, "HOWAのみ", "HOWAのみ", SERIES_COLORS.howa, baselineStats(output, axis, metric))],
+      rows: [
+        chartRow(BASELINE_KEY, "HOWAのみ", "HOWAのみ", SERIES_COLORS.howa, baselineStats(output, axis, metric), sortedFinite([output.baselines.allMarks.howa[axis][metric]])),
+      ],
     });
     return groups;
   }
@@ -114,9 +189,19 @@
         continue;
       }
       const keys = output.estimationKeys.filter((key) => summary.estimation[key]);
+      const sets = setsOfMethod(output, method.key);
       groups.push({
         method: method.key,
-        rows: keys.map((key) => chartRow(method.key, estimationRowLabel(key), ASC.evaluator.estimationLabel(key), SERIES_COLORS[key], summary.estimation[key][axis][metric].all)),
+        rows: keys.map((key) =>
+          chartRow(
+            method.key,
+            estimationRowLabel(key),
+            ASC.evaluator.estimationLabel(key),
+            SERIES_COLORS[key],
+            summary.estimation[key][axis][metric].all,
+            sortedFinite(sets.map((set) => set.estimation[key][axis][metric]))
+          )
+        ),
       });
     }
     return groups;
@@ -126,75 +211,176 @@
     return key === "howa" ? "HOWA（多項式）" : ASC.evaluator.estimationLabel(key);
   }
 
-  /**
-   * 横向きの箱ひげ図。groups: [{ method, rows: [{ rowLabel, fullLabel, color, stats }] }]
-   * legendItems: [{ label, color }]、axisTitle: 横軸の説明、ariaLabel: 図の説明
-   */
-  function renderChart(container, groups, legendItems, axisTitle, ariaLabel) {
-    const rowCount = groups.reduce((sum, group) => sum + group.rows.length, 0);
-    const height = TOP_PADDING + rowCount * ROW_HEIGHT + (groups.length - 1) * GROUP_GAP + AXIS_HEIGHT;
-    let maximum = 0;
+  /** 横軸の範囲。5〜95%点（点で描く行は全部の値）が入るように、少し余白を足す。scaleKind は "linear" か "log"。 */
+  function valueDomain(groups, scaleKind) {
+    let low = Infinity;
+    let high = -Infinity;
     for (const group of groups) {
       for (const row of group.rows) {
-        if (Number.isFinite(row.stats.p95)) {
-          maximum = Math.max(maximum, row.stats.p95);
+        const dotted = row.values.length < MIN_VIOLIN_COUNT;
+        const rowLow = dotted && row.values.length > 0 ? row.values[0] : row.stats.p5;
+        const rowHigh = dotted && row.values.length > 0 ? row.values[row.values.length - 1] : row.stats.p95;
+        if (Number.isFinite(rowLow) && Number.isFinite(rowHigh)) {
+          low = Math.min(low, rowLow);
+          high = Math.max(high, rowHigh);
         }
       }
     }
-    const scale = niceTicks(maximum * 1.05);
+    if (!Number.isFinite(low)) {
+      return niceRange(0, 1);
+    }
+    if (scaleKind === "log" && low > 0) {
+      return niceLogRange(low, high);
+    }
+    const padding = (high - low) * AXIS_PADDING_RATIO || Math.abs(high) * AXIS_PADDING_RATIO || 1;
+    // 残差などの指標は0以上なので、余白で負の側へはみ出さない
+    return niceRange(low >= 0 ? Math.max(0, low - padding) : low - padding, high + padding);
+  }
+
+  /**
+   * 分布の形（ガウス核の密度推定）を、行の中心線から上下に広げた形のパスにする。値の最小〜最大の範囲で描き、
+   * 高さは行ごとに最も高いところを VIOLIN_HALF_HEIGHT にそろえる。描けないとき（値が1種類など）は null。
+   */
+  function densityPath(sortedValues, scale, xOfTransformed, center) {
+    // 横軸の目盛り（等間隔・対数）の上で分布の形を求める（対数なら対数にした値の分布）
+    const values = Array.from(sortedValues, scale.transform).filter(Number.isFinite);
+    const count = values.length;
+    if (count < 2) {
+      return null;
+    }
+    const mean = values.reduce((sum, value) => sum + value, 0) / count;
+    const variance = values.reduce((sum, value) => sum + (value - mean) * (value - mean), 0) / Math.max(1, count - 1);
+    const spread = values[Math.floor(0.75 * (count - 1))] - values[Math.floor(0.25 * (count - 1))];
+    // 帯域幅はシルバーマンの目安（外れ値に引きずられないよう、標準偏差と四分位範囲の小さいほうを使う）
+    const robust = Math.min(Math.sqrt(variance), spread / 1.34) || Math.sqrt(variance);
+    const bandwidth = 0.9 * robust * Math.pow(count, -0.2);
+    const from = values[0];
+    const to = values[count - 1];
+    if (!(bandwidth > 0) || !(to > from)) {
+      return null;
+    }
+    const points = [];
+    let peak = 0;
+    for (let step = 0; step <= DENSITY_STEPS; step++) {
+      const value = from + ((to - from) * step) / DENSITY_STEPS;
+      let density = 0;
+      for (let i = 0; i < count; i++) {
+        const distance = (value - values[i]) / bandwidth;
+        density += Math.exp(-0.5 * distance * distance);
+      }
+      points.push([xOfTransformed(value), density]);
+      peak = Math.max(peak, density);
+    }
+    const upper = points.map(([x, density]) => `${x.toFixed(1)},${(center - (density / peak) * VIOLIN_HALF_HEIGHT).toFixed(1)}`);
+    const lower = points
+      .slice()
+      .reverse()
+      .map(([x, density]) => `${x.toFixed(1)},${(center + (density / peak) * VIOLIN_HALF_HEIGHT).toFixed(1)}`);
+    return `M ${upper.join(" L ")} L ${lower.join(" L ")} Z`;
+  }
+
+  /**
+   * 横向きの分布の図。各行に、分布の形（薄い山）、25〜75%点の棒、5〜95%点の線、中央値の丸を重ねる。
+   * 値が少ない行は、分布の形の代わりに値を点で描く。
+   * groups: [{ method, rows: [{ rowLabel, fullLabel, color, stats, values }] }]
+   * legendItems: [{ label, color }]、axisTitle: 横軸の説明、ariaLabel: 図の説明、
+   * reference: 縦の破線で示す基準の値（{ value, label }。なければ null）
+   */
+  function renderChart(container, groups, legendItems, axisTitle, ariaLabel, reference, scaleKind) {
+    const rowCount = groups.reduce((sum, group) => sum + group.rows.length, 0);
+    const height = TOP_PADDING + rowCount * ROW_HEIGHT + (groups.length - 1) * GROUP_GAP + AXIS_HEIGHT;
+    const domain = valueDomain(groups, scaleKind);
     const plotLeft = GROUP_LABEL_WIDTH + ROW_LABEL_WIDTH;
     const plotWidth = CHART_WIDTH - plotLeft - RIGHT_PADDING;
-    const xOf = (value) => plotLeft + (Math.min(value, scale.max) / scale.max) * plotWidth;
+    const transformedMin = domain.transform(domain.min);
+    const transformedMax = domain.transform(domain.max);
+    const xOfTransformed = (value) => plotLeft + ((Math.min(Math.max(value, transformedMin), transformedMax) - transformedMin) / (transformedMax - transformedMin)) * plotWidth;
+    // 対数で0以下の値は描けないので、範囲の左端に寄せる
+    const xOf = (value) => xOfTransformed(domain.log && !(value > 0) ? transformedMin : domain.transform(value));
+    const plotTop = TOP_PADDING - 6;
     const plotBottom = height - AXIS_HEIGHT;
 
     const svg = ui.createSvg("svg", { viewBox: `0 0 ${CHART_WIDTH} ${height}`, role: "img", "aria-label": ariaLabel });
-    for (const tick of scale.ticks) {
+    // 分布の形の裾が軸の外へはみ出さないように、描く範囲を切り取る
+    const clipId = `chart-clip-${++chartCounter}`;
+    svg.append(
+      ui.createSvg("defs", null,
+        ui.createSvg("clipPath", { id: clipId }, ui.createSvg("rect", { x: plotLeft, y: 0, width: plotWidth, height }))
+      )
+    );
+
+    // 選び方ごとの帯（1つおきに薄い色を敷き、区切り線を使わずに群を分ける）
+    let y = TOP_PADDING;
+    const groupTops = [];
+    groups.forEach((group, groupIndex) => {
+      if (groupIndex > 0) {
+        y += GROUP_GAP;
+      }
+      groupTops.push(y);
+      const groupHeight = group.rows.length * ROW_HEIGHT;
+      if (groupIndex % 2 === 1) {
+        svg.append(ui.createSvg("rect", { className: "chart-band", x: 0, y: y - GROUP_GAP / 2, width: CHART_WIDTH, height: groupHeight + GROUP_GAP, rx: 6 }));
+      }
+      y += groupHeight;
+    });
+
+    for (const tick of domain.ticks) {
       const x = xOf(tick);
-      svg.append(ui.createSvg("line", { className: "chart-gridline", x1: x, y1: TOP_PADDING - 8, x2: x, y2: plotBottom }));
-      svg.append(ui.createSvg("text", { className: "chart-tick", x, y: plotBottom + 18, "text-anchor": "middle", text: formatTick(tick) }));
+      svg.append(ui.createSvg("line", { className: "chart-gridline", x1: x, y1: plotTop, x2: x, y2: plotBottom }));
+      svg.append(ui.createSvg("text", { className: "chart-tick", x, y: plotBottom + 20, "text-anchor": "middle", text: formatTick(tick) }));
     }
+    svg.append(ui.createSvg("line", { className: "chart-axis", x1: plotLeft, y1: plotBottom, x2: plotLeft + plotWidth, y2: plotBottom }));
     svg.append(
       ui.createSvg("text", {
-        className: "chart-tick",
+        className: "chart-axis-title",
         x: plotLeft + plotWidth / 2,
-        y: plotBottom + 38,
+        y: plotBottom + 42,
         "text-anchor": "middle",
         text: axisTitle,
       })
     );
+    if (reference && Number.isFinite(reference.value)) {
+      const x = xOf(reference.value);
+      const nearRight = x > plotLeft + plotWidth * 0.75;
+      svg.append(ui.createSvg("line", { className: "chart-reference-line", x1: x, y1: plotTop, x2: x, y2: plotBottom }));
+      svg.append(
+        ui.createSvg("text", {
+          className: "chart-reference-label",
+          x: nearRight ? x - 6 : x + 6,
+          y: plotTop - 6,
+          "text-anchor": nearRight ? "end" : "start",
+          text: `${reference.label} ${ui.formatNumber(reference.value)} nm`,
+        })
+      );
+    }
 
-    let y = TOP_PADDING;
     const tooltip = ui.byId("chart-tooltip");
     groups.forEach((group, groupIndex) => {
-      if (groupIndex > 0) {
-        y += GROUP_GAP;
-        svg.append(ui.createSvg("line", { className: "chart-gridline", x1: 0, y1: y - GROUP_GAP / 2, x2: CHART_WIDTH, y2: y - GROUP_GAP / 2 }));
-      }
-      const groupTop = y;
+      let rowTop = groupTops[groupIndex];
       for (const row of group.rows) {
         // 4系列以上は色だけで見分けにくいので、行ごとに名前を添える
         svg.append(
           ui.createSvg("text", {
             className: "chart-row-label",
-            x: plotLeft - 10,
-            y: y + ROW_HEIGHT / 2,
+            x: plotLeft - 12,
+            y: rowTop + ROW_HEIGHT / 2,
             "text-anchor": "end",
             "dominant-baseline": "central",
             text: row.rowLabel,
           })
         );
         if (Number.isFinite(row.stats.median)) {
-          svg.append(drawBox(row, y, xOf, tooltip));
+          svg.append(drawDistribution(row, rowTop, xOf, { plotLeft, plotWidth, clipId, scale: domain, xOfTransformed }, tooltip));
         } else {
-          svg.append(ui.createSvg("text", { className: "chart-tick", x: xOf(0) + 4, y: y + ROW_HEIGHT / 2, "dominant-baseline": "central", text: "計算できませんでした" }));
+          svg.append(ui.createSvg("text", { className: "chart-tick", x: plotLeft + 4, y: rowTop + ROW_HEIGHT / 2, "dominant-baseline": "central", text: "計算できませんでした" }));
         }
-        y += ROW_HEIGHT;
+        rowTop += ROW_HEIGHT;
       }
       svg.append(
         ui.createSvg("text", {
-          className: "chart-label",
-          x: 4,
-          y: (groupTop + y) / 2,
+          className: "chart-group-label",
+          x: 8,
+          y: groupTops[groupIndex] + (group.rows.length * ROW_HEIGHT) / 2,
           "dominant-baseline": "central",
           text: methodLabel(group.method),
         })
@@ -206,50 +392,66 @@
       { className: "chart-legend", "aria-label": "凡例" },
       legendItems.map((item) => ui.create("li", null, [ui.create("span", { className: "chart-swatch", style: `background:${item.color}` }), item.label]))
     );
-    container.replaceChildren(legend, ui.create("div", { className: "chart-frame" }, svg));
+    container.replaceChildren(legend, ui.create("div", { className: "chart-frame" }, svg), readingKey());
+  }
+
+  /** 図の読み方（形の意味）を小さな見本で示す。 */
+  function readingKey() {
+    const sample = (children) => ui.createSvg("svg", { className: "chart-key-symbol", viewBox: "0 0 44 20", "aria-hidden": "true" }, children);
+    const color = "var(--ink-muted)";
+    const items = [
+      [sample([ui.createSvg("path", { d: "M 2 10 C 12 2, 20 2, 26 6 C 32 9, 38 9, 42 10 C 38 11, 32 11, 26 14 C 20 18, 12 18, 2 10 Z", fill: color, "fill-opacity": 0.18, stroke: color, "stroke-opacity": 0.6 })]), "分布の形（Waferごとの値の多さ）"],
+      [sample([ui.createSvg("rect", { x: 8, y: 6, width: 28, height: BOX_HEIGHT, rx: BOX_RADIUS, fill: color })]), "25〜75%点"],
+      [sample([ui.createSvg("line", { x1: 3, y1: 10, x2: 41, y2: 10, stroke: color, "stroke-width": WHISKER_WIDTH, "stroke-linecap": "round" })]), "5〜95%点"],
+      [sample([ui.createSvg("circle", { className: "chart-median", cx: 22, cy: 10, r: MEDIAN_RADIUS + 1, stroke: color })]), "中央値"],
+      [sample([0, 1, 2, 3, 4].map((index) => ui.createSvg("circle", { cx: 6 + index * 8, cy: 10 + (index % 2 === 0 ? -3 : 3), r: DOT_RADIUS, fill: color, "fill-opacity": 0.6 }))), `値が${MIN_VIOLIN_COUNT}個より少ない行は、1つずつの値を点で描きます`],
+    ];
+    return ui.create("ul", { className: "chart-key", "aria-label": "図の読み方" }, items.map(([icon, text]) => ui.create("li", null, [icon, ui.create("span", { text })])));
   }
 
   function formatTick(value) {
     return Number.isInteger(value) ? String(value) : String(Number(value.toPrecision(3)));
   }
 
-  /** 1本の箱ひげ。箱は25〜75%点、線は5〜95%点、白い縦線は中央値。 */
-  function drawBox(row, top, xOf, tooltip) {
+  /** 1行の分布（形・25〜75%点の棒・5〜95%点の線・中央値の丸）。ポインターを合わせると数値を出す。 */
+  function drawDistribution(row, top, xOf, plot, tooltip) {
     const stats = row.stats;
     const center = top + ROW_HEIGHT / 2;
     const color = row.color;
     const label = `${methodLabel(row.method)}・${row.fullLabel}`;
     const group = ui.createSvg("g", {
-      className: "chart-box",
+      className: "chart-row",
       tabindex: "0",
       "aria-label": `${label}: 中央値 ${ui.formatNumber(stats.median)} nm、平均 ${ui.formatNumber(stats.mean)} nm、95%点 ${ui.formatNumber(stats.p95)} nm`,
     });
-    // 当たり判定は箱より大きくする
-    group.append(ui.createSvg("rect", { x: xOf(0), y: top, width: xOf(Infinity) - xOf(0), height: ROW_HEIGHT, fill: "transparent" }));
-    group.append(ui.createSvg("line", { x1: xOf(stats.p5), y1: center, x2: xOf(stats.p95), y2: center, stroke: color, "stroke-width": 2, "stroke-linecap": "round" }));
-    for (const value of [stats.p5, stats.p95]) {
-      group.append(ui.createSvg("line", { x1: xOf(value), y1: center - 4, x2: xOf(value), y2: center + 4, stroke: color, "stroke-width": 2 }));
+    // 当たり判定は行全体にする（ポインターを合わせると行に薄い色が付く）
+    group.append(ui.createSvg("rect", { className: "chart-row-hit", x: plot.plotLeft - ROW_LABEL_WIDTH, y: top + 1, width: plot.plotWidth + ROW_LABEL_WIDTH, height: ROW_HEIGHT - 2, rx: 4 }));
+    const marks = ui.createSvg("g", { "clip-path": `url(#${plot.clipId})`, "pointer-events": "none" });
+    if (row.values.length >= MIN_VIOLIN_COUNT) {
+      const path = densityPath(row.values, plot.scale, plot.xOfTransformed, center);
+      if (path) {
+        marks.append(ui.createSvg("path", { className: "chart-violin", d: path, fill: color, stroke: color }));
+      }
+    } else {
+      row.values.forEach((value, index) => {
+        const offset = (((index * GOLDEN_FRACTION) % 1) - 0.5) * 2 * DOT_SPREAD;
+        marks.append(ui.createSvg("circle", { className: "chart-dot", cx: xOf(value), cy: center + offset, r: DOT_RADIUS, fill: color }));
+      });
     }
+    marks.append(ui.createSvg("line", { x1: xOf(stats.p5), y1: center, x2: xOf(stats.p95), y2: center, stroke: color, "stroke-width": WHISKER_WIDTH, "stroke-linecap": "round" }));
     const boxLeft = xOf(stats.p25);
-    group.append(
-      ui.createSvg("rect", { x: boxLeft, y: center - BOX_HEIGHT / 2, width: Math.max(2, xOf(stats.p75) - boxLeft), height: BOX_HEIGHT, rx: 2, fill: color })
+    marks.append(
+      ui.createSvg("rect", { x: boxLeft, y: center - BOX_HEIGHT / 2, width: Math.max(BOX_HEIGHT, xOf(stats.p75) - boxLeft), height: BOX_HEIGHT, rx: BOX_RADIUS, fill: color })
     );
-    group.append(
-      ui.createSvg("line", {
-        x1: xOf(stats.median),
-        y1: center - BOX_HEIGHT / 2,
-        x2: xOf(stats.median),
-        y2: center + BOX_HEIGHT / 2,
-        stroke: "var(--surface-1)",
-        "stroke-width": 2,
-      })
-    );
+    marks.append(ui.createSvg("circle", { className: "chart-median", cx: xOf(stats.median), cy: center, r: MEDIAN_RADIUS, stroke: color }));
+    group.append(marks);
     const show = (clientX, clientY) => {
       tooltip.replaceChildren(
         ui.create("strong", { text: `中央値 ${ui.formatNumber(stats.median)} nm` }),
         ui.create("div", { text: label }),
         ui.create("div", { text: `平均 ${ui.formatNumber(stats.mean)}、25〜75% ${ui.formatNumber(stats.p25)}〜${ui.formatNumber(stats.p75)}` }),
-        ui.create("div", { text: `5〜95% ${ui.formatNumber(stats.p5)}〜${ui.formatNumber(stats.p95)}、最大 ${ui.formatNumber(stats.max)}` })
+        ui.create("div", { text: `5〜95% ${ui.formatNumber(stats.p5)}〜${ui.formatNumber(stats.p95)}、最大 ${ui.formatNumber(stats.max)}` }),
+        ui.create("div", { text: `値の数 ${stats.count}（Wafer × 試行）` })
       );
       tooltip.hidden = false;
       tooltip.style.left = `${Math.min(clientX + 14, window.innerWidth - 330)}px`;
@@ -556,6 +758,7 @@
       ui.create("div", { className: "toolbar" }, [
         selectField("result-metric", "指標", Object.entries(METRIC_LABELS), view.metric, (value) => handlers.onViewChange({ metric: value }, "result-metric")),
         selectField("result-axis", "軸", Object.entries(AXIS_LABELS), view.axis, (value) => handlers.onViewChange({ axis: value }, "result-axis")),
+        selectField("result-chart-scale", "図の横軸", Object.entries(CHART_SCALES), view.chartScale, (value) => handlers.onViewChange({ chartScale: value }, "result-chart-scale")),
         ui.create("button", { type: "button", className: "button-secondary", text: "結果をCSVで保存", onClick: handlers.onExportResults }),
         ui.create("button", { type: "button", className: "button-secondary", text: "選択点をCSVで保存", onClick: handlers.onExportSelections }),
       ])
@@ -572,10 +775,17 @@
       chartGroups(output, variants, view.metric, view.axis),
       variants.map((variant) => ({ label: variant.label, color: seriesColor(variant) })),
       `Waferごとの残差 ${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）[nm]`,
-      `選び方と補正ごとの残差${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）の箱ひげ図。数値は下の表にもあります。`
+      `選び方と補正ごとの残差${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）の分布の図（箱ひげ図）。数値は下の表にもあります。`,
+      { value: baselineStats(output, view.axis, view.metric).median, label: "全点計測の中央値" },
+      view.chartScale
     );
     children.push(chartContainer);
-    children.push(ui.create("p", { className: "hint", text: "箱は25〜75%点、線は5〜95%点、箱の中の縦線は中央値です。箱にポインターを合わせるか、Tabキーで選ぶと数値が出ます。" }));
+    children.push(
+      ui.create("p", {
+        className: "hint",
+        text: "横軸は値のある範囲に合わせて広げています（0から始まりません）。「図の横軸」を対数にすると、値の小さい選び方どうしの差が見やすくなります。縦の破線は全点計測（基準）の中央値で、ここに近いほど全Markを測ったときに近い補正ができています。行にポインターを合わせるか、Tabキーで選ぶと数値が出ます。",
+      })
+    );
 
     children.push(ui.create("h2", { className: "subheading", text: `数値の表（${METRIC_LABELS[view.metric]}・${AXIS_LABELS[view.axis]}、単位 nm）` }));
     children.push(renderSummaryTable(output, variants, view));
@@ -636,7 +846,9 @@
       estimationGroups(output, view.metric, view.axis),
       keys.map((key) => ({ label: ASC.evaluator.estimationLabel(key), color: SERIES_COLORS[key] })),
       `Waferごとの推定誤差 ${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}、未計測Mark）[nm]`,
-      `選び方と推定手法ごとの推定誤差${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）の箱ひげ図。数値は上の表にもあります。`
+      `選び方と推定手法ごとの推定誤差${METRIC_LABELS[view.metric]}（${AXIS_LABELS[view.axis]}）の分布の図（箱ひげ図）。数値は上の表にもあります。`,
+      null,
+      view.chartScale
     );
     children.push(chartContainer);
 

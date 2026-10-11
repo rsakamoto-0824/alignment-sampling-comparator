@@ -11,3 +11,7 @@ __pycache__/
 python/notebooks/output/
 *.egg-info/
 matlab/output/
+
+# 実際の計測データ（csv・xlsx）は data/ に置き、コミットしない。見本（samples/）は乱数で作った架空のデータ
+/data/
+*.xlsx
