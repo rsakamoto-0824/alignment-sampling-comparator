@@ -26,7 +26,7 @@ plan = asc.planFromShotIds('現行', {'11', '13', '20'}, waferMap);
 output = asc.runEvaluation(waferMap, data, settings, plan);
 m = find(strcmp({output.methods.key}, 'constrainedD'));
 v = find(strcmp({output.variants.key}, 'howa'));
-output.summary(m).variants(v).x.rms.all.mean              % 制約付きD最適・HOWAのみ・X の RMS のWafer平均
+output.summary(m).variants(v).x.rms.all.mean              % 制約付きD最適・HOWA・X の RMS のWafer平均
 
 % D最適・I最適（制約なし・制約付き）の点だけを作り（評価データは使わない）、座標をCSVの文字にする
 settings.constraints.mandatoryShotIds = {'46'; '47'};     % 強制計測Shot（Shot番号）
@@ -43,12 +43,14 @@ fileOutput = asc.runEvaluation(fileMap, fileData, settings);
 
 選んだShotでは、そのShotの有効なMarkをすべて測ります。選び方のキーは `random`・`poisson`・`dOptimal`・`iOptimal`（制約なし）・`constrainedD`・`constrainedI`（制約付き）です。
 
+補正（`settings.model.corrections` で選ぶ。キーは `output.variants` の key）は、`howa`（HOWA）、`rbfXY`・`rbfXYR`・`gpXY`・`gpXYR`（RBF・GPRの式内: 式の中の多項式を補正値にする）、`rbfXYPredict`・`rbfXYRPredict`・`gpXYPredict`・`gpXYRPredict`（予測: 全Markを予測してから多項式を当てはめる）、`measured`（計測値＋HOWA）の10通りです。補正値はどれも X,Y の高次多項式です（計測値＋HOWA の測ったMarkだけ計測値）。
+
 ブラウザ版の「設定をJSONで保存」で作ったファイルは `asc.loadSettingsFile(path)` で読み込めます（CSVのマップ・手動プランも入ります。`asc.mapFromLoaded`、`asc.manualPlanInputs` を参照）。
 
 ### Python版との違い
 
 - 番号（Shot・Mark・候補・選び方の並び）はすべて **1始まり** です。設定の多項式の項の番号（`termsX` など）だけは、ブラウザ版の設定JSONと同じ0始まりです。
-- 結果は、`output.methods`・`output.variants`・`output.estimationKeys` と同じ並びの構造体配列で持ちます（キーに `:` を含むため、フィールド名にはしていません）。
+- 結果は、`output.methods`・`output.variants` と同じ並びの構造体配列で持ちます（キーに `:` を含むため、フィールド名にはしていません）。
 - Waferマップは、Markごと・Shotごとの列（`markX`、`markY`、`shotIds` など）で持ちます。
 
 ## 主な関数（`asc.` を付けて呼ぶ）
@@ -66,7 +68,7 @@ fileOutput = asc.runEvaluation(fileMap, fileData, settings);
 | `runSweep(waferMap, data, settings, sweepSettings, manualPlans)` | 計測Shot数を変えた評価（トレードオフカーブ。比べる選び方は `sweepSettings.methods`） |
 | `selectionToCsv(waferMap, markIndices)` | 選択点の座標のCSVの文字（ShotId, ShotX, ShotY, ScanDir, MarkNo, MarkX, MarkY, WaferX, WaferY） |
 | `loadSettingsFile(path)` | ブラウザ版で保存した設定JSONを読む（版3。版1・2も読み、以前のD最適・I最適は制約付きとして読む） |
-| `plotSelectionMap` / `plotResidualBoxes` / `plotSweep` / `plotEstimationErrorMap` | 選んだ点のマップ（無効マークは ✕）・残差の分布の図（5つ目の引数 `true` で横軸を対数）・トレードオフカーブ・推定誤差マップ |
+| `plotSelectionMap` / `plotResidualBoxes` / `plotSweep` | 選んだ点のマップ（無効マークは ✕）・残差の分布の図（5つ目の引数 `true` で横軸を対数）・トレードオフカーブ |
 
 ## テスト（ブラウザ版との照合）
 
@@ -82,5 +84,5 @@ results = runtests('tests'); table(results)
 ## 注意事項
 
 - 計算の中身を変えるときは、ブラウザ版・Python版も同じように直し、基準データを作り直してテストしてください。
-- このMacの MATLAB（Rosetta経由）では、初期設定の評価に約16秒、手順スクリプト全体に数分かかります（選んだShotのMarkをすべて測り、6つの選び方を比べるため）。Windows の会社PCでの速さと図の見た目は未確認です。
+- このMacの MATLAB（Rosetta経由）では、初期設定の評価に約18秒、手順スクリプト全体に数分かかります（選んだShotのMarkをすべて測り、6つの選び方と10通りの補正を比べるため。比べる補正を減らすと速くなります）。Windows の会社PCでの速さと図の見た目は未確認です。
 - 乱数の評価データは模擬データです。実際の計測データのファイルを使う場合は、リポジトリ直下の `data/`（Gitの管理外）に置き、コミットしないでください。
