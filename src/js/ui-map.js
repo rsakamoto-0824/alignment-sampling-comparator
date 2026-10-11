@@ -10,8 +10,6 @@
 
   const VIEW_HALF_SIZE_MM = 162;
   const MARK_RADIUS_MM = 1.6;
-  // 推定誤差などを色で示すMarkは、色が見えるように大きめに描く
-  const STEP_MARK_RADIUS_MM = 2.6;
   const CENTER_RING_RADIUS_MM = 4.5;
   // 無効マークの ✕ の腕の長さ（中心から）[mm]
   const INVALID_MARK_ARM_MM = 1.6;
@@ -75,7 +73,7 @@
    *   editable, onToggleShot
    *   compact（小さく並べる用。Shot番号・Scan方向・区画の文字を省く）、
    *   shotSteps（Map: Shot番号 → { step: 1〜5, text }。選ばれた割合などを段階色で塗る）、
-   *   markSteps（Map: Mark番号 → { step: 1〜5, text }。推定誤差などをMarkの段階色で示す）、ariaLabel
+   *   ariaLabel
    */
   function render(container, options) {
     const { map, zones } = options;
@@ -184,18 +182,6 @@
   function drawMark(layer, map, markIndex, options) {
     const mark = map.marks[markIndex];
     const measured = options.measuredMarks.has(markIndex);
-    const stepInfo = options.markSteps ? options.markSteps.get(markIndex) : null;
-    if (stepInfo) {
-      const circle = ui.createSvg("circle", {
-        className: `map-mark-step step-${stepInfo.step}`,
-        cx: mark.x,
-        cy: -mark.y,
-        r: STEP_MARK_RADIUS_MM,
-      });
-      circle.append(ui.createSvg("title", { text: `Shot ${map.shots[mark.shotIndex].id} の Mark ${mark.markNo}: ${stepInfo.text}` }));
-      layer.append(circle);
-      return;
-    }
     layer.append(
       ui.createSvg("circle", {
         className: measured ? "map-mark measured" : "map-mark",

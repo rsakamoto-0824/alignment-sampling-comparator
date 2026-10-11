@@ -536,10 +536,13 @@ async function main() {
     }
   });
 
-  await test("補正の流れ: HOWAのみ と 推定→HOWA だけ。全点計測のRBF→HOWAはHOWAと同じ", () => {
+  await test("補正: 10通りの並び。全点計測のRBFの予測はHOWAと同じ、計測値＋HOWAは測ったMarkでは計測値そのもの", () => {
     const settings = ASC.defaultSettings();
     const keys = ASC.correction.buildVariants(settings.model).map((variant) => variant.key);
-    assert(keys.join(",") === "howa,estimateThenHowa:rbfXY,estimateThenHowa:rbfXYR,estimateThenHowa:gpXY,estimateThenHowa:gpXYR", `比べる補正が違います: ${keys}`);
+    assert(
+      keys.join(",") === "howa,rbfXY,rbfXYPredict,rbfXYR,rbfXYRPredict,gpXY,gpXYPredict,gpXYR,gpXYRPredict,measured",
+      `比べる補正が違います: ${keys}`
+    );
     const map = defaultMap();
     const terms = allIndices(10);
     const all = allIndices(map.marks.length);
@@ -549,8 +552,105 @@ async function main() {
     const fullParts = howaPartsFor(subsetMarks, subsetAll, terms);
     const then = ASC.correction.estimateThenHowaOperator(fullParts, subsetRbf, subsetAll, subsetMarks.length);
     for (let i = 0; i < fullParts.howa.length; i += 101) {
-      assertClose(then[i], fullParts.howa[i], 1e-9, "全点計測でのRBF→HOWAとHOWA");
+      assertClose(then[i], fullParts.howa[i], 1e-9, "全点計測でのRBFの予測とHOWA");
     }
+    const sample = [3, 40, 41, 90, 150, 151, 200, 260, 300, 310, 320, 330, 5, 60, 120, 180, 240, 280, 25, 75, 125, 175, 225];
+    const parts = howaPartsFor(map.marks, sample, terms);
+    const measured = ASC.correction.measuredOperator(parts.howa, sample, map.marks.length);
+    const n = sample.length;
+    sample.forEach((markIndex, j) => {
+      for (let k = 0; k < n; k++) {
+        assert(measured[markIndex * n + k] === (k === j ? 1 : 0), "測ったMarkの行が計測値そのものになっていません");
+      }
+    });
+    const unmeasured = all.find((index) => !sample.includes(index));
+    for (let k = 0; k < n; k++) {
+      assert(measured[unmeasured * n + k] === parts.howa[unmeasured * n + k], "測っていないMarkの行がHOWAと違います");
+    }
+  });
+
+  await test("RBFの式内: 多項式だけのずれは係数を正確に戻し、λを大きくするとHOWAの係数に近づく", () => {
+    const map = defaultMap();
+    const random = ASC.math.createRandom(41);
+    const sample = random.shuffle(allIndices(map.marks.length)).slice(0, 60);
+    const terms = allIndices(21);
+    const parts = howaPartsFor(map.marks, sample, terms);
+    const p = terms.length;
+    const n = sample.length;
+    const truthCoefficients = Array.from({ length: p }, (_, k) => Math.sin(k + 1));
+    const polynomial = sample.map((_, j) => truthCoefficients.reduce((sum, c, k) => sum + c * parts.sampleDesign[j * p + k], 0));
+    const bumpy = sample.map((markIndex) => polynomial[sample.indexOf(markIndex)] + 0.3 * Math.sin(9 * map.marks[markIndex].u) * Math.cos(7 * map.marks[markIndex].v));
+    const coefficientsOf = (operator, values) => Array.from({ length: p }, (_, k) => values.reduce((sum, value, j) => sum + operator[k * n + j] * value, 0));
+    for (const features of ["xy", "xyr"]) {
+      for (const kernel of ["tps", "gaussian"]) {
+        const exact = ASC.correction.rbfPolynomialOperator(map.marks, sample, parts.sampleDesign, p, { kernel, lambda: 0, shapeFactor: 2 }, features);
+        assert(!exact.error, exact.error);
+        coefficientsOf(exact.operator, polynomial).forEach((value, k) => assertClose(value, truthCoefficients[k], 1e-6, `${features}・${kernel}: 係数 ${k}`));
+        // λ を大きくすると RBF の部分は 1/λ で小さくなり、係数は最小二乗（HOWA）に近づく
+        const smooth = ASC.correction.rbfPolynomialOperator(map.marks, sample, parts.sampleDesign, p, { kernel: "gaussian", lambda: 1e6, shapeFactor: 2 }, features);
+        assert(!smooth.error, smooth.error);
+        const ols = coefficientsOf(parts.leastSquares, bumpy);
+        coefficientsOf(smooth.operator, bumpy).forEach((value, k) => assertClose(value, ols[k], 1e-3 * Math.max(1, Math.abs(ols[k])), `${features}: λを大きくしたときの係数 ${k}`));
+      }
+    }
+    const tooFew = ASC.correction.rbfPolynomialOperator(map.marks, sample.slice(0, 10), parts.sampleDesign, p, { kernel: "tps", lambda: 0, shapeFactor: 2 }, "xy");
+    assert(tooFew.error, "点が項数より少ないときに知らせていません");
+  });
+
+  await test("GPRの式内: 一般化最小二乗の係数が直接の式と一致し、多項式だけのずれはHOWAの係数になる", () => {
+    const map = defaultMap();
+    const random = ASC.math.createRandom(43);
+    const sample = random.shuffle(allIndices(map.marks.length)).slice(0, 50);
+    const terms = allIndices(10);
+    const parts = howaPartsFor(map.marks, sample, terms);
+    const p = terms.length;
+    const n = sample.length;
+    const values = Float64Array.from(sample.map((index) => Math.sin(3 * map.marks[index].u) + 0.5 * map.marks[index].v ** 2 + 0.05 * random.normal()));
+    const C = ASC.constants;
+    const keep = [C.GP_LENGTH_SCALE_MIN, C.GP_LENGTH_SCALE_STEPS, C.GP_NOISE_RATIO_MIN, C.GP_NOISE_RATIO_STEPS];
+    const length = 0.3;
+    const ratio = 0.05;
+    [C.GP_LENGTH_SCALE_MIN, C.GP_LENGTH_SCALE_STEPS, C.GP_NOISE_RATIO_MIN, C.GP_NOISE_RATIO_STEPS] = [length, 1, ratio, 1];
+    try {
+      for (const features of ["xy", "xyr"]) {
+        const kernelPart = ASC.correction.prepareGprKernel(map.marks, sample, features, "squaredExponential");
+        const prepared = ASC.correction.prepareGprPolynomial(kernelPart, parts.sampleDesign, p);
+        const olsCoefficients = Array.from({ length: p }, (_, k) => values.reduce((sum, value, j) => sum + parts.leastSquares[k * n + j] * value, 0));
+        const olsResidual = Float64Array.from(values, (value, j) => value - olsCoefficients.reduce((sum, c, k) => sum + c * parts.sampleDesign[j * p + k], 0));
+        const fit = ASC.correction.gprFit(kernelPart, prepared, values, olsResidual, olsCoefficients, false);
+        assert(fit.length === length && fit.noiseRatio === ratio, "調整値が候補と違います");
+        // 直接の式: β = (PᵀK⁻¹P)⁻¹ PᵀK⁻¹ y（K = K_ℓ + αI）
+        const points = sample.map((index) => ASC.correction.featureVector(map.marks[index], features));
+        const covariance = new Float64Array(n * n);
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            const d = Math.sqrt(points[i].reduce((sum, value, k) => sum + (value - points[j][k]) ** 2, 0));
+            covariance[i * n + j] = ASC.correction.gpKernelValue("squaredExponential", d, length) + (i === j ? ratio : 0);
+          }
+        }
+        const lower = ASC.math.cholesky(covariance, n);
+        const inverseDesign = ASC.math.choleskySolve(lower, n, parts.sampleDesign, p);
+        const inverseValues = ASC.math.choleskySolve(lower, n, values, 1);
+        const normal = new Float64Array(p * p);
+        const right = new Float64Array(p);
+        for (let a = 0; a < p; a++) {
+          for (let j = 0; j < n; j++) {
+            right[a] += parts.sampleDesign[j * p + a] * inverseValues[j];
+            for (let b = 0; b < p; b++) {
+              normal[a * p + b] += parts.sampleDesign[j * p + a] * inverseDesign[j * p + b];
+            }
+          }
+        }
+        const expected = ASC.math.choleskySolve(ASC.math.cholesky(normal, p), p, right, 1);
+        fit.coefficients.forEach((value, k) => assertClose(value, expected[k], 1e-7 * Math.max(1, Math.abs(expected[k])), `${features}: 係数 ${k}`));
+        const exact = ASC.correction.gprFit(kernelPart, prepared, values, olsResidual, olsCoefficients, true);
+        exact.coefficients.forEach((value, k) => assert(value === olsCoefficients[k], "多項式で表せるときにHOWAの係数になりません"));
+      }
+    } finally {
+      [C.GP_LENGTH_SCALE_MIN, C.GP_LENGTH_SCALE_STEPS, C.GP_NOISE_RATIO_MIN, C.GP_NOISE_RATIO_STEPS] = keep;
+    }
+    const tooFew = ASC.correction.prepareGprPolynomial(ASC.correction.prepareGprKernel(map.marks, sample.slice(0, 11), "xy", "squaredExponential"), parts.sampleDesign, p);
+    assert(tooFew.error, "点が項数＋2より少ないときに知らせていません");
   });
 
   /** 調整値の候補を1つにして、ガウス過程回帰の前準備をする（直接の式と比べるため）。 */
@@ -568,18 +668,24 @@ async function main() {
     }
   }
 
-  await test("ガウス過程回帰: 固有値分解を使った推定が、連立方程式を直接解いた推定と一致する（X,Y と X,Y,半径）", () => {
+  await test("GPRの予測: 多項式の係数が、直接の式で全Markを予測して当てはめた係数と一致する（X,Y と X,Y,半径）", () => {
     const map = defaultMap();
     const random = ASC.math.createRandom(21);
     const sample = random.shuffle(allIndices(map.marks.length)).slice(0, 35);
     const values = sample.map((index) => Math.sin(3 * map.marks[index].u) + 0.5 * map.marks[index].v ** 2 + 0.05 * random.normal());
+    const terms = allIndices(10);
+    const parts = howaPartsFor(map.marks, sample, terms);
+    const p = terms.length;
+    const markCount = map.marks.length;
     for (const features of ["xy", "xyr"]) {
       for (const kernel of ["squaredExponential", "matern52"]) {
         const length = 0.4;
         const ratio = 0.01;
         const prepared = prepareGpWithFixedValues(map.marks, sample, features, kernel, length, ratio);
-        const predicted = ASC.correction.gpPredict(prepared, Float64Array.from(values)).values;
-        // 直接の式: 1次式を最小二乗で除き、残りに K*(K + αI)⁻¹ を掛けて戻す
+        const fit = ASC.correction.gpFit(prepared, Float64Array.from(values));
+        const projector = ASC.correction.gpHowaProjector(prepared, parts, sample);
+        const coefficients = ASC.correction.gpThenHowaCoefficients(prepared, projector, fit, Float64Array.from(values), new Float64Array(p));
+        // 直接の式: 1次式を最小二乗で除き、残りに K*(K + αI)⁻¹ を掛けて戻す。測ったMarkは計測値のまま
         const points = sample.map((index) => ASC.correction.featureVector(map.marks[index], features));
         const q = points[0].length + 1;
         const trendRows = new Float64Array(sample.length * q);
@@ -589,46 +695,34 @@ async function main() {
         });
         const trend = ASC.math.multiply(ASC.correction.leastSquaresOperator(trendRows, sample.length, q).operator, q, sample.length, Float64Array.from(values), 1);
         const n = sample.length;
-        const residual = values.map((value, i) => value - points[i].reduce((sum, p, k) => sum + trend[k + 1] * p, trend[0]));
+        const residual = values.map((value, i) => value - points[i].reduce((sum, value2, k) => sum + trend[k + 1] * value2, trend[0]));
         const covariance = new Float64Array(n * n);
         for (let i = 0; i < n; i++) {
           for (let j = 0; j < n; j++) {
-            const d = Math.sqrt(points[i].reduce((sum, p, k) => sum + (p - points[j][k]) ** 2, 0));
+            const d = Math.sqrt(points[i].reduce((sum, value2, k) => sum + (value2 - points[j][k]) ** 2, 0));
             covariance[i * n + j] = ASC.correction.gpKernelValue(kernel, d, length) + (i === j ? ratio : 0);
           }
         }
         const weights = ASC.math.choleskySolve(ASC.math.cholesky(covariance, n), n, Float64Array.from(residual), 1);
-        for (const markIndex of [0, 50, 120, map.marks.length - 1]) {
+        const filled = new Float64Array(markCount);
+        for (let markIndex = 0; markIndex < markCount; markIndex++) {
+          const sampleIndex = sample.indexOf(markIndex);
+          if (sampleIndex >= 0) {
+            filled[markIndex] = values[sampleIndex];
+            continue;
+          }
           const point = ASC.correction.featureVector(map.marks[markIndex], features);
-          let expected = point.reduce((sum, p, k) => sum + trend[k + 1] * p, trend[0]);
+          let expected = point.reduce((sum, value2, k) => sum + trend[k + 1] * value2, trend[0]);
           points.forEach((samplePoint, j) => {
-            const d = Math.sqrt(point.reduce((sum, p, k) => sum + (p - samplePoint[k]) ** 2, 0));
+            const d = Math.sqrt(point.reduce((sum, value2, k) => sum + (value2 - samplePoint[k]) ** 2, 0));
             expected += ASC.correction.gpKernelValue(kernel, d, length) * weights[j];
           });
-          assertClose(predicted[markIndex], expected, 1e-8, `${features}・${kernel}: Mark ${markIndex} の推定値`);
+          filled[markIndex] = expected;
         }
+        const expectedCoefficients = ASC.math.multiply(parts.allLeastSquares, p, markCount, filled, 1);
+        coefficients.forEach((value, k) => assertClose(value, expectedCoefficients[k], 1e-8 * Math.max(1, Math.abs(expectedCoefficients[k])), `${features}・${kernel}: 係数 ${k}`));
       }
     }
-  });
-
-  await test("ガウス過程回帰: 1次関数はそのまま再現し、なめらかな形は調整値を学習して全Markを推定できる", () => {
-    const map = defaultMap();
-    const random = ASC.math.createRandom(8);
-    const sample = random.shuffle(allIndices(map.marks.length)).slice(0, 60);
-    const prepared = ASC.correction.prepareGp(map.marks, sample, "xy", "squaredExponential");
-    const linear = Float64Array.from(sample.map((index) => 2 + map.marks[index].u - 3 * map.marks[index].v));
-    const linearPrediction = ASC.correction.gpPredict(prepared, linear).values;
-    map.marks.forEach((mark, i) => assertClose(linearPrediction[i], 2 + mark.u - 3 * mark.v, 1e-8, "1次関数の推定"));
-    const smooth = (mark) => Math.sin(2.5 * mark.u) * Math.cos(2 * mark.v);
-    const prediction = ASC.correction.gpPredict(prepared, Float64Array.from(sample.map((index) => smooth(map.marks[index]))));
-    let squareError = 0;
-    let squareSignal = 0;
-    map.marks.forEach((mark, i) => {
-      squareError += (prediction.values[i] - smooth(mark)) ** 2;
-      squareSignal += smooth(mark) ** 2;
-    });
-    assert(Math.sqrt(squareError / squareSignal) < 0.1, `推定の誤差が大きすぎます（相対RMS ${Math.sqrt(squareError / squareSignal)}）`);
-    assert(prediction.length > 0.1, `学習した相関の長さ（${prediction.length}）が短すぎます`);
   });
 
   await test("入れ替えの計算（Woodbury）が、行列を作り直した計算と一致する", () => {
@@ -854,7 +948,7 @@ async function main() {
     }
   });
 
-  await test("評価全体: 初期設定で全選び方・全補正（推定手法を含む）の結果がそろい、全点計測の基準が最も小さい", async () => {
+  await test("評価全体: 初期設定で全選び方・全補正の結果がそろい、全点計測の基準が最も小さい", async () => {
     const map = defaultMap();
     const settings = ASC.defaultSettings();
     settings.evaluationData = defaultEvaluationSettings({ waferCount: 20 });
@@ -878,7 +972,7 @@ async function main() {
     const elapsed = Date.now() - started;
     assert(output.errors.length === 0, output.errors.join(" / "));
     assert(lastProgress === 1, "進み具合が100%になりません");
-    assert(output.variants.length === 5, `比べる補正が5通り（HOWAのみ＋推定→HOWA×4つの推定手法）ではありません（${output.variants.length}）`);
+    assert(output.variants.length === 10, `比べる補正が10通り（HOWA・RBF/GPRの式内と予測・計測値＋HOWA）ではありません（${output.variants.length}）`);
     assert(
       output.methods.map((method) => method.key).join(",") === "random,poisson,dOptimal,iOptimal,constrainedD,constrainedI,manual:1",
       `結果の選び方の並びが違います: ${output.methods.map((method) => method.key)}`
@@ -892,8 +986,9 @@ async function main() {
         assert(Number.isFinite(value) && value > 0, `${method.label}・${variant.label} の値が不正です`);
       }
     }
-    const gpLength = output.summary.random.gpChoices["estimateThenHowa:gpXY"].lengthMm.median;
-    assert(gpLength > 0, "ガウス過程回帰の学習した相関の長さがありません");
+    for (const key of ["gpXY", "gpXYPredict"]) {
+      assert(output.summary.random.gpChoices[key].lengthMm.median > 0, `${key}: GPRが選んだ相関の長さがありません`);
+    }
     const baseline = ASC.evaluator.summarizeStore(output.baselines.allMarks.howa).x.rms.mean;
     const uncorrected = ASC.evaluator.summarizeStore(output.baselines.uncorrected).x.rms.mean;
     for (const method of output.methods) {
@@ -903,50 +998,7 @@ async function main() {
     console.log(`  （参考）Wafer20枚・試行4回の計算時間: ${elapsed} ms`);
   });
 
-  await test("推定精度: 未計測Markだけで評価し、Markごとの2乗誤差の合計はWaferごとのRMSと整合する", () => {
-    const map = defaultMap();
-    const settings = ASC.defaultSettings();
-    const data = ASC.evaluationData.generateEvaluationData(map, defaultEvaluationSettings({ waferCount: 6 })).data;
-    const random = ASC.math.createRandom(31);
-    const sample = random.shuffle(allIndices(map.marks.length)).slice(0, 50).sort((a, b) => a - b);
-    const variants = ASC.correction.buildVariants(settings.model);
-    const evaluation = ASC.evaluator.evaluateSampleSet(map, data, settings.model, sample, variants);
-    const keys = Object.keys(evaluation.estimation);
-    assert(keys.join(",") === "howa,rbfXY,rbfXYR,gpXY,gpXYR", `推定精度の対象が違います: ${keys}`);
-    const unmeasuredCount = map.marks.length - sample.length;
-    for (const key of keys) {
-      const squares = evaluation.estimationSquares[key].x;
-      assert(sample.every((markIndex) => Number.isNaN(squares[markIndex])), `${key}: 計測Markに誤差が入っています`);
-      let total = 0;
-      squares.forEach((value) => {
-        if (Number.isFinite(value)) {
-          total += value;
-        }
-      });
-      const rms = evaluation.estimation[key].x.rms;
-      const fromWafers = Array.from(rms).reduce((sum, value) => sum + value * value * unmeasuredCount, 0);
-      assertClose(total, fromWafers, 1e-6 * fromWafers, `${key}: 2乗誤差の合計`);
-    }
-    // HOWAの推定誤差は、HOWAのみの補正残差の未計測Mark部分と同じもの（符号違い）
-    const howaParts = howaPartsFor(map.marks, sample, settings.model.termsX);
-    const measured = sample.map((markIndex) => data.truthX[markIndex] + data.noiseX[markIndex]);
-    let sumSquares = 0;
-    let count = 0;
-    for (let i = 0; i < map.marks.length; i++) {
-      if (sample.includes(i)) {
-        continue;
-      }
-      let prediction = 0;
-      for (let j = 0; j < sample.length; j++) {
-        prediction += howaParts.howa[i * sample.length + j] * measured[j];
-      }
-      sumSquares += (prediction - data.truthX[i]) ** 2;
-      count++;
-    }
-    assertClose(evaluation.estimation.howa.x.rms[0], Math.sqrt(sumSquares / count), 1e-9, "HOWAの推定誤差（Wafer 1）");
-  });
-
-  await test("推定精度: ずれが説明変数の1次式でノイズがなければ、RBF・GPの推定誤差は0", () => {
+  await test("補正: ずれが1次式でノイズがなければ、どの補正（HOWA・RBF・GPRの式内と予測・計測値＋HOWA）も残差は0", () => {
     const map = defaultMap();
     const settings = ASC.defaultSettings();
     const waferCount = 3;
@@ -959,12 +1011,13 @@ async function main() {
       });
     }
     const random = ASC.math.createRandom(32);
-    const sample = random.shuffle(allIndices(markCount)).slice(0, 40);
-    const evaluation = ASC.evaluator.evaluateSampleSet(map, data, settings.model, sample, ASC.correction.buildVariants(settings.model));
-    for (const key of ["rbfXY", "gpXY", "howa"]) {
+    const sample = random.shuffle(allIndices(markCount)).slice(0, 60);
+    const variants = ASC.correction.buildVariants(settings.model);
+    const evaluation = ASC.evaluator.evaluateSampleSet(map, data, settings.model, sample, variants);
+    for (const variant of variants) {
       for (const axis of ["x", "y"]) {
-        const worst = Math.max(...evaluation.estimation[key][axis].max);
-        assert(worst < 1e-7, `${key}・${axis}: 推定誤差が0になりません（${worst}）`);
+        const worst = Math.max(...evaluation.results[variant.key][axis].max);
+        assert(worst < 1e-7, `${variant.key}・${axis}: 残差が0になりません（${worst}）`);
       }
     }
   });
@@ -975,7 +1028,7 @@ async function main() {
     settings.evaluationData = defaultEvaluationSettings({ waferCount: 10 });
     settings.sampling.optimalStarts = 1;
     settings.sampling.excludeIncompleteShots = true;
-    settings.model.estimators = { rbfXY: true, rbfXYR: false, gpXY: true, gpXYR: false };
+    settings.model.corrections = { howa: true, rbfXY: true, gpXYPredict: true, measured: true };
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
     const methods = { random: true, poisson: false, dOptimal: true, iOptimal: false, constrainedD: true, constrainedI: false };
     const sweep = { startShots: 12, endShots: 36, stepShots: 12, draws: 2, methods };
@@ -990,7 +1043,7 @@ async function main() {
     output.points.forEach((point) => {
       assert(point.markCounts.constrainedD === point.shotCount * 4, `Shot ${point.shotCount}: Mark数がShot数×4ではありません`);
       assert(Object.keys(point.summary).every((key) => !key.startsWith("manual:")), "スイープの点に手動プランが入っています");
-      assert(point.summary.random.estimation.gpXY, "スイープに推定精度がありません");
+      assert(Object.keys(point.summary.random.variants).join(",") === "howa,rbfXY,gpXYPredict,measured", "スイープの補正が違います");
     });
     const first = output.points[0].summary.constrainedD.variants.howa.x.rms.all.mean;
     const lastValue = output.points[2].summary.constrainedD.variants.howa.x.rms.all.mean;
@@ -1005,7 +1058,7 @@ async function main() {
     settings.evaluationData = defaultEvaluationSettings({ waferCount: 8 });
     settings.sampling.optimalStarts = 1;
     settings.sampling.draws = 2;
-    settings.model.estimators = { rbfXY: true, rbfXYR: false, gpXY: false, gpXYR: false };
+    settings.model.corrections = { howa: true, rbfXYPredict: true };
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
     const { context } = contextFor(map);
     const planA = { key: "manual:1", label: "現行", shotIndices: context.items.slice(0, 15).map((item) => item.shotIndex) };
@@ -1089,7 +1142,7 @@ async function main() {
     settings.evaluationData = defaultEvaluationSettings({ waferCount: 3 });
     settings.sampling.draws = 3;
     settings.sampling.optimalStarts = 1;
-    settings.model.flows = { howa: true, estimateThenHowa: false };
+    settings.model.corrections = { howa: true };
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
     const plan = { key: "manual:1", label: "偏り", shotIndices: chosen.map((index) => context.items[index].shotIndex) };
     const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [plan] }, () => {}, () => false);
@@ -1107,7 +1160,7 @@ async function main() {
     settings.evaluationData = defaultEvaluationSettings({ waferCount: 3 });
     settings.sampling.optimalStarts = 2;
     settings.sampling.methods = { random: false, poisson: false, dOptimal: true, iOptimal: true, constrainedD: true, constrainedI: true };
-    settings.model.flows = { howa: true, estimateThenHowa: false };
+    settings.model.corrections = { howa: true };
     settings.constraints.mandatoryShotIds = ["17"];
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
     const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
@@ -1126,7 +1179,7 @@ async function main() {
     settings.evaluationData = defaultEvaluationSettings({ waferCount: 2 });
     settings.sampling.optimalStarts = 2;
     settings.sampling.methods = { random: false, poisson: false, dOptimal: true, iOptimal: true, constrainedD: true, constrainedI: true };
-    settings.model.flows = { howa: true, estimateThenHowa: false };
+    settings.model.corrections = { howa: true };
     settings.constraints.mandatoryShotIds = ["30", "75"];
     settings.constraints.excludedShotIds = ["52"];
     const plan = ASC.evaluator.runPlan({ map, settings });
@@ -1262,7 +1315,7 @@ async function main() {
     settings.evaluationData.source = ASC.constants.DATA_SOURCE_FILE;
     settings.sampling.draws = 2;
     settings.sampling.optimalStarts = 1;
-    settings.model.flows = { howa: true, estimateThenHowa: false };
+    settings.model.corrections = { howa: true };
     const { map, data } = ASC.measurementData.buildFromTable(await sampleMeasurementTable(), settings.map);
     const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
     assert(output.errors.length === 0, output.errors.join(" / "));

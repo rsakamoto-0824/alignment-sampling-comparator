@@ -2,8 +2,8 @@
  * 評価の全体の流れ。
  *   1. サンプリングの前提を作り、ハード制約を同時に満たせるか確かめる
  *   2. 選び方ごとに計測Markを選ぶ（ランダム系は試行回数ぶん）
- *   3. 選んだ点ごとに補正の演算子を作り、全Waferの残差を求める
- *   4. 選び方 × 補正の流れ × 軸 で集計する
+ *   3. 選んだ点ごとに補正（HOWA・RBF・GPR・計測値＋HOWA）を求め、全Waferの残差を求める
+ *   4. 選び方 × 補正 × 軸 で集計する
  * 計算は少しずつ区切って進め、画面が固まらないようにする（進み具合の表示と中止のため）。
  */
 (function (root) {
@@ -126,7 +126,8 @@
   }
 
   /**
-   * 全Markでの多項式の当てはめの部品。選んだ点によらないので、項の組み合わせごとに1回だけ作る。
+   * 全Markでの多項式の当てはめの部品（全Markでの多項式の値と、全Markの値 → 係数 の行列）。
+   * 選んだ点によらないので、項の組み合わせごとに1回だけ作る。
    */
   function createModelCache(map) {
     const cache = new Map();
@@ -142,115 +143,170 @@
     };
   }
 
-  /** 推定手法ごとの前準備（選んだ点ごとに1回、XとYで共通）。 */
-  function prepareEstimators(marks, sampleIndices, modelSettings, estimatorList, warnings) {
-    const prepared = {};
-    for (const estimator of estimatorList) {
-      if (estimator.type === "rbf") {
+  // 計測値が多項式でほぼ完全に表せるとみなす、最小二乗の残差の2乗和の割合（GPRの調整値を選ぶ意味がないとき）
+  const EXACT_FIT_RATIO = 1e-20;
+
+  /**
+   * 「予測」で使うRBF・GPRの予測の前準備（選んだ点ごと・説明変数ごとに1回。XとYで共通）。
+   *   predictors: "rbf:xy" などのキー → { operator（RBFの予測 M×n）} または { gp（GPRの前準備）} または { error }
+   */
+  function preparePredictors(marks, sampleIndices, variants, modelSettings, warnings) {
+    const predictors = new Map();
+    for (const variant of variants) {
+      if (variant.mode !== "predict") {
+        continue;
+      }
+      const key = `${variant.type}:${variant.features}`;
+      if (predictors.has(key)) {
+        continue;
+      }
+      let predictor;
+      if (variant.type === "rbf") {
         const result = ASC.correction.rbfOperator(
           marks,
           sampleIndices,
           { kernel: modelSettings.rbfKernel, lambda: modelSettings.rbfLambda, shapeFactor: modelSettings.rbfShapeFactor },
-          estimator.features
+          variant.features
         );
-        prepared[estimator.key] = result.error ? { error: result.error } : { type: "linear", operator: result.operator };
+        predictor = result.error ? { error: result.error } : { operator: result.operator };
       } else {
-        const result = ASC.correction.prepareGp(marks, sampleIndices, estimator.features, modelSettings.gpKernel);
-        prepared[estimator.key] = result.error ? { error: result.error } : { type: "gp", gp: result };
+        const result = ASC.correction.prepareGp(marks, sampleIndices, variant.features, modelSettings.gpKernel);
+        predictor = result.error ? { error: result.error } : { gp: result };
       }
-      if (prepared[estimator.key].error) {
-        warnings.push(`${estimator.longLabel}: ${prepared[estimator.key].error}`);
+      if (predictor.error) {
+        warnings.push(`${variant.label}: ${predictor.error}`);
       }
+      predictors.set(key, predictor);
     }
-    return prepared;
+    return predictors;
   }
 
-  /** 推定精度を評価する推定手法（設定で選んだもの）。 */
-  function selectedEstimators(modelSettings) {
-    return C.ESTIMATORS.filter((estimator) => modelSettings.estimators[estimator.key]);
+  /**
+   * 1つの軸の、補正ごとの部品を作る（選んだ点・多項式の項ごとに1回）。
+   *   operators: 線形の補正（HOWA・RBF・計測値＋HOWA）の 計測値 → 全Markの補正量 の行列（M × n）
+   *   gpr: GPRの補正（補正のキー → 式内は { kernelPart, prepared }、予測は { predictor, projector }、または { error }）
+   */
+  function prepareAxisModels(marks, sampleIndices, terms, allFit, variants, modelSettings, shared, warnings) {
+    const markCount = marks.length;
+    const n = sampleIndices.length;
+    const allDesign = allFit.allDesign;
+    const needsAll = variants.some((variant) => variant.mode === "predict");
+    const howaParts = ASC.correction.prepareHowa(marks, sampleIndices, terms, allDesign, needsAll ? allFit.allLeastSquares : null);
+    warnings.push(...howaParts.warnings);
+    const p = howaParts.p;
+    const operators = {};
+    const gpr = {};
+    for (const variant of variants) {
+      if (variant.type === "howa") {
+        operators[variant.key] = howaParts.howa;
+        continue;
+      }
+      if (variant.type === "measured") {
+        operators[variant.key] = ASC.correction.measuredOperator(howaParts.howa, sampleIndices, markCount);
+        continue;
+      }
+      if (variant.mode === "predict") {
+        const predictor = shared.predictors.get(`${variant.type}:${variant.features}`);
+        if (predictor.error) {
+          operators[variant.key] = null;
+          gpr[variant.key] = { error: predictor.error };
+        } else if (variant.type === "rbf") {
+          operators[variant.key] = ASC.correction.estimateThenHowaOperator(howaParts, predictor.operator, sampleIndices, markCount);
+        } else {
+          gpr[variant.key] = { predictor, projector: ASC.correction.gpHowaProjector(predictor.gp, howaParts, sampleIndices) };
+        }
+        continue;
+      }
+      if (variant.type === "rbf") {
+        const result = ASC.correction.rbfPolynomialOperator(
+          marks,
+          sampleIndices,
+          howaParts.sampleDesign,
+          p,
+          { kernel: modelSettings.rbfKernel, lambda: modelSettings.rbfLambda, shapeFactor: modelSettings.rbfShapeFactor },
+          variant.features
+        );
+        if (result.error) {
+          warnings.push(`${variant.label}: ${result.error}`);
+          operators[variant.key] = null;
+        } else {
+          operators[variant.key] = M.multiply(allDesign, markCount, p, result.operator, n);
+        }
+        continue;
+      }
+      // GPRの式内: 共分散の固有値分解は説明変数ごとに1回（XとY・多項式の項で共通）
+      if (!shared.gprKernels.has(variant.features)) {
+        shared.gprKernels.set(variant.features, ASC.correction.prepareGprKernel(marks, sampleIndices, variant.features, modelSettings.gpKernel));
+      }
+      const kernelPart = shared.gprKernels.get(variant.features);
+      const prepared = ASC.correction.prepareGprPolynomial(kernelPart, howaParts.sampleDesign, p);
+      if (prepared.error) {
+        warnings.push(`${variant.label}: ${prepared.error}`);
+        gpr[variant.key] = { error: prepared.error };
+      } else {
+        gpr[variant.key] = { kernelPart, prepared };
+      }
+    }
+    return { howaParts, operators, gpr };
+  }
+
+  /**
+   * HOWA（最小二乗）の係数と計測点での残差（GPRの式内で、調整値を選ぶのに使う）。
+   * exact は、計測値が多項式でほぼ完全に表せるか（残差の2乗和がほぼ0か）。
+   */
+  function leastSquaresFit(howaParts, measured, n) {
+    const p = howaParts.p;
+    const coefficients = new Float64Array(p);
+    for (let k = 0; k < p; k++) {
+      let sum = 0;
+      for (let i = 0; i < n; i++) {
+        sum += howaParts.leastSquares[k * n + i] * measured[i];
+      }
+      coefficients[k] = sum;
+    }
+    const residual = new Float64Array(n);
+    let residualSquares = 0;
+    let totalSquares = 0;
+    for (let j = 0; j < n; j++) {
+      let fitted = 0;
+      for (let k = 0; k < p; k++) {
+        fitted += howaParts.sampleDesign[j * p + k] * coefficients[k];
+      }
+      residual[j] = measured[j] - fitted;
+      residualSquares += residual[j] * residual[j];
+      totalSquares += measured[j] * measured[j];
+    }
+    return { coefficients, residual, exact: !(residualSquares > totalSquares * EXACT_FIT_RATIO) };
   }
 
   /**
    * 1組の計測Markについて、次を求める。
-   *   results: 補正ごと（HOWAのみ、流れ × 推定手法）・軸ごとの残差の指標（全Mark）
-   *   estimation: 推定手法ごとの推定精度。計測値から推定した未計測Markの値と真のずれの差の指標。
-   *               "howa" は多項式で予測した場合（比べる基準）
-   *   estimationSquares: 推定誤差の2乗をWaferで足したもの（Markごと。誤差のマップに使う。計測Markは NaN）
-   *   gpChoices: ガウス過程回帰がWaferごとに選んだ相関の長さ [mm] とノイズ比
-   * options.estimation が false なら推定精度は求めない（全点計測の基準など、未計測Markがないとき）。
+   *   results: 補正ごと・軸ごとの残差の指標（全Mark）
+   *   gpChoices: GPRがWaferごとに選んだ相関の長さ [mm] とノイズ比（GPRの補正ごと）
+   * 補正できなかったとき（点が少ないなど）は、0のままだと「残差0」と誤解されるので値なし（NaN）にする。
    */
-  function evaluateSampleSet(map, data, modelSettings, sampleIndices, variants, modelCache, options) {
+  function evaluateSampleSet(map, data, modelSettings, sampleIndices, variants, modelCache) {
     const marks = map.marks;
     const markCount = marks.length;
     const n = sampleIndices.length;
     const warnings = [];
     const getAllFit = modelCache || createModelCache(map);
-    const measuredSet = new Set(sampleIndices);
-    const unmeasured = [];
-    for (let i = 0; i < markCount; i++) {
-      if (!measuredSet.has(i)) {
-        unmeasured.push(i);
-      }
-    }
-    const withEstimation = !(options && options.estimation === false) && unmeasured.length > 0;
-    // 推定精度の対象と、補正に使う推定手法を合わせて前準備する
-    const estimatorList = withEstimation ? selectedEstimators(modelSettings) : [];
-    for (const variant of variants) {
-      if (variant.estimator && !estimatorList.includes(variant.estimator)) {
-        estimatorList.push(variant.estimator);
-      }
-    }
-    const estimators = prepareEstimators(marks, sampleIndices, modelSettings, estimatorList, warnings);
-
     const results = {};
     const gpChoices = {};
     for (const variant of variants) {
       results[variant.key] = createMetricStore(data.waferCount);
-      if (variant.estimator && variant.estimator.type === "gp") {
+      if (variant.type === "gp") {
         gpChoices[variant.key] = { lengthMm: [], noiseRatio: [] };
-      }
-    }
-    const estimationKeys = withEstimation ? ["howa"].concat(selectedEstimators(modelSettings).map((estimator) => estimator.key)) : [];
-    const estimation = {};
-    const estimationSquares = {};
-    for (const key of estimationKeys) {
-      estimation[key] = createMetricStore(data.waferCount);
-      estimationSquares[key] = {};
-      for (const axis of AXES) {
-        const squares = new Float64Array(markCount);
-        for (const markIndex of sampleIndices) {
-          squares[markIndex] = NaN;
-        }
-        estimationSquares[key][axis] = squares;
       }
     }
 
     const measured = new Float64Array(n);
-    const howaCorrection = new Float64Array(markCount);
     const correction = new Float64Array(markCount);
     const residual = new Float64Array(markCount);
-    const estimateBuffer = new Float64Array(markCount);
-    const errorBuffer = new Float64Array(unmeasured.length);
-    const howaCache = new Map();
-    const gpProjectors = new Map();
-
-    /** 未計測Markでの推定誤差（推定値 − 真のずれ）を記録する。 */
-    function recordEstimation(key, axis, wafer, prediction, truth, waferOffset) {
-      if (!estimation[key]) {
-        return;
-      }
-      const squares = estimationSquares[key][axis];
-      for (let j = 0; j < unmeasured.length; j++) {
-        const markIndex = unmeasured[j];
-        const error = prediction[markIndex] - truth[waferOffset + markIndex];
-        errorBuffer[j] = error;
-        squares[markIndex] += error * error;
-      }
-      const metrics = residualMetrics(errorBuffer, unmeasured.length);
-      for (const metric of METRIC_KEYS) {
-        estimation[key][axis][metric][wafer] = metrics[metric];
-      }
-    }
+    const coefficients = new Float64Array(markCount);
+    // 選んだ点ごとに1回だけ作るもの（XとYで共通）: 「予測」のRBF・GPR、GPRの式内の共分散の固有値分解
+    const shared = { predictors: preparePredictors(marks, sampleIndices, variants, modelSettings, warnings), gprKernels: new Map() };
+    const axisCache = new Map();
 
     function markMissing(store, axis, wafer) {
       for (const metric of METRIC_KEYS) {
@@ -258,30 +314,21 @@
       }
     }
 
+    function recordChoice(variant, fit) {
+      if (Number.isFinite(fit.length)) {
+        gpChoices[variant.key].lengthMm.push(fit.length * C.NORMALIZATION_RADIUS_MM);
+        gpChoices[variant.key].noiseRatio.push(fit.noiseRatio);
+      }
+    }
+
     for (const axis of AXES) {
       const terms = axis === "x" ? modelSettings.termsX : modelSettings.termsY;
       const termsKey = terms.join(",");
-      if (!howaCache.has(termsKey)) {
-        const allFit = getAllFit(terms);
-        const howaParts = ASC.correction.prepareHowa(marks, sampleIndices, terms, allFit.allDesign, allFit.allLeastSquares);
-        warnings.push(...howaParts.warnings);
-        // 線形の補正（HOWAのみ・RBFを使う流れ）は、演算子を先に作っておく
-        const operators = {};
-        for (const variant of variants) {
-          if (!variant.estimator) {
-            operators[variant.key] = howaParts.howa;
-          } else {
-            const estimator = estimators[variant.estimator.key];
-            if (estimator.type === "linear") {
-              operators[variant.key] = ASC.correction.estimateThenHowaOperator(howaParts, estimator.operator, sampleIndices, markCount);
-            }
-          }
-        }
-        howaCache.set(termsKey, { howaParts, operators });
+      if (!axisCache.has(termsKey)) {
+        axisCache.set(termsKey, prepareAxisModels(marks, sampleIndices, terms, getAllFit(terms), variants, modelSettings, shared, warnings));
       }
-      const { howaParts, operators } = howaCache.get(termsKey);
+      const { howaParts, operators, gpr } = axisCache.get(termsKey);
       const p = howaParts.p;
-      const coefficients = new Float64Array(p);
       const truth = axis === "x" ? data.truthX : data.truthY;
       const noise = axis === "x" ? data.noiseX : data.noiseY;
 
@@ -291,52 +338,41 @@
           const markIndex = sampleIndices[j];
           measured[j] = truth[waferOffset + markIndex] + noise[waferOffset + markIndex];
         }
-        applyOperator(howaParts.howa, measured, n, markCount, howaCorrection);
-        recordEstimation("howa", axis, wafer, howaCorrection, truth, waferOffset);
-
-        // 計測値そのものに推定手法を当てはめる（推定精度と「推定→HOWA」で使う）。GPはここで1回だけ学習する
-        const rawFits = {};
-        for (const estimator of estimatorList) {
-          const prepared = estimators[estimator.key];
-          if (prepared.error) {
-            if (estimation[estimator.key]) {
-              markMissing(estimation[estimator.key], axis, wafer);
-            }
-            continue;
-          }
-          const needsEstimate = Boolean(estimation[estimator.key]);
-          if (prepared.type === "gp") {
-            rawFits[estimator.key] = ASC.correction.gpFit(prepared.gp, measured);
-            if (needsEstimate) {
-              recordEstimation(estimator.key, axis, wafer, ASC.correction.gpPredictAll(prepared.gp, rawFits[estimator.key]), truth, waferOffset);
-            }
-          } else if (needsEstimate) {
-            applyOperator(prepared.operator, measured, n, markCount, estimateBuffer);
-            recordEstimation(estimator.key, axis, wafer, estimateBuffer, truth, waferOffset);
-          }
-        }
-
+        let ols = null;
+        // 「予測」のGPRの学習は、説明変数ごとにWaferで1回
+        const predictFits = new Map();
         for (const variant of variants) {
           const store = results[variant.key];
-          if (operators[variant.key]) {
+          if (variant.type !== "gp") {
+            if (!operators[variant.key]) {
+              markMissing(store, axis, wafer);
+              continue;
+            }
             applyOperator(operators[variant.key], measured, n, markCount, correction);
             storeMetrics(store, axis, wafer, truth, waferOffset, correction, markCount, residual);
             continue;
           }
-          const estimator = estimators[variant.estimator.key];
-          if (estimator.error) {
-            // 推定できなかったとき。0のままだと「残差0」と誤解されるので、値なしにする
+          const model = gpr[variant.key];
+          if (model.error) {
             markMissing(store, axis, wafer);
             continue;
           }
-          // ガウス過程回帰はWaferごとに調整値を学習する（推定精度と同じ学習結果を使う）。
-          // 未計測Markを推定して全Markを埋め、全Markに多項式を当てはめる（係数を直接求める）
-          const fit = rawFits[variant.estimator.key];
-          const projectorKey = `${termsKey}|${variant.estimator.key}`;
-          if (!gpProjectors.has(projectorKey)) {
-            gpProjectors.set(projectorKey, ASC.correction.gpHowaProjector(estimator.gp, howaParts, sampleIndices));
+          let fit;
+          if (variant.mode === "predict") {
+            // GPRで未計測Markを予測して全Markを埋め、全Markに多項式を当てはめた係数を求める
+            if (!predictFits.has(variant.features)) {
+              predictFits.set(variant.features, ASC.correction.gpFit(model.predictor.gp, measured));
+            }
+            fit = predictFits.get(variant.features);
+            ASC.correction.gpThenHowaCoefficients(model.predictor.gp, model.projector, fit, measured, coefficients);
+          } else {
+            // GPRの式内: Waferごとに調整値を選んで、一般化最小二乗で多項式の係数を求める
+            if (ols === null) {
+              ols = leastSquaresFit(howaParts, measured, n);
+            }
+            fit = ASC.correction.gprFit(model.kernelPart, model.prepared, measured, ols.residual, ols.coefficients, ols.exact);
+            coefficients.set(fit.coefficients);
           }
-          ASC.correction.gpThenHowaCoefficients(estimator.gp, gpProjectors.get(projectorKey), fit, measured, coefficients);
           for (let i = 0; i < markCount; i++) {
             let sum = 0;
             const offset = i * p;
@@ -346,25 +382,21 @@
             correction[i] = sum;
           }
           storeMetrics(store, axis, wafer, truth, waferOffset, correction, markCount, residual);
-          if (Number.isFinite(fit.length)) {
-            gpChoices[variant.key].lengthMm.push(fit.length * C.NORMALIZATION_RADIUS_MM);
-            gpChoices[variant.key].noiseRatio.push(fit.noiseRatio);
-          }
+          recordChoice(variant, fit);
         }
       }
     }
-    return { results, estimation, estimationSquares, gpChoices, warnings: Array.from(new Set(warnings)) };
+    return { results, gpChoices, warnings: Array.from(new Set(warnings)) };
   }
 
   /**
    * 全Markを計測してHOWAで補正したときの基準。
    * 多項式で表せない成分だけが残るので、選び方による悪化を測る物差しになる。
-   * （全Markを測ると未計測Markがなく推定の出番がないため、推定を使う流れは基準に使わない）
    */
   function evaluateAllMarks(map, data, modelSettings, modelCache) {
     const allIndices = Array.from({ length: map.marks.length }, (_, i) => i);
-    const howaOnly = [{ key: "howa", flowType: "howa", estimator: null, label: "HOWAのみ" }];
-    return evaluateSampleSet(map, data, modelSettings, allIndices, howaOnly, modelCache, { estimation: false });
+    const howaOnly = ASC.correction.buildVariants({ corrections: { howa: true } });
+    return evaluateSampleSet(map, data, modelSettings, allIndices, howaOnly, modelCache);
   }
 
   /** 選び方の乱数（選び方の並び順と試行の番号で決める。評価と「計画を作成」で同じ点を選ぶため共通にする）。 */
@@ -470,8 +502,6 @@
       }
       const evaluation = evaluateSampleSet(map, data, settings.model, set.markIndices, variants, modelCache);
       set.results = evaluation.results;
-      set.estimation = evaluation.estimation;
-      set.estimationSquares = evaluation.estimationSquares;
       set.gpChoices = evaluation.gpChoices;
       set.warnings.push(...evaluation.warnings);
       doneSteps++;
@@ -494,8 +524,7 @@
       criteriaReference: criteriaReference(sets),
       criteriaSameTerms: settings.model.termsX.join(",") === settings.model.termsY.join(","),
       methods: methods.filter((method) => sets.some((set) => set.method === method.key)),
-      estimationKeys: estimationKeysOf(settings.model),
-      summary: summarizeResults(sets, variants, estimationKeysOf(settings.model), methods),
+      summary: summarizeResults(sets, variants, methods),
       waferCount: data.waferCount,
     };
   }
@@ -571,7 +600,7 @@
    * Markが揃わない端のShotを選べば選び方ごとに少し変わる（点ごとに試行の平均を持つ）。
    * 手動プラン（input.manualPlans）は計測Shot数が決まっているので、1回だけ評価してグラフに点として重ねる。
    * sweepSettings: { startShots, endShots, stepShots, draws, methods }
-   * 戻り値: { points: [{ shotCount, markCounts, summary, relaxed, warnings }], methods, manual, variants, estimationKeys, baseline, uncorrected }
+   * 戻り値: { points: [{ shotCount, markCounts, summary, relaxed, warnings }], methods, manual, variants, baseline, uncorrected }
    *   manual: { methods, summary, shotCounts, markCounts }（手動プランがなければ null）
    */
   async function runSweep(input, sweepSettings, onProgress, isCancelled) {
@@ -655,7 +684,6 @@
       methods: last.methods,
       manual,
       variants: last.variants,
-      estimationKeys: last.estimationKeys,
       baseline: summarizeStore(last.baselines.allMarks.howa),
       uncorrected: summarizeStore(last.baselines.uncorrected),
       waferCount: data.waferCount,
@@ -729,14 +757,14 @@
    * 選び方 × 補正 × 軸 × 指標ごとに、全試行・全Waferの値をまとめる。
    * ランダム系は、試行ごとの平均（Wafer平均）のばらつきも出す。
    */
-  function summarizeResults(sets, variants, estimationKeys, methods) {
+  function summarizeResults(sets, variants, methods) {
     const summary = {};
     for (const method of methods) {
       const methodSets = sets.filter((set) => set.method === method.key && set.results);
       if (methodSets.length === 0) {
         continue;
       }
-      summary[method.key] = { drawCount: methodSets.length, variants: {}, estimation: {}, gpChoices: {} };
+      summary[method.key] = { drawCount: methodSets.length, variants: {}, gpChoices: {} };
       for (const variant of variants) {
         const variantSummary = {};
         for (const axis of AXES) {
@@ -753,17 +781,11 @@
           }
         }
         summary[method.key].variants[variant.key] = variantSummary;
-        if (variant.estimator && variant.estimator.type === "gp") {
+        if (variant.type === "gp") {
           const lengths = methodSets.flatMap((set) => set.gpChoices[variant.key].lengthMm);
           const ratios = methodSets.flatMap((set) => set.gpChoices[variant.key].noiseRatio);
           summary[method.key].gpChoices[variant.key] = { lengthMm: M.summarize(lengths), noiseRatio: M.summarize(ratios) };
         }
-      }
-      for (const key of estimationKeys) {
-        if (!methodSets[0].estimation[key]) {
-          continue;
-        }
-        summary[method.key].estimation[key] = summarizeStores(methodSets.map((set) => set.estimation[key]));
       }
       for (const axis of AXES) {
         summary[method.key][`criteria${axis.toUpperCase()}`] = {
@@ -800,37 +822,6 @@
     });
   }
 
-  /** 試行ごとの指標の箱をまとめて集計する（全試行・全Waferの分布と、試行ごとの平均の分布）。 */
-  function summarizeStores(stores) {
-    const result = {};
-    for (const axis of AXES) {
-      result[axis] = {};
-      for (const metric of METRIC_KEYS) {
-        const all = [];
-        const perDraw = [];
-        for (const store of stores) {
-          all.push(...store[axis][metric]);
-          perDraw.push(M.summarize(store[axis][metric]).mean);
-        }
-        result[axis][metric] = { all: M.summarize(all), perDraw: M.summarize(perDraw) };
-      }
-    }
-    return result;
-  }
-
-  /** 推定精度を比べる対象（多項式の予測と、選んだ推定手法）。 */
-  function estimationKeysOf(modelSettings) {
-    return ["howa"].concat(selectedEstimators(modelSettings).map((estimator) => estimator.key));
-  }
-
-  /** 推定精度の表やグラフに使う名前。 */
-  function estimationLabel(key) {
-    if (key === "howa") {
-      return "HOWA（多項式の予測）";
-    }
-    return C.ESTIMATORS.find((estimator) => estimator.key === key).label;
-  }
-
   /** 1つの基準（Wafer数ぶんの値）を集計する。 */
   function summarizeStore(store) {
     const result = {};
@@ -853,7 +844,6 @@
     runSweep,
     sweepShotCounts,
     summarizeStore,
-    estimationLabel,
     criteriaOf,
     criteriaReference,
   };

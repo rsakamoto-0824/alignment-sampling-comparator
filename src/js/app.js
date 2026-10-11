@@ -9,8 +9,9 @@
 
   // 設定ファイルの版。2 で手動プランを複数持てるようにした。3 で選んだShotの全Markを測る形・
   // 制約なし／制約付きのD・I最適・強制計測Shot・除外Shot・一筆書きのScan方向を入れた（1・2 も読める）
-  const SETTINGS_FILE_VERSION = 3;
-  const READABLE_SETTINGS_VERSIONS = [1, 2, 3];
+  // 4 で補正を「HOWA・RBF/GPR（式内・予測）・計測値＋HOWA」にした（推定→HOWA は「予測」として読む）
+  const SETTINGS_FILE_VERSION = 4;
+  const READABLE_SETTINGS_VERSIONS = [1, 2, 3, 4];
   // ファイル名に使えない文字（Windowsを含む）
   const FILE_NAME_FORBIDDEN = /[\\/:*?"<>|\s]+/g;
 
@@ -46,7 +47,6 @@
       // 評価結果の分布の図の横軸（linear: 等間隔、log: 対数）
       chartScale: "linear",
       mapChoices: {},
-      estimationMapMethod: null,
       sweep: { mode: "methods", metric: "rms", axis: "x", stat: "mean", scale: "linear", xAxis: "marks", target: NaN },
       // 評価データのタブ: 表示するWafer（0始まり）・成分・表示の形・一覧のページ
       data: { wafer: 0, component: "truth", display: "vector", page: 0 },
@@ -637,7 +637,7 @@
     if (settings.model.termsX.length === 0 || settings.model.termsY.length === 0) {
       errors.push("補正の多項式の項を、X・Yとも1つ以上選んでください。");
     }
-    const flowError = ASC.settingsForm.flowSettingError(settings.model);
+    const flowError = ASC.settingsForm.correctionSettingError(settings.model);
     if (flowError) {
       errors.push(flowError);
     }
@@ -674,7 +674,7 @@
     }
     const model = state.settings.model;
     if (model.termsX.length === 0 || model.termsY.length === 0) {
-      errors.push("D基準・I基準に使う補正の多項式の項（3. 補正モデル）を、X・Yとも1つ以上選んでください。");
+      errors.push("D基準・I基準に使う補正の多項式の項（3. 補正）を、X・Yとも1つ以上選んでください。");
     }
     errors.push(...state.contextErrors);
     return Array.from(new Set(errors));
@@ -1047,23 +1047,38 @@
   }
 
   /**
-   * 版2以前の設定を、版3の形に読み替える（初期設定に重ねる前に行う）。
-   *   - 以前のD最適・I最適は制約を守る選び方だったので、制約付きD最適・I最適として読む
-   *   - 「必ず測るMark」「k個以上」「HOWA＋推定」は、なくなったので使わない（重ねるときに捨てられる）
+   * 以前の版の設定を、今の形に読み替える（初期設定に重ねる前に行う）。
+   *   版2以前: 以前のD最適・I最適は制約を守る選び方だったので、制約付きD最適・I最適として読む。
+   *            「必ず測るMark」「k個以上」「HOWA＋推定」は、なくなったので使わない（重ねるときに捨てられる）
+   *   版3以前: 補正の流れ「HOWAのみ」は HOWA、「推定→HOWA × 推定手法」は RBF・GPR の予測として読む。
+   *            選んでいた推定手法は式内も比べる。計測値＋HOWA は比べる
    */
   function migrateOldSettings(loaded, version) {
-    if (version >= 3 || !loaded || !loaded.sampling || !loaded.sampling.methods) {
+    if (!loaded) {
       return loaded;
     }
-    const old = loaded.sampling.methods;
-    loaded.sampling.methods = {
-      random: old.random !== false,
-      poisson: old.poisson !== false,
-      dOptimal: false,
-      iOptimal: false,
-      constrainedD: old.dOptimal !== false,
-      constrainedI: old.iOptimal !== false,
-    };
+    if (version < 3 && loaded.sampling && loaded.sampling.methods) {
+      const old = loaded.sampling.methods;
+      loaded.sampling.methods = {
+        random: old.random !== false,
+        poisson: old.poisson !== false,
+        dOptimal: false,
+        iOptimal: false,
+        constrainedD: old.dOptimal !== false,
+        constrainedI: old.iOptimal !== false,
+      };
+    }
+    if (version < 4 && loaded.model) {
+      const flows = loaded.model.flows || {};
+      const estimators = loaded.model.estimators || {};
+      const corrections = { howa: flows.howa !== false, measured: true };
+      for (const correction of C.CORRECTIONS.filter((entry) => entry.mode === "embedded")) {
+        const selected = estimators[correction.family] !== false;
+        corrections[correction.key] = selected;
+        corrections[`${correction.key}Predict`] = selected && flows.estimateThenHowa !== false;
+      }
+      loaded.model.corrections = corrections;
+    }
     return loaded;
   }
 
@@ -1127,6 +1142,9 @@
       }
       if (content.version < 3) {
         notes.push("以前の版の設定です。D最適・I最適は「制約付きD最適・I最適」として読み、「必ず測るMark」「k個以上」「HOWA＋推定」の設定は使いません（選んだShotのMarkはすべて測ります）。");
+      }
+      if (content.version < 4) {
+        notes.push("以前の版の補正の設定です。「HOWAのみ」はHOWA、「推定→HOWA」はRBF・GPRの「予測」として読みました。選んでいた推定手法の「式内」と「計測値＋HOWA」も比べる設定にしています。");
       }
       ui.showMessage("success", "設定を読み込みました。", notes);
     } catch (error) {

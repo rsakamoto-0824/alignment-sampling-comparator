@@ -228,11 +228,12 @@
           </div>
         </details>
 
-        <!-- 3. 補正モデル -->
+        <!-- 3. 補正 -->
         <details class="settings-section">
-          <summary>3. 補正モデル（HOWA・RBF）</summary>
+          <summary>3. 補正（HOWA・RBF・GPR）</summary>
           <div class="section-body">
-            <h3 class="subheading">HOWAの多項式（21項から選ぶ）</h3>
+            <p class="hint">補正値はどれも X,Y の高次多項式（露光機の高次補正と同じ形）です。比べるのは、多項式の係数の決め方です。</p>
+            <h3 class="subheading">補正の多項式（21項から選ぶ）</h3>
             <div class="button-row">
               <button type="button" class="button-secondary button-small" data-term-preset="5">5次まで</button>
               <button type="button" class="button-secondary button-small" data-term-preset="3">3次まで</button>
@@ -251,18 +252,19 @@
             <p class="field-error" id="polynomial-table-error"></p>
 
             <fieldset>
-              <legend>比べる補正の流れ</legend>
-              <label class="choice"><input type="checkbox" data-setting="model.flows.howa" /> HOWAのみ</label>
-              <label class="choice"><input type="checkbox" data-setting="model.flows.estimateThenHowa" /> 推定→HOWA（未計測Markを推定して埋め、全Markに多項式）</label>
+              <legend>比べる補正</legend>
+              <div id="correction-choices"></div>
             </fieldset>
-            <p class="hint">2つの流れの違いは「使い方」のタブに図で説明しています。</p>
-            <fieldset>
-              <legend>推定手法（推定→HOWAで、それぞれ評価します）</legend>
-              <div id="estimator-choices"></div>
-            </fieldset>
-            <p class="field-error" id="flows-error"></p>
+            <ul class="hint-list">
+              <li><strong>HOWA</strong>: 計測したMarkに、多項式を最小二乗で当てはめます。</li>
+              <li><strong>式内</strong>: RBF・GPRの式の中に多項式を入れて計測値を表し、その多項式の部分を補正値にします（GPRは、点どうしのつながりを考えた一般化最小二乗）。</li>
+              <li><strong>予測</strong>: RBF・GPRで測っていないMarkのずれを予測して全Markを埋め、全Markに多項式を当てはめます。</li>
+              <li><strong>計測値＋HOWA</strong>: 測ったMarkは計測値そのもの、測っていないMarkはHOWAの多項式で補正します。</li>
+              <li>（X,Y,半径）は、RBF・GPRの点どうしの距離に半径も入れたものです。図は「使い方」のタブにあります。</li>
+            </ul>
+            <p class="field-error" id="corrections-error"></p>
 
-            <h3 class="subheading">RBF（1次式＋RBFの和）</h3>
+            <h3 class="subheading">RBF（多項式＋距離の基底関数）</h3>
             <div class="field">
               <label for="rbf-kernel">基底関数</label>
               <select id="rbf-kernel" data-setting="model.rbfKernel"></select>
@@ -279,14 +281,14 @@
                 <p class="field-error" id="rbf-shape-error"></p>
               </div>
             </div>
-            <p class="hint">λ = 0 なら計測点をそのまま通ります。大きくするほど、なめらかにノイズをならします。幅は薄板スプラインでは使いません。</p>
+            <p class="hint">λ = 0 なら計測点をそのまま通ります。大きくするほど、なめらかにノイズをならします（式内は大きくするほどHOWAに近づきます）。幅は薄板スプラインでは使いません。RBFの式の中の多項式は、式内ではこの欄の多項式、予測では1次式（定数・X・Y［・半径］）です。</p>
 
-            <h3 class="subheading">ガウス過程回帰（GP）</h3>
+            <h3 class="subheading">GPR（ガウス過程回帰）</h3>
             <div class="field">
               <label for="gp-kernel">共分散関数</label>
               <select id="gp-kernel" data-setting="model.gpKernel"></select>
             </div>
-            <p class="hint">相関の長さとノイズの大きさは、Waferごとに、選んだ計測点の値で学習します（周辺尤度が最大になる値）。結果の「GPが学習した値」で確かめられます。</p>
+            <p class="hint">相関の長さとノイズの大きさは、Waferごとに、選んだ計測点の値で選びます（周辺尤度が最大になる値。式内はHOWAの残差から、予測は1次式を引いた残差から）。結果の「GPRが選んだ値」で確かめられます。</p>
           </div>
         </details>
 
@@ -474,7 +476,7 @@
         </section>
 
         <section class="tab-panel" role="tabpanel" id="panel-sweep" aria-labelledby="tab-sweep" hidden>
-          <p class="hint">計測Shot数を変えながら評価し、計測Mark数（計測コスト）と精度のトレードオフを見ます。マップ・評価データ・補正モデル・制約は左の設定を使います。選んだShotの有効なMarkをすべて測るので、計測Mark数は選び方ごとに少し違うことがあります（Markが揃わない端のShotを選んだとき）。「評価で比べる」にした手動プランは、そのプランの位置に点（× や ＋）で重ねます。</p>
+          <p class="hint">計測Shot数を変えながら評価し、計測Mark数（計測コスト）と精度のトレードオフを見ます。マップ・評価データ・補正・制約は左の設定を使います。選んだShotの有効なMarkをすべて測るので、計測Mark数は選び方ごとに少し違うことがあります（Markが揃わない端のShotを選んだとき）。「評価で比べる」にした手動プランは、そのプランの位置に点（× や ＋）で重ねます。</p>
           <fieldset class="inline-fieldset">
             <legend>比べる選び方（スイープ）</legend>
             <div class="choice-group" id="sweep-method-choices"></div>
@@ -516,7 +518,7 @@
           <ol>
             <li>「1. Waferマップ」でShotとMarkを用意する（生成するか、CSVを読み込む）</li>
             <li>「2. 評価データ」でZernike項の大きさ、計測ノイズ、Scan方向のずれを決める。実際の計測データで比べるときは、計測データのファイル（csv・xlsx）を読み込む（Waferマップもファイルから作ります）</li>
-            <li>「3. 補正モデル」でHOWAの多項式の項、比べる補正の流れ、推定手法を選ぶ</li>
+            <li>「3. 補正」で補正の多項式の項と、比べる補正（HOWA・RBF・GPR・計測値＋HOWA）を選ぶ</li>
             <li>「4. サンプリング」と「5. 条件制約」で、計測Shot数・制約（強制計測Shot・除外Shotを含む）を決める</li>
             <li>D最適・I最適（制約なし・制約付き）で選んだ点だけを見たいときは「計画を作成」を押す（評価データは使わず、すぐに終わります）。4つの選び方の点を「マップと選択点」に表示し、CSVで保存できます</li>
             <li>現行のサンプリングなど、人が選んだ点と比べたいときは「マップと選択点」で手動プランを作る（Shotをクリック、またはShot番号を貼り付け）</li>
@@ -542,40 +544,57 @@
             <li><strong>制約付きD最適・制約付きI最適</strong>: 条件制約（Scan方向・4象限・同心円・中心の1点・強制計測Shot）を守ったうえで、D最適・I最適の基準が最も良くなるように探します。強制計測Shotを固定し、残りのShotを入れ替えて足していきます（拡張計画）。「計画を作成」でも同じ点を選びます。</li>
             <li><strong>手動プラン</strong>: 人が選んだShotです。名前を付けて10個まで作れ、D最適などと同列に比べられます。「マップと選択点」でマップをクリックするか、Shot番号を貼り付けて作ります。評価で選ばれた点を写して手直しすることもできます。スイープでは、プランのMark数の位置に × や ＋ の点で重ねます。</li>
           </ul>
-          <h2>補正の流れ</h2>
-          <p>どちらも、<strong>最後に掛ける補正量は多項式だけ</strong>です。違いは、多項式を当てはめる点が「計測したMarkだけ」か「推定で埋めた全Mark」かです。</p>
+          <h2>補正</h2>
+          <p>補正値は、どれも <strong>X,Y の高次多項式</strong>（露光機の高次補正と同じ形）です。比べるのは、多項式の係数の決め方です。</p>
           <div class="flow-compare">
             <div class="flow-card">
-              <h3>HOWAのみ</h3>
+              <h3>HOWA</h3>
               <ol class="flow-steps">
-                <li>計測したMarkに多項式を当てはめる</li>
+                <li>計測したMarkに、多項式を最小二乗で当てはめる</li>
                 <li class="flow-result">補正量 ＝ 多項式</li>
               </ol>
             </div>
             <div class="flow-card">
-              <h3>推定→HOWA</h3>
+              <h3>RBF・GPR（式内）</h3>
               <ol class="flow-steps">
-                <li>計測したMarkの値から、推定手法で<strong>未計測Markのずれ</strong>を推定し、全Markを埋める</li>
-                <li>埋めた全Markに多項式を当てはめる</li>
-                <li class="flow-result">補正量 ＝ 多項式（推定値は当てはめに使うだけ）</li>
+                <li>計測値を「多項式 ＋ RBF（距離の基底関数）」または「多項式を平均とするGPR」で表す</li>
+                <li>多項式で表せない局所的な成分は、RBF・GPRの部分が受け持つ</li>
+                <li class="flow-result">補正量 ＝ 式の中の多項式だけ</li>
               </ol>
-              <p class="hint">推定の役目は、計測点の偏りをならすこと。点が固まった場所が当てはめに効きすぎるのを防ぎます。多項式で表せない形は補正されません。</p>
+              <p class="hint">GPRは、点どうしのつながり（共分散）を考えた一般化最小二乗で係数を決めます。点が固まった場所の重みが下がります。RBFは、なめらかさ λ を大きくするほどHOWAに近づきます。</p>
+            </div>
+            <div class="flow-card">
+              <h3>RBF・GPR（予測）</h3>
+              <ol class="flow-steps">
+                <li>RBF・GPRで、測っていないMarkのずれを予測し、全Markを埋める</li>
+                <li>埋めた全Markに多項式を当てはめる</li>
+                <li class="flow-result">補正量 ＝ 多項式</li>
+              </ol>
+              <p class="hint">予測の役目は、計測点の偏りをならすことです。点が固まった場所が当てはめに効きすぎるのを防ぎます。</p>
+            </div>
+            <div class="flow-card">
+              <h3>計測値＋HOWA</h3>
+              <ol class="flow-steps">
+                <li>測ったMarkは、計測値そのものを補正量にする</li>
+                <li>測っていないMarkは、HOWAの多項式で補正する</li>
+              </ol>
+              <p class="hint">測ったMarkの残差は計測ノイズだけになります。測っていないMarkはHOWAと同じです。</p>
             </div>
           </div>
-          <h2>推定手法</h2>
+          <h2>RBF・GPRの説明変数</h2>
           <ul>
-            <li><strong>RBF（X,Y）</strong>: 1次式（定数・X・Y）と、計測点からの距離の関数（基底関数）の和で補間します。基底関数・λ・幅は設定で決めます。</li>
-            <li><strong>RBF（X,Y,半径）</strong>: 説明変数に半径 r = √(X²+Y²) を加えます。1次式は定数・X・Y・r、距離は (X, Y, r) の空間で測ります。同じ半径の点どうしが似ている（同心円状の歪み）ことを表しやすくなります。</li>
-            <li><strong>GP（X,Y）</strong>: ガウス過程回帰。平均を1次式（定数・X・Y）とし、残りを共分散関数でつないで推定します。相関の長さとノイズの大きさを、Waferごとに計測点の値で学習します（周辺尤度が最大になる値）。</li>
-            <li><strong>GP（X,Y,半径）</strong>: ガウス過程回帰の説明変数に半径を加えたものです（平均は定数・X・Y・r の1次式）。</li>
+            <li><strong>（X,Y）</strong>: RBF・GPRの点どうしの距離を、X,Y の平面で測ります。</li>
+            <li><strong>（X,Y,半径）</strong>: 距離を (X, Y, r) の空間で測ります（r = √(X²+Y²)）。同じ半径の点どうしが似ている（同心円状の歪み）ことを表しやすくなります。</li>
+            <li>RBF: 基底関数・λ・幅は設定で決めます。式の中の多項式は、式内では補正の多項式、予測では1次式（定数・X・Y［・r］）です。</li>
+            <li>GPR: 相関の長さとノイズの大きさを、Waferごとに計測点の値で選びます（周辺尤度が最大になる値。式内はHOWAの残差から、予測は1次式を引いた残差から）。</li>
+            <li>座標はどれも 150 mm で割った値（−1〜1）で扱います。半径も同じ尺度です。</li>
           </ul>
-          <p>座標はどれも 150 mm で割った値（−1〜1）で扱います。半径も同じ尺度です。</p>
           <h2>結果の見方</h2>
           <ul>
-            <li>残差は、真のずれから補正量を引いた値です。全Waferの全Markで求め、Waferごとに RMS・|平均|+3σ・最大 を出します。</li>
+            <li>残差は、真のずれから補正量を引いた値です。全Waferの全Markで求め、Waferごとに RMS・|平均|+3σ・最大 を出します（計測値＋HOWA では、測ったMarkの残差は計測ノイズだけです）。</li>
             <li>「一覧」は、選び方（行）× 補正（列）のWafer平均です。行ごとに最も小さい値に ★ を付けています。</li>
-            <li>「残差の分布」の図（箱ひげ図）は、選び方ごとにHOWAのみと各推定手法（推定→HOWA）を並べます。薄い山はWaferごとの値の分布の形、太い棒は25〜75%点、線は5〜95%点、白丸は中央値です。値が20個より少ない行（Waferが少ないファイルなど）は、山の代わりに1つずつの値を点で描きます。ランダム系は全試行・全Waferの値をまとめています。縦の破線は全点計測の中央値です。「図の横軸」を対数にすると、値の小さい選び方どうしの差が見やすくなります。</li>
-            <li>「GPが学習した値」は、ガウス過程回帰がWaferごとに選んだ相関の長さとノイズ比です。</li>
+            <li>「残差の分布」の図（箱ひげ図）は、選び方ごとに補正を並べます。RBF・GPRの式内は薄い塗り、予測は塗りつぶしです（色は同じ）。薄い山はWaferごとの値の分布の形、太い棒は25〜75%点、線は5〜95%点、白丸は中央値です。値が20個より少ない行（Waferが少ないファイルなど）は、山の代わりに1つずつの値を点で描きます。ランダム系は全試行・全Waferの値をまとめています。縦の破線は全点計測の中央値です。「図の横軸」を対数にすると、値の小さい選び方どうしの差が見やすくなります。</li>
+            <li>「GPRが選んだ値」は、GPRがWaferごとに選んだ相関の長さとノイズ比です。</li>
             <li>「選び方ごとのマップ」のタブで、選び方ごとに選んだ点を並べて見比べられます。ランダム・ポアソンは中央・最良・最悪の試行か、全試行で各Shotが選ばれた割合を表示できます。</li>
             <li>「全点計測」は全Markを測ってHOWAで補正した残差です。多項式で表せない成分だけが残るので、選び方による悪化を測る物差しになります。</li>
             <li><strong>D基準</strong> log₁₀det(XᵀX) は、HOWAの多項式の係数をどれだけ精度よく決められるかの値で、大きいほど良い選び方です（D最適が最大にする値）。</li>
@@ -583,17 +602,11 @@
             <li>D効率・I効率は、その評価の中で最も良い選び方・試行を100%にした値です。点が項数より少ないときや、点が一部の行・列に集まって多項式が決まらないときは「計算できない」と出ます。</li>
             <li><strong>制約の満たし具合</strong>は、制約ごとに区画ごとの数と目標、判定を出します。外れたときの「ずれ」は、何個のShotを別の区画へ移せば満たせるかの目安です（強制計測Shotは選ばれていない数）。ランダム系は全試行のうち満たした回数と、ずれの平均を出します。制約なしのD最適・I最適と手動プランは制約を守らないので、外れることがあります。</li>
           </ul>
-          <h2>推定精度</h2>
-          <ul>
-            <li>推定手法（RBF・GP）が未計測Markのずれをどれだけ当てられるかを、<strong>推定値 − 真のずれ</strong>（ノイズのない値）で評価します。計測したMarkは評価に入れません。計測データのファイルでは、ファイルの計測値を真のずれとみなします。</li>
-            <li>「HOWA（多項式の予測）」は、計測Markに当てはめた多項式で未計測Markを予測した場合です。これより悪い推定手法は、推定→HOWA で使っても補正を良くしにくいと考えられます。</li>
-            <li>「推定誤差のマップ」は、未計測Markごとに全WaferのRMSを色で示します。Wafer端など、推定を外しやすい場所が分かります。</li>
-          </ul>
           <h2>計測点数のスイープ</h2>
           <ul>
             <li>計測Shot数を範囲と刻みで変えながら評価し、横軸を計測Mark数（計測コスト）か計測Shot数、縦軸を残差や推定誤差にした折れ線グラフを描きます。</li>
             <li>「比べる選び方（スイープ）」で、線にする選び方を選びます（制約なし・制約付きのD最適・I最適を含む）。制約なしは破線、制約付きは実線です。</li>
-            <li>「比べるもの」で、選び方の比較、補正の比較、推定精度の比較を切り替えます。値の幅が大きいときは「縦軸」を対数にすると見やすくなります。</li>
+            <li>「比べるもの」で、選び方の比較と補正の比較を切り替えます。値の幅が大きいときは「縦軸」を対数にすると見やすくなります。</li>
             <li>「目標の精度」を入れると、目標以下になる最小の計測Mark数を表で出します。</li>
             <li>計測点が多項式の項数（初期設定では21項）より少ないと、HOWAは不安定になり残差が大きくなります。</li>
           </ul>

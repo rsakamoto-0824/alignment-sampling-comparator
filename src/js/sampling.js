@@ -620,7 +620,7 @@
 
   /**
    * κ（予測誤差の倍率）= √(全Markで平均した予測分散 / σ²) = √tr(M⁻¹W)。
-   * HOWAのみで補正したとき、計測ノイズ σ が全Markの補正量にどれだけ乗るかの目安。
+   * HOWAで補正したとき、計測ノイズ σ が全Markの補正量にどれだけ乗るかの目安。
    */
   function kappaOf(map, markIndices, terms) {
     return designCriteria(map, markIndices, terms).kappa;

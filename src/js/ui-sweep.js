@@ -1,9 +1,8 @@
 /**
  * 「計測点数のスイープ」タブ。計測Mark数（計測コスト）と精度のトレードオフカーブを描く。
- * 比べるものは3通り:
+ * 比べるものは2通り:
  *   methods     補正を1つ選び、選び方を比べる
- *   corrections 選び方を1つ選び、補正（HOWAのみ＋推定手法）を比べる
- *   estimation  選び方を1つ選び、推定精度（未計測Markの推定誤差）を比べる
+ *   corrections 選び方を1つ選び、補正（HOWA・RBF・GPR・計測値＋HOWA）を比べる
  */
 (function (root) {
   "use strict";
@@ -14,12 +13,11 @@
   const MODES = {
     methods: "選び方を比べる（補正を1つ選ぶ）",
     corrections: "補正を比べる（選び方を1つ選ぶ）",
-    estimation: "推定精度を比べる（選び方を1つ選ぶ）",
   };
   const STATS = { mean: "Wafer平均", p95: "95%点" };
   const SCALES = { linear: "線形", log: "対数" };
   const X_AXES = { marks: "計測Mark数（計測コスト）", shots: "計測Shot数" };
-  // 選び方の線の色と形。ランダムは基準として灰色にする（推定手法の色と重ならないように）。
+  // 選び方の線の色と形。ランダムは基準として灰色にする（補正の色と重ならないように）。
   // D最適・I最適は、制約なしを破線と中抜きのマーカー、制約付きを実線と塗りのマーカーにして、色以外でも見分けられるようにする
   const METHOD_STYLES = {
     random: { color: "var(--method-random)", shape: "circle" },
@@ -30,7 +28,8 @@
     constrainedI: { color: "var(--method-i)", shape: "diamond" },
   };
   const DASH_PATTERN = "6 4";
-  const ESTIMATOR_SHAPES = { howa: "circle", rbfXY: "square", rbfXYR: "triangle", gpXY: "diamond", gpXYR: "triangleDown" };
+  // 補正の系統ごとの印の形（色と同じく系統で決め、RBF・GPRの式内は破線と中抜きの印にする）
+  const CORRECTION_SHAPES = { howa: "circle", rbfXY: "square", rbfXYR: "triangle", gpXY: "diamond", gpXYR: "triangleDown", measured: "circle" };
   // 手動プランは計測Shot数が決まっているので、線ではなく点（文字色の × や ＋）で重ねる
   const MANUAL_SHAPES = ["cross", "plus"];
   const MANUAL_COLOR = "var(--ink-1)";
@@ -115,25 +114,15 @@
           points: methodPoints(sweep, method.key, (summary) => statOf(summary.variants[view.variant][view.axis][view.metric], view.stat), view.xAxis),
         });
       });
-    } else if (view.mode === "corrections") {
+    } else {
       for (const variant of sweep.variants) {
-        const estimatorKey = variant.estimator ? variant.estimator.key : "howa";
         series.push({
           key: variant.key,
           label: variant.label,
-          color: ASC.resultsView.SERIES_COLORS[estimatorKey],
-          shape: ESTIMATOR_SHAPES[estimatorKey],
+          color: ASC.resultsView.SERIES_COLORS[variant.family],
+          shape: CORRECTION_SHAPES[variant.family],
+          dashed: variant.mode === "embedded",
           points: methodPoints(sweep, view.method, (summary) => statOf(summary.variants[variant.key][view.axis][view.metric], view.stat), view.xAxis),
-        });
-      }
-    } else {
-      for (const key of sweep.estimationKeys) {
-        series.push({
-          key,
-          label: ASC.evaluator.estimationLabel(key),
-          color: ASC.resultsView.SERIES_COLORS[key],
-          shape: ESTIMATOR_SHAPES[key],
-          points: methodPoints(sweep, view.method, (summary) => (summary.estimation[key] ? statOf(summary.estimation[key][view.axis][view.metric], view.stat) : NaN), view.xAxis),
         });
       }
     }
@@ -497,12 +486,8 @@
     );
 
     const series = buildSeries(sweep, view);
-    const what = view.mode === "estimation" ? "推定誤差" : "残差";
-    const yTitle = `${what} ${metricLabel}（${axisLabel}、${STATS[view.stat]}）`;
-    const references = [];
-    if (view.mode !== "estimation") {
-      references.push({ label: "全点計測", value: sweep.baseline[view.axis][view.metric][view.stat === "p95" ? "p95" : "mean"] });
-    }
+    const yTitle = `残差 ${metricLabel}（${axisLabel}、${STATS[view.stat]}）`;
+    const references = [{ label: "全点計測", value: sweep.baseline[view.axis][view.metric][view.stat === "p95" ? "p95" : "mean"] }];
     if (Number.isFinite(view.target)) {
       references.push({ label: "目標", value: view.target });
     }
@@ -513,8 +498,8 @@
         className: "hint",
         id: "sweep-target-hint",
         text:
-          view.mode === "estimation"
-            ? "推定誤差は、未計測Markでの 推定値 − 真のずれ です。計測Mark数が増えると未計測Markが減るので、評価するMarkの数も変わります。"
+          view.mode === "corrections"
+            ? "横線の「全点計測」は全Markを計測してHOWAで補正した残差で、計測点を増やしても下回れない目安です。RBF・GPRの式内（式の中の多項式を補正値にする）は破線と中抜きの印、予測（全Markの予測に多項式を当てはめる）は実線と塗りの印です（色は同じ）。グラフにポインターを合わせるか、グラフをTabで選んで左右キーを押すと値が出ます。"
             : "横線の「全点計測」は全Markを計測してHOWAで補正した残差で、計測点を増やしても下回れない目安です。制約なしのD最適・I最適は破線と中抜きの印、制約付きは実線と塗りの印です。グラフにポインターを合わせるか、グラフをTabで選んで左右キーを押すと値が出ます。",
       })
     );
@@ -543,7 +528,7 @@
     return ui.create("div", { className: "notice notice-warning" }, [ui.create("span", { className: "notice-icon", "aria-hidden": "true", text: "⚠" }), body]);
   }
 
-  /** スイープ結果のCSV（1行 = 計測Shot数 × 選び方 × 補正または推定手法 × 軸 × 指標）。 */
+  /** スイープ結果のCSV（1行 = 計測Shot数 × 選び方 × 補正 × 軸 × 指標）。 */
   function sweepCsv(sweep) {
     const lines = [["ShotCount", "MarkCount", "Method", "Kind", "Name", "Axis", "Metric", "Mean", "Median", "P5", "P95", "Max"].join(",")];
     const push = (point, methodKey, kind, name, axis, metric, stats) => {
@@ -570,11 +555,6 @@
           for (const metric of ASC.evaluator.METRIC_KEYS) {
             for (const variant of sweep.variants) {
               push(point, methodKey, "残差", variant.label, axis, metric, summary.variants[variant.key][axis][metric].all);
-            }
-            for (const key of sweep.estimationKeys) {
-              if (summary.estimation[key]) {
-                push(point, methodKey, "推定精度", ASC.evaluator.estimationLabel(key), axis, metric, summary.estimation[key][axis][metric].all);
-              }
             }
           }
         }

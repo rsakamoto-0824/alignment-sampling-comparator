@@ -53,6 +53,7 @@
   --series-3: #1baf7a;
   --series-4: #eda100;
   --series-5: #e87ba4;
+  --series-6: #008300;
 
   /* スイープで選び方を比べる線の色（推定手法の色と重ならないもの。ランダムは基準として灰色） */
   --method-random: #6b6a65;
@@ -120,6 +121,7 @@
     --series-3: #199e70;
     --series-4: #c98500;
     --series-5: #d55181;
+    --series-6: #008300;
     --method-random: #a9a89f;
     --method-poisson: #0ca30c;
     --method-d: #9085e9;
@@ -430,6 +432,18 @@ legend {
 .hint {
   color: var(--ink-2);
   margin: var(--space-1) 0 var(--space-3);
+}
+
+/* 比べる補正: RBF・GPRは説明変数ごとに1行（式内・予測を横に並べる） */
+.choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-4);
+}
+
+.choice-row-title {
+  min-width: 9em;
 }
 
 .hint-list {
@@ -760,31 +774,6 @@ th.number {
   stroke: var(--map-mark-measured);
 }
 
-.map-mark-step {
-  stroke: var(--ink-2);
-  stroke-width: 0.4;
-}
-
-.map-mark-step.step-1 {
-  fill: var(--step-1);
-}
-
-.map-mark-step.step-2 {
-  fill: var(--step-2);
-}
-
-.map-mark-step.step-3 {
-  fill: var(--step-3);
-}
-
-.map-mark-step.step-4 {
-  fill: var(--step-4);
-}
-
-.map-mark-step.step-5 {
-  fill: var(--step-5);
-}
-
 .map-scan {
   fill: var(--ink-muted);
   font-size: 7px;
@@ -982,6 +971,18 @@ th.number {
   height: 14px;
   border-radius: 3px;
   flex: none;
+  background: var(--swatch-color);
+}
+
+/* RBF・GPRの式内: 予測と同じ色の、薄い塗りと縁 */
+.chart-swatch.outlined {
+  background: color-mix(in srgb, var(--swatch-color) 30%, transparent);
+  border: 2px solid var(--swatch-color);
+}
+
+.chart-box-outlined {
+  fill-opacity: 0.3;
+  stroke-width: 1.5;
 }
 
 .chart-tick {
