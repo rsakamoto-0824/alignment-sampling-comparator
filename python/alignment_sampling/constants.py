@@ -130,8 +130,8 @@ _DEFAULT_SETTINGS = {
             {"markNo": 4, "x": 12, "y": -15.5},
         ],
     },
-    # 初期のマップで、選べるShotの数が3領域でほぼそろう値（36・32・36個）
-    "zones": {"innerRadiusMm": 95, "outerRadiusMm": 135},
+    # 初期のマップで、選べるShot（Markが揃うShot 64個）の数が3領域でほぼそろう値（20・24・20個）
+    "zones": {"innerRadiusMm": 75, "outerRadiusMm": 110},
     "evaluationData": {
         # zernike: Zernike項の乱数で作る。file: 計測データのファイルを読む（ファイルの中身は設定に保存しない）
         "source": "zernike",
@@ -171,8 +171,8 @@ _DEFAULT_SETTINGS = {
     "sampling": {
         # 選んだShotでは、そのShotの有効なMarkをすべて測る
         "shotCount": 20,
-        # True なら、Markが揃わない端のShot（有効半径の外にMarkがはみ出すShot）は選ばない
-        "excludeIncompleteShots": False,
+        # True なら、Markが揃わない端のShot（有効半径の外にMarkがはみ出すShot、無効マークのあるShot）は選ばない
+        "excludeIncompleteShots": True,
         "draws": 30,
         "optimalStarts": 5,
         "seed": 1,
