@@ -5,13 +5,14 @@
  *
  * 4つの場面を用意する。どの場面も、制約なし・制約付きのD最適・I最適を含む6つの選び方と手動プランを評価し、
  * 「計画を作成」（制約なし・制約付きのD最適・I最適）の点と、選択点のCSVも書き出す。
- *   A: 初期設定を小さくしたもの（一筆書きのScan方向、端のShotも選ぶ。スイープを含む）
+ *   A: 初期設定を小さくしたもの（一筆書きのScan方向、端のShotを選ばない。スイープを含む）
  *   B: 市松のScan方向・端のShotを選ばない・強制計測Shot・除外Shot（手動プランに除外Shotを入れる）・ソフト制約・
  *      比例配分・ガウス基底のRBF・Matérn のGP・正規分布・RMS正規化・Scanのずれ・XとYで違う多項式の項
- *   C: 一筆書きを右下から・最初はDown、強制計測Shot、スイープで選ぶ選び方を絞る（端のShotでMark数が選び方ごとに違う）、
+ *   C: 一筆書きを右下から・最初はDown、端のShotも選ぶ（区切り 95・135 mm）、強制計測Shot、スイープで選ぶ選び方を絞る
+ *      （端のShotでMark数が選び方ごとに違う）、
  *      比べる補正を絞る（HOWA・RBF（X,Y,半径）式内・GPR（X,Y）予測・計測値＋HOWA）
  *   D: 計測データのファイル（samples/sample_measurements.csv）からマップと評価データを作る（無効マーク・重複行・
- *      行のないMarkを含む。強制計測Shotに無効マークのあるShot、除外Shot）
+ *      行のないMarkを含む。端のShotも選び（区切り 95・135 mm）、強制計測Shotに無効マークのあるShot、除外Shot）
  */
 "use strict";
 
@@ -77,6 +78,8 @@ function scenarioC() {
   settings.evaluationData.waferCount = 3;
   settings.map.serpentineStart = "bottomRight";
   settings.map.serpentineFirstScan = "Down";
+  settings.sampling.excludeIncompleteShots = false;
+  settings.zones = { innerRadiusMm: 95, outerRadiusMm: 135 };
   settings.sampling.shotCount = 14;
   settings.sampling.draws = 1;
   settings.sampling.optimalStarts = 1;
@@ -106,6 +109,8 @@ function scenarioC() {
 function scenarioD() {
   const settings = baseSettings();
   settings.evaluationData.source = ASC.constants.DATA_SOURCE_FILE;
+  settings.sampling.excludeIncompleteShots = false;
+  settings.zones = { innerRadiusMm: 95, outerRadiusMm: 135 };
   settings.sampling.shotCount = 16;
   settings.sampling.draws = 3;
   settings.sampling.optimalStarts = 2;

@@ -25,7 +25,8 @@ end
 %% 2. 設定
 % 初期設定はアプリの初期設定と同じです（Wafer 100枚、計測Shot 20個、試行30回、制約はすべてハード、Scan方向は一筆書き）。
 % 選んだShotでは、そのShotに紐づくMark（有効範囲の中にあるもの）をすべて測ります。
-% Markが揃わない端のShotを選ばないときは settings.sampling.excludeIncompleteShots = true にします。
+% 初期設定では、Markが揃わない端のShotは選びません。選ぶときは settings.sampling.excludeIncompleteShots = false にします
+% （そのときは同心円の区切り settings.zones も見直してください。初期値の 75・110 mm は、Markが揃うShotが3領域でほぼそろう値です）。
 % 強制計測Shot・除外Shotは settings.constraints.mandatoryShotIds・excludedShotIds に Shot番号の cell（{'30'; '45'}）で入れます。
 % 比べる補正（HOWA、RBF・GPRの式内と予測、計測値＋HOWA）は settings.model.corrections で選びます（例: settings.model.corrections.gpXY = false）。
 % アプリの「設定をJSONで保存」で作ったファイルがあれば、settingsFile に置き場所を書くと、そのまま読み込みます
@@ -228,13 +229,14 @@ writetable(cell2table(selectionRows, 'VariableNames', {'Method', 'Draw', 'ShotId
 fprintf('保存しました: %s\n', outputFolder);
 
 %% 練習問題
-% 1. 「Markが揃わない端のShotは選ばない」（excludeIncompleteShots = true）にし、計測Shot数を10にして評価してください。
+% 1. 「Markが揃わない端のShotも選ぶ」（excludeIncompleteShots = false。区切りは 95・135 mm）にし、計測Shot数を10にして評価してください。
 %    制約付きD最適と現行（例）の残差はどう変わるでしょうか。
 % 2. 強制計測Shot（例: Wafer中心のまわりの4Shot）を指定して asc.runPlan を実行し、残りのShotがどこに足されるかを見てください。
 %
 % 練習問題1の書き方の例（実行すると数秒かかります）:
 %   exercise = settings;
-%   exercise.sampling.excludeIncompleteShots = true;
+%   exercise.sampling.excludeIncompleteShots = false;
+%   exercise.zones = struct('innerRadiusMm', 95, 'outerRadiusMm', 135);
 %   exercise.sampling.shotCount = 10;
 %   exercise.sampling.draws = 10;
 %   result = asc.runEvaluation(waferMap, data, exercise);

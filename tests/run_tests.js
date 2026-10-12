@@ -1161,7 +1161,7 @@ async function main() {
     settings.sampling.optimalStarts = 2;
     settings.sampling.methods = { random: false, poisson: false, dOptimal: true, iOptimal: true, constrainedD: true, constrainedI: true };
     settings.model.corrections = { howa: true };
-    settings.constraints.mandatoryShotIds = ["17"];
+    settings.constraints.mandatoryShotIds = ["22"];
     const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
     const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
     assert(output.errors.length === 0, output.errors.join(" / "));
