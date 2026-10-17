@@ -10,6 +10,8 @@
 
   const VIEW_HALF_SIZE_MM = 162;
   const MARK_RADIUS_MM = 1.6;
+  // 選ばれた割合などを色で示すMarkは、色が見えるように大きめに描く
+  const STEP_MARK_RADIUS_MM = 2.6;
   const CENTER_RING_RADIUS_MM = 4.5;
   // 無効マークの ✕ の腕の長さ（中心から）[mm]
   const INVALID_MARK_ARM_MM = 1.6;
@@ -73,6 +75,8 @@
    *   editable, onToggleShot
    *   compact（小さく並べる用。Shot番号・Scan方向・区画の文字を省く）、
    *   shotSteps（Map: Shot番号 → { step: 1〜5, text }。選ばれた割合などを段階色で塗る）、
+   *   markSteps（Map: Mark番号 → { step: 1〜5, text }。Mark単位の選び方で、Markが選ばれた割合をMarkの色で示す）、
+   *   largeMeasuredMarks（測るMarkを大きく描く。Shotを塗らないMark単位の選択で、測るMarkを見分けやすくする）、
    *   ariaLabel
    */
   function render(container, options) {
@@ -181,13 +185,21 @@
 
   function drawMark(layer, map, markIndex, options) {
     const mark = map.marks[markIndex];
+    const stepInfo = options.markSteps ? options.markSteps.get(markIndex) : null;
+    if (stepInfo) {
+      // 段階色のMarkは色が見えるように大きめに描き、説明（割合など）をポインターで出す
+      const circle = ui.createSvg("circle", { className: `map-mark-step step-${stepInfo.step}`, cx: mark.x, cy: -mark.y, r: STEP_MARK_RADIUS_MM });
+      circle.append(ui.createSvg("title", { text: `Shot ${map.shots[mark.shotIndex].id} Mark ${mark.markNo}: ${stepInfo.text}` }));
+      layer.append(circle);
+      return;
+    }
     const measured = options.measuredMarks.has(markIndex);
     layer.append(
       ui.createSvg("circle", {
         className: measured ? "map-mark measured" : "map-mark",
         cx: mark.x,
         cy: -mark.y,
-        r: MARK_RADIUS_MM,
+        r: measured && options.largeMeasuredMarks ? STEP_MARK_RADIUS_MM : MARK_RADIUS_MM,
         "pointer-events": "none",
       })
     );
@@ -326,12 +338,20 @@
     ];
   }
 
+  /** 選び方の単位に合わせた「Shot数」と「最小間隔」の見出し（Mark単位では、Markを測るShotの数とMarkどうしの間隔）。 */
+  function unitLabels(unit) {
+    return unit === "mark"
+      ? { shots: "Markを測るShot数", spacing: "Markの最小間隔" }
+      : { shots: "Shot数", spacing: "Shot中心の最小間隔" };
+  }
+
   /** 選んだ点の数・間隔・D基準・I基準。 */
   function renderStats(element, stats) {
+    const labels = unitLabels(stats.unit);
     const rows = [
-      ["Shot数", `${stats.shotCount}個`],
+      [labels.shots, `${stats.shotCount}個`],
       ["Mark数", `${stats.markCount}個`],
-      ["Shot中心の最小間隔", Number.isFinite(stats.minSpacingMm) ? `${ui.formatNumber(stats.minSpacingMm, 1)} mm` : "—"],
+      [labels.spacing, Number.isFinite(stats.minSpacingMm) ? `${ui.formatNumber(stats.minSpacingMm, 1)} mm` : "—"],
     ].concat(criteriaRows(stats.criteria, stats.reference));
     element.replaceChildren(...rows.flatMap(([term, value]) => [ui.create("dt", { text: term }), ui.create("dd", { text: value })]));
   }
@@ -401,5 +421,5 @@
     );
   }
 
-  ASC.mapView = { render, renderLegend, renderStats, renderConstraintStatus, constraintTable, criteriaRows, log10Det, drawInvalidLayer };
+  ASC.mapView = { render, renderLegend, renderStats, renderConstraintStatus, constraintTable, criteriaRows, log10Det, drawInvalidLayer, unitLabels };
 })(typeof window !== "undefined" ? window : globalThis);

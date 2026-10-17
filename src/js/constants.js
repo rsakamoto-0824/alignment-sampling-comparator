@@ -113,18 +113,34 @@
 
     // ---- 選び方 ----
     // 自動で選ぶ方法。人が選ぶ「手動プラン」は別に持ち、キーを "manual:番号" にする
-    // constrained: 条件制約（5. 条件制約）を守って選ぶか。criterion: D最適・I最適の基準
+    // kind: 選び方の種類（random・poisson・optimal）。constrained: 条件制約（5. 条件制約）を守って選ぶか。
+    // criterion: D最適・I最適の基準
+    // unit: 選ぶ単位。shot はShotを選んでそのShotの有効なMarkをすべて測る。mark はShotの括りを考えずに
+    //       Markを1つずつ選ぶ（検証用。Python版・MATLAB版にはない）
     // 並び順は乱数列の番号にも使うので、途中に入れずに末尾へ足す
     METHODS: [
-      { key: "random", label: "ランダム", usesDraws: true, constrained: true, criterion: null },
-      { key: "poisson", label: "ポアソンディスク", usesDraws: true, constrained: true, criterion: null },
-      { key: "dOptimal", label: "D最適（制約なし）", usesDraws: false, constrained: false, criterion: "D" },
-      { key: "iOptimal", label: "I最適（制約なし）", usesDraws: false, constrained: false, criterion: "I" },
-      { key: "constrainedD", label: "制約付きD最適", usesDraws: false, constrained: true, criterion: "D" },
-      { key: "constrainedI", label: "制約付きI最適", usesDraws: false, constrained: true, criterion: "I" },
+      { key: "random", kind: "random", label: "ランダム", usesDraws: true, constrained: true, criterion: null, unit: "shot" },
+      { key: "poisson", kind: "poisson", label: "ポアソンディスク", usesDraws: true, constrained: true, criterion: null, unit: "shot" },
+      { key: "dOptimal", kind: "optimal", label: "D最適（制約なし）", usesDraws: false, constrained: false, criterion: "D", unit: "shot" },
+      { key: "iOptimal", kind: "optimal", label: "I最適（制約なし）", usesDraws: false, constrained: false, criterion: "I", unit: "shot" },
+      { key: "constrainedD", kind: "optimal", label: "制約付きD最適", usesDraws: false, constrained: true, criterion: "D", unit: "shot" },
+      { key: "constrainedI", kind: "optimal", label: "制約付きI最適", usesDraws: false, constrained: true, criterion: "I", unit: "shot" },
+      { key: "markRandom", kind: "random", label: "ランダム（Mark単位）", usesDraws: true, constrained: true, criterion: null, unit: "mark" },
+      { key: "markPoisson", kind: "poisson", label: "ポアソンディスク（Mark単位）", usesDraws: true, constrained: true, criterion: null, unit: "mark" },
+      { key: "markDOptimal", kind: "optimal", label: "D最適（制約なし・Mark単位）", usesDraws: false, constrained: false, criterion: "D", unit: "mark" },
+      { key: "markIOptimal", kind: "optimal", label: "I最適（制約なし・Mark単位）", usesDraws: false, constrained: false, criterion: "I", unit: "mark" },
+      { key: "markConstrainedD", kind: "optimal", label: "制約付きD最適（Mark単位）", usesDraws: false, constrained: true, criterion: "D", unit: "mark" },
+      { key: "markConstrainedI", kind: "optimal", label: "制約付きI最適（Mark単位）", usesDraws: false, constrained: true, criterion: "I", unit: "mark" },
     ],
+    // 選ぶ単位の名前（設定欄の見出しと説明に使う）
+    METHOD_UNITS: {
+      shot: "Shot単位（選んだShotのMarkをすべて測る）",
+      mark: "Mark単位（Shotの括りなし。検証用）",
+    },
     // 「計画を作成」で選ぶ方法（評価データを使わずに、選んだ点だけを出す）。制約なしと制約付きのD最適・I最適
     PLAN_METHOD_KEYS: ["dOptimal", "iOptimal", "constrainedD", "constrainedI"],
+    // 「計画を作成」で、比べる選び方でオンにしていれば一緒に出すMark単位のD最適・I最適
+    MARK_PLAN_METHOD_KEYS: ["markDOptimal", "markIOptimal", "markConstrainedD", "markConstrainedI"],
     // 「計画を作成」のあとで最初に表示する選び方
     PLAN_FIRST_VIEW_KEY: "constrainedD",
     PLAN_PREFIX: "plan:",
@@ -234,10 +250,26 @@
         shotCount: 20,
         // true なら、Markが揃わない端のShot（有効半径の外にMarkがはみ出すShot、無効マークのあるShot）は選ばない
         excludeIncompleteShots: true,
+        // Mark単位（Shotの括りなし）の選び方で選ぶMarkの数。初期値は Shot単位の 20 Shot × 4 Mark と同じ
+        markCount: 80,
         draws: 30,
         optimalStarts: 5,
         seed: 1,
-        methods: { random: true, poisson: true, dOptimal: true, iOptimal: true, constrainedD: true, constrainedI: true },
+        methods: {
+          random: true,
+          poisson: true,
+          dOptimal: true,
+          iOptimal: true,
+          constrainedD: true,
+          constrainedI: true,
+          // Mark単位は検証用なので、初期設定ではオフ
+          markRandom: false,
+          markPoisson: false,
+          markDOptimal: false,
+          markIOptimal: false,
+          markConstrainedD: false,
+          markConstrainedI: false,
+        },
       },
       // 計測点数のスイープ（計測Shot数の範囲、ランダム・ポアソンの試行回数、比べる選び方）
       sweep: {
@@ -245,7 +277,20 @@
         endShots: 60,
         stepShots: 10,
         draws: 10,
-        methods: { random: true, poisson: true, dOptimal: true, iOptimal: true, constrainedD: true, constrainedI: true },
+        methods: {
+          random: true,
+          poisson: true,
+          dOptimal: true,
+          iOptimal: true,
+          constrainedD: true,
+          constrainedI: true,
+          markRandom: false,
+          markPoisson: false,
+          markDOptimal: false,
+          markIOptimal: false,
+          markConstrainedD: false,
+          markConstrainedI: false,
+        },
       },
       constraints: {
         center: { enabled: true, priority: 1 },

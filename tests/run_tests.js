@@ -1199,6 +1199,117 @@ async function main() {
     assert(broken.errors.length > 0, "設定の誤りを知らせていません");
   });
 
+  /** Mark単位の選び方だけをオンにした設定（Shot単位の選び方は keepShotMethods で残せる）。 */
+  function markMethodSettings(keys, overrides) {
+    const settings = ASC.defaultSettings();
+    for (const key of Object.keys(settings.sampling.methods)) {
+      settings.sampling.methods[key] = keys.includes(key);
+    }
+    settings.evaluationData = defaultEvaluationSettings({ waferCount: 2 });
+    settings.sampling.draws = 2;
+    settings.sampling.optimalStarts = 2;
+    settings.model.corrections = { howa: true };
+    return Object.assign(settings, overrides || {});
+  }
+
+  await test("Mark単位の前提: 候補は有効なMarkすべて（端のShotのMarkも含み、除外ShotのMarkは除く）。強制計測ShotはそのMarkをすべて必ず選ぶ", () => {
+    const map = defaultMap();
+    const settings = ASC.defaultSettings();
+    settings.constraints.excludedShotIds = ["52"];
+    settings.constraints.mandatoryShotIds = ["30"];
+    const built = ASC.constraints.buildMarkContext(map, settings);
+    assert(built.errors.length === 0, built.errors.join(" / "));
+    const context = built.context;
+    const shotIndexOf = (id) => map.shots.findIndex((shot) => shot.id === id);
+    assert(context.unit === "mark" && context.shotCount === 80, "Mark単位の前提の選ぶ数が違います");
+    assert(context.items.length === map.marks.length - map.shots[shotIndexOf("52")].markIndices.length, "候補のMark数が違います");
+    assert(context.items.every((item) => item.marks.length === 1 && item.marks[0] === item.markIndex), "候補が1つずつのMarkになっていません");
+    assert(context.items.some((item) => ASC.constraints.isIncompleteShot(map.shots[item.shotIndex])), "Markが揃わない端のShotのMarkが候補にありません");
+    assert(context.mandatoryItems.length === map.shots[shotIndexOf("30")].markIndices.length, "強制計測ShotのMarkの数が違います");
+    assert(context.items[context.center.itemIndex].markIndex === context.center.markIndex, "中心の1点がMarkの候補になっていません");
+    const zone = context.constraints.find((constraint) => constraint.key === "zone");
+    const available = Array.from(zone.available).reduce((sum, value) => sum + value, 0);
+    assert(available === context.items.length, "区画をMarkごとに数えていません");
+    for (const [markCount, label] of [[0, "0"], [context.items.length + 1, "候補より多い"]]) {
+      const broken = ASC.constraints.buildMarkContext(map, Object.assign({}, settings, { sampling: Object.assign({}, settings.sampling, { markCount }) }));
+      assert(broken.errors.length > 0, `Mark数が${label}ときの誤りを知らせていません`);
+    }
+  });
+
+  await test("Mark単位の入れ替えの近道: 1行ずつの式（swapChangeSingle）が、一般の式（swapChange）と同じ値になる", () => {
+    const map = defaultMap();
+    const context = ASC.constraints.buildMarkContext(map, ASC.defaultSettings()).context;
+    const terms = Array.from({ length: 21 }, (_, i) => i);
+    const [model] = ASC.sampling.buildModels(context, [terms, terms]);
+    const selected = Array.from({ length: 80 }, (_, i) => (i * 37) % context.items.length);
+    const prepared = ASC.sampling.prepareExchange(model, selected, true);
+    let checked = 0;
+    for (const removed of selected.slice(0, 6)) {
+      for (let added = 0; added < context.items.length; added += 17) {
+        if (selected.includes(added)) {
+          continue;
+        }
+        const general = ASC.sampling.swapChange(model, prepared, removed, added, true);
+        const single = ASC.sampling.swapChangeSingle(model, prepared, removed, added, true);
+        assert(Boolean(general) === Boolean(single), "正則かどうかの判定が違います");
+        if (general) {
+          assertClose(single.logDetChange, general.logDetChange, 1e-9 * Math.max(1, Math.abs(general.logDetChange)), "log det の変化");
+          assertClose(single.traceChange, general.traceChange, 1e-9 * Math.max(1, Math.abs(general.traceChange)), "予測分散の和の変化");
+          checked++;
+        }
+      }
+    }
+    assert(checked > 50, `比べた入れ替えが少なすぎます（${checked}）`);
+  });
+
+  await test("Mark単位の選び方: 指定のMark数を選び、制約付きはMarkの数で制約を満たす。制約なしのD最適のlog detは同じMark数のShot単位以上", async () => {
+    const map = defaultMap();
+    const markKeys = ["markRandom", "markPoisson", "markDOptimal", "markIOptimal", "markConstrainedD", "markConstrainedI"];
+    const settings = markMethodSettings(["dOptimal"].concat(markKeys));
+    const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
+    const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
+    assert(output.errors.length === 0 && output.markErrors.length === 0, output.errors.concat(output.markErrors).join(" / "));
+    assert(output.methods.map((method) => method.key).join(",") === ["dOptimal"].concat(markKeys).join(","), "評価した選び方が違います");
+    for (const key of markKeys) {
+      const sets = output.sets.filter((set) => set.method === key);
+      const method = ASC.constants.METHODS.find((entry) => entry.key === key);
+      assert(sets.length === (method.usesDraws ? 2 : 1), `${key}: 試行の数が違います`);
+      for (const set of sets) {
+        assert(set.unit === "mark" && set.markIndices.length === 80, `${key}: Mark数が80になっていません`);
+        assert(new Set(set.shotIndices).size === set.shotIndices.length && set.shotIndices.length >= 20, `${key}: Markを測るShotの一覧が違います`);
+        if (method.constrained) {
+          assert(statusAllOk(set.status), `${key}: Markの数で数えた制約を満たしていません`);
+        }
+      }
+    }
+    assert(output.sets.find((set) => set.method === "dOptimal").unit === "shot", "Shot単位の選び方の単位が違います");
+    assert(output.summary.markDOptimal.criteriaX.logDet.mean >= output.summary.dOptimal.criteriaX.logDet.mean - 1e-9, "Mark単位のD最適のlog detがShot単位より小さくなりました");
+    const shotOnly = await ASC.evaluator.runEvaluation({ map, data, settings: markMethodSettings(["dOptimal"]), manualPlans: [] }, () => {}, () => false);
+    assert(shotOnly.markContext === null && shotOnly.sets.every((set) => set.unit === "shot"), "Mark単位を使わないのにMark単位の前提を作っています");
+    const tooMany = await ASC.evaluator.runEvaluation({ map, data, settings: markMethodSettings(["dOptimal", "markDOptimal"], { sampling: Object.assign(markMethodSettings([]).sampling, { markCount: 9999, methods: { dOptimal: true, markDOptimal: true } }) }), manualPlans: [] }, () => {}, () => false);
+    assert(tooMany.errors.length === 0 && tooMany.markErrors.length > 0 && tooMany.methods.every((method) => method.key === "dOptimal"), "Mark単位の前提を作れないとき、Shot単位だけを評価していません");
+  });
+
+  await test("Mark単位の計画とスイープ: 計画にオンにしたMark単位のD最適・I最適が入り評価と同じ点。スイープのMark数は計測Shot数に比例", async () => {
+    const map = defaultMap();
+    const settings = markMethodSettings(["constrainedD", "markDOptimal", "markConstrainedI"]);
+    const plan = ASC.evaluator.runPlan({ map, settings });
+    assert(plan.errors.length === 0 && plan.markErrors.length === 0, plan.errors.concat(plan.markErrors).join(" / "));
+    assert(plan.sets.map((set) => set.method).join(",") === "dOptimal,iOptimal,constrainedD,constrainedI,markDOptimal,markConstrainedI", "計画の選び方が違います");
+    const data = ASC.evaluationData.generateEvaluationData(map, settings.evaluationData).data;
+    const output = await ASC.evaluator.runEvaluation({ map, data, settings, manualPlans: [] }, () => {}, () => false);
+    for (const key of ["markDOptimal", "markConstrainedI"]) {
+      const planned = plan.sets.find((set) => set.method === key);
+      const evaluated = output.sets.find((set) => set.method === key);
+      assert(planned.markIndices.join(",") === evaluated.markIndices.join(","), `${key}: 計画と評価で選んだMarkが違います`);
+    }
+    const sweepSettings = { startShots: 10, endShots: 20, stepShots: 10, draws: 1, methods: { constrainedD: true, markConstrainedD: true } };
+    const sweep = await ASC.evaluator.runSweep({ map, data, settings, manualPlans: [] }, sweepSettings, () => {}, () => false);
+    assert(sweep.errors.length === 0, sweep.errors.join(" / "));
+    assert(sweep.points.map((point) => point.markCounts.markConstrainedD).join(",") === "40,80", "スイープのMark単位のMark数が計測Shot数に比例していません");
+    assert(sweep.points.map((point) => point.markCounts.constrainedD).join(",") === "40,80", "スイープのShot単位のMark数が違います");
+  });
+
   await test("選択点のCSV: 1行1Mark、Wafer座標＝Shot中心＋Mark座標、Shotの並び順", () => {
     const map = defaultMap();
     const shot = map.shots[40];

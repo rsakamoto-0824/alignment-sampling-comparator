@@ -8,6 +8,8 @@
  *   目標の幅: 各区画の選択数が入るべき範囲 [floor, ceil]。同数配分なら差1以内と同じ意味
  *   強制計測Shot: 必ず選ぶShot（常にハード）。中心の1点のShotとあわせて、入れ替えの対象にしない
  * 制約は「選んだShotの数」で数え、区画はShot中心の座標で判定する。
+ * Mark単位（Shotの括りなし。検証用）の前提（buildMarkContext）では、候補を1つずつのMarkにし、制約は「選んだMarkの数」で、
+ * 区画はMarkの座標で判定する。
  */
 (function (root) {
   "use strict";
@@ -71,16 +73,7 @@
     }
     const sampling = settings.sampling;
     const constraintSettings = settings.constraints;
-    const shotIndexById = new Map(map.shots.map((shot, index) => [shot.id, index]));
-    const mandatoryIds = shotIdList(constraintSettings.mandatoryShotIds);
-    const excludedIds = shotIdList(constraintSettings.excludedShotIds);
-    for (const [ids, label] of [[mandatoryIds, "強制計測Shot"], [excludedIds, "除外Shot"]]) {
-      const unknown = ids.filter((id) => !shotIndexById.has(id));
-      if (unknown.length > 0) {
-        errors.push(`${label}の番号 ${unknown.slice(0, 8).join(", ")}${unknown.length > 8 ? " ほか" : ""} がマップにありません。マップのShot番号を確かめてください。`);
-      }
-    }
-    const excludedShots = new Set(excludedIds.filter((id) => shotIndexById.has(id)).map((id) => shotIndexById.get(id)));
+    const { shotIndexById, mandatoryIds, excludedShots } = readShotLists(map, constraintSettings, errors);
 
     const items = [];
     const itemByShot = new Map();
@@ -128,8 +121,104 @@
     return {
       context: {
         map,
+        unit: "shot",
         items,
         shotCount,
+        constraints: buildBalanceConstraints(items, settings),
+        center,
+        mandatoryItems,
+        softStrength: constraintSettings.softStrength,
+      },
+      errors: [],
+    };
+  }
+
+  /** 強制計測Shot・除外Shotの番号を読み、マップにない番号を errors に足す。 */
+  function readShotLists(map, constraintSettings, errors) {
+    const shotIndexById = new Map(map.shots.map((shot, index) => [shot.id, index]));
+    const mandatoryIds = shotIdList(constraintSettings.mandatoryShotIds);
+    const excludedIds = shotIdList(constraintSettings.excludedShotIds);
+    for (const [ids, label] of [[mandatoryIds, "強制計測Shot"], [excludedIds, "除外Shot"]]) {
+      const unknown = ids.filter((id) => !shotIndexById.has(id));
+      if (unknown.length > 0) {
+        errors.push(`${label}の番号 ${unknown.slice(0, 8).join(", ")}${unknown.length > 8 ? " ほか" : ""} がマップにありません。マップのShot番号を確かめてください。`);
+      }
+    }
+    const excludedShots = new Set(excludedIds.filter((id) => shotIndexById.has(id)).map((id) => shotIndexById.get(id)));
+    return { shotIndexById, mandatoryIds, excludedShots };
+  }
+
+  /**
+   * Mark単位（Shotの括りなし）の選び方の前提。候補（item）は有効なMarkの1つずつで、Markが揃わない端のShotのMarkも候補にする
+   * （除外ShotのMarkは除く）。選ぶ数は sampling.markCount。
+   * 制約は「選んだMarkの数」で数え、4象限・同心円はMarkの座標、Scan方向はMarkのShotで判定する。
+   * 中心の1点は中心に最も近いMarkそのもの、強制計測ShotはそのShotの有効なMarkをすべて必ず選ぶ。
+   * 選び方（sampling.js）はShot単位と同じものを使う（候補の座標・Scan方向・測るMarkを item に持たせているため）。
+   */
+  function buildMarkContext(map, settings) {
+    const errors = validateSettings(map, settings);
+    const sampling = settings.sampling;
+    const markCount = sampling.markCount;
+    if (!Number.isInteger(markCount) || markCount < 1) {
+      errors.push("Mark単位で選ぶMark数は1以上の整数にしてください。");
+    }
+    if (errors.length > 0) {
+      return { context: null, errors };
+    }
+    const constraintSettings = settings.constraints;
+    const { shotIndexById, mandatoryIds, excludedShots } = readShotLists(map, constraintSettings, errors);
+
+    const items = [];
+    const itemsByShot = new Map();
+    map.shots.forEach((shot, shotIndex) => {
+      if (excludedShots.has(shotIndex)) {
+        return;
+      }
+      itemsByShot.set(shotIndex, []);
+      for (const markIndex of shot.markIndices) {
+        const mark = map.marks[markIndex];
+        itemsByShot.get(shotIndex).push(items.length);
+        items.push({ shotIndex, markIndex, x: mark.x, y: mark.y, scan: shot.scan, marks: [markIndex] });
+      }
+    });
+
+    const mandatoryItems = [];
+    for (const id of mandatoryIds) {
+      if (!shotIndexById.has(id)) {
+        continue;
+      }
+      const shotIndex = shotIndexById.get(id);
+      if (excludedShots.has(shotIndex)) {
+        errors.push(`Shot ${id} が強制計測Shotと除外Shotの両方に入っています。どちらかから外してください。`);
+      } else {
+        mandatoryItems.push(...itemsByShot.get(shotIndex));
+      }
+    }
+    mandatoryItems.sort((a, b) => a - b);
+
+    if (items.length === 0) {
+      errors.push("選べるMarkがありません。除外Shotや有効半径を見直してください。");
+    } else if (Number.isInteger(markCount) && markCount > items.length) {
+      errors.push(`Mark単位で選ぶMark数（${markCount}）が選べるMark数（${items.length}）を超えています。数を減らしてください。`);
+    }
+    if (errors.length > 0) {
+      return { context: null, errors };
+    }
+
+    const center = buildCenter(map, items, constraintSettings.center);
+    const forcedCount = new Set(mandatoryItems.concat(center.active ? [center.itemIndex] : [])).size;
+    if (forcedCount > markCount) {
+      errors.push(`強制計測ShotのMark（中心の1点を含む）が${forcedCount}個あり、Mark単位で選ぶMark数（${markCount}）を超えています。Mark数を増やすか、強制計測Shotを減らしてください。`);
+      return { context: null, errors };
+    }
+
+    return {
+      context: {
+        map,
+        unit: "mark",
+        items,
+        // 選ぶ候補の数（選び方の関数はShot単位と共通なので、名前は shotCount のまま。ここではMarkの数）
+        shotCount: markCount,
         constraints: buildBalanceConstraints(items, settings),
         center,
         mandatoryItems,
@@ -511,6 +600,7 @@
     shotIdList,
     isIncompleteShot,
     buildContext,
+    buildMarkContext,
     forcedItemsOf,
     unconstrainedContext,
     statusRows,

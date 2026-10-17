@@ -593,7 +593,7 @@
    */
   function renderMethodTable(output) {
     const axes = output.criteriaSameTerms ? [["", "x"]] : [["X ", "x"], ["Y ", "y"]];
-    const headers = [{ text: "選び方" }, { text: "選んだ回数" }, { text: "Shot数", number: true }, { text: "Mark数", number: true }, { text: "最小間隔 [mm]", number: true }];
+    const headers = [{ text: "選び方" }, { text: "選んだ回数" }, { text: "測るShot数", number: true }, { text: "Mark数", number: true }, { text: "最小間隔 [mm]", number: true }];
     for (const [prefix] of axes) {
       headers.push(
         { text: `${prefix}D基準 log₁₀det`, number: true },
@@ -651,6 +651,7 @@
     }
     const relaxedKeys = new Set(output.relaxed.map((entry) => entry.key));
     const kindText = (entry) => (entry.hard ? "ハード" : relaxedKeys.has(entry.key) ? "ソフトに切替" : "ソフト");
+    // 見出しの種類はShot単位の選び方のもの（Mark単位で切り替えた制約は、表の上の注意に書く）
     const headRow = ui.create("tr", null, [ui.create("th", { text: "選び方" })].concat(first.constraints.map((entry) => ui.create("th", { text: `${entry.label}（${kindText(entry)}）` }))));
     const body = ui.create("tbody");
     for (const method of output.methods) {
@@ -718,6 +719,19 @@
         )
       );
     }
+    if (output.markRelaxed && output.markRelaxed.length > 0) {
+      children.push(
+        notice(
+          "warning",
+          "⚠",
+          "Mark単位の選び方では、次のハード制約を同時に満たせなかったため、ソフト制約として扱いました（制約はMarkの数で数えます）。",
+          output.markRelaxed.map((entry) => `${entry.label}: ${entry.reason.replace("Shot", "Mark")}`)
+        )
+      );
+    }
+    if (output.markErrors && output.markErrors.length > 0) {
+      children.push(notice("warning", "⚠", "Mark単位の選び方は、次の理由で評価していません。「4. サンプリング」の「Mark単位で選ぶMark数」などを見直してください。", output.markErrors));
+    }
     if (output.failedMethods && output.failedMethods.length > 0) {
       children.push(
         notice("warning", "⚠", "次の選び方は、制約（強制計測Shotを含む）を満たす点を選べなかったため、結果にありません。計測Shot数や制約を見直してください。", output.failedMethods)
@@ -783,11 +797,19 @@
         text: "D基準 log₁₀det(XᵀX) は大きいほど多項式の係数の推定精度が良く、I基準（予測分散の平均÷σ²＝κ²）は小さいほど全Markの補正量にノイズが乗りにくい選び方です（HOWAの多項式に対して）。効率はこの評価の中で最も良い選び方・試行を100%にした値です。D基準の値そのものは座標の尺度で決まる負の数になることがあるので、選び方どうしの差や効率で比べてください。値は試行の平均です。",
       })
     );
+    if (output.methods.some((method) => method.unit === "mark")) {
+      children.push(
+        ui.create("p", {
+          className: "hint",
+          text: "Mark単位（Shotの括りなし）の選び方の「測るShot数」は、選んだMarkがあるShotの数（計測で訪れるShotの数）、最小間隔はMarkどうしの最小間隔です（Shot単位はShot中心どうし）。同じMark数で、点の配置の良さ（D基準・I基準）と測るShot数を比べると、Shotで括ることの損得が分かります。",
+        })
+      );
+    }
     const constraintTable = renderConstraintSummaryTable(output);
     if (constraintTable) {
       children.push(ui.create("h2", { className: "subheading", text: "制約の満たし具合" }));
       children.push(constraintTable);
-      children.push(ui.create("p", { className: "hint", text: "満たした回数は試行の数のうちいくつで満たしたか、ずれは何個のShotを別の区画へ移せば満たせるかの目安です（強制計測Shotは選ばれていない数）。制約なしのD最適・I最適と手動プランは制約を守らないので、外れることがあります。" }));
+      children.push(ui.create("p", { className: "hint", text: "満たした回数は試行の数のうちいくつで満たしたか、ずれは何個のShotを別の区画へ移せば満たせるかの目安です（強制計測Shotは選ばれていない数）。制約なしのD最適・I最適と手動プランは制約を守らないので、外れることがあります。Mark単位の選び方は、制約を選んだMarkの数で数え（4象限・同心円はMarkの座標）、ずれは何個のMarkを移せば満たせるかです（強制計測Shotは選ばれていないMarkの数）。" }));
     }
     const drawTable = renderDrawTable(output, variants, view);
     if (drawTable) {

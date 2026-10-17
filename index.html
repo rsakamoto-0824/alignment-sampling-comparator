@@ -311,6 +311,13 @@
               <div id="method-choices"></div>
             </fieldset>
             <p class="hint">「制約なし」のD最適・I最適は、5の条件制約（強制計測Shotを含む）を使わずに選びます。ほかの選び方は条件制約を守ります。人が選ぶ「手動プラン」は「マップと選択点」のタブで作り、プランごとに「評価で比べる」を選びます。</p>
+            <div class="field">
+              <label for="mark-count">Mark単位で選ぶMark数</label>
+              <input type="number" id="mark-count" step="1" data-setting="sampling.markCount" data-integer data-min="1" aria-describedby="mark-count-hint" />
+              <p class="field-error" id="mark-count-error"></p>
+            </div>
+            <p class="hint" id="mark-count-hint">Mark単位（Shotの括りなし）の選び方は、有効なMarkすべて（Markが揃わない端のShotのMarkも含み、除外ShotのMarkは除く）から、この数のMarkを1つずつ選びます。条件制約は「選んだMarkの数」で数え、4象限・同心円はMarkの座標、Scan方向はMarkのShotで判定します。強制計測ShotはそのShotのMarkをすべて選びます。Shot単位と同じ計測Mark数にすると、Shotで括ることの損得（点の配置の良さと、測るShotの数）を比べられます。</p>
+            <p class="hint" id="mark-count-summary"></p>
             <div class="field-row">
               <div class="field">
                 <label for="draws">試行回数（ランダム・ポアソン）</label>
@@ -476,7 +483,7 @@
         </section>
 
         <section class="tab-panel" role="tabpanel" id="panel-sweep" aria-labelledby="tab-sweep" hidden>
-          <p class="hint">計測Shot数を変えながら評価し、計測Mark数（計測コスト）と精度のトレードオフを見ます。マップ・評価データ・補正・制約は左の設定を使います。選んだShotの有効なMarkをすべて測るので、計測Mark数は選び方ごとに少し違うことがあります（Markが揃わない端のShotを選んだとき）。「評価で比べる」にした手動プランは、そのプランの位置に点（× や ＋）で重ねます。</p>
+          <p class="hint">計測Shot数を変えながら評価し、計測Mark数（計測コスト）と精度のトレードオフを見ます。マップ・評価データ・補正・制約は左の設定を使います。選んだShotの有効なMarkをすべて測るので、計測Mark数は選び方ごとに少し違うことがあります（Markが揃わない端のShotを選んだとき）。「評価で比べる」にした手動プランは、そのプランの位置に点（× や ＋）で重ねます。Mark単位（Shotの括りなし）の選び方のMark数は、「4. サンプリング」の比（Mark数 ÷ 計測Shot数）を保って計測Shot数に比例させます（線は同じ選び方のShot単位と同じ色で、点線・一点鎖線）。</p>
           <fieldset class="inline-fieldset">
             <legend>比べる選び方（スイープ）</legend>
             <div class="choice-group" id="sweep-method-choices"></div>
