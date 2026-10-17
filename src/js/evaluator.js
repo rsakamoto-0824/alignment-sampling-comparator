@@ -399,6 +399,10 @@
     return evaluateSampleSet(map, data, modelSettings, allIndices, howaOnly, modelCache);
   }
 
+  function methodInfo(methodKey) {
+    return C.METHODS.find((method) => method.key === methodKey);
+  }
+
   /** 選び方の乱数（選び方の並び順と試行の番号で決める。評価と「計画を作成」で同じ点を選ぶため共通にする）。 */
   function methodRandom(seed, methodKey, draw) {
     const methodIndex = C.METHODS.findIndex((method) => method.key === methodKey);
@@ -406,25 +410,30 @@
   }
 
   /**
-   * 自動の選び方で1組の点を選ぶ。制約付きの選び方は context、制約なしは freeContext を使う。
-   * 選べなければ null。
+   * 自動の選び方で1組の点を選ぶ。選び方の単位（Shot・Mark）の前提を contexts から選び、
+   * 制約付きの選び方は context、制約なしは freeContext を使う。選べなければ null。
+   * contexts: { shot: prepareContext の結果, mark: 同じ（Mark単位の選び方を使うときだけ） }
    */
-  function selectByMethod(methodKey, context, freeContext, settings, draw, termSets) {
+  function selectByMethod(methodKey, contexts, settings, draw, termSets) {
     const sampling = settings.sampling;
     const method = C.METHODS.find((entry) => entry.key === methodKey);
+    const { context, freeContext } = contexts[method.unit];
     const random = methodRandom(sampling.seed, methodKey, draw);
-    if (methodKey === "random") {
+    if (method.kind === "random") {
       return ASC.sampling.selectRandom(context, random);
     }
-    if (methodKey === "poisson") {
+    if (method.kind === "poisson") {
       return ASC.sampling.selectPoisson(context, random);
     }
     return ASC.sampling.selectOptimal(method.constrained ? context : freeContext, random, method.criterion, termSets, sampling.optimalStarts);
   }
 
-  /** サンプリングの前提を作り、ハード制約を同時に満たせるか確かめる（評価と「計画を作成」で共通）。 */
-  function prepareContext(map, settings) {
-    const built = ASC.constraints.buildContext(map, settings);
+  /**
+   * サンプリングの前提を作り、ハード制約を同時に満たせるか確かめる（評価と「計画を作成」で共通）。
+   * unit が "mark" なら、Mark単位（Shotの括りなし）の前提を作る。
+   */
+  function prepareContext(map, settings, unit) {
+    const built = unit === "mark" ? ASC.constraints.buildMarkContext(map, settings) : ASC.constraints.buildContext(map, settings);
     if (built.errors.length > 0) {
       return { errors: built.errors };
     }
@@ -436,6 +445,23 @@
   }
 
   /**
+   * Mark単位の選び方を1つでも使うなら、その前提を contexts.mark に入れる。作れなければ、その理由を返す
+   * （Mark単位の選び方だけを外し、Shot単位の選び方はそのまま評価する）。
+   */
+  function prepareMarkContext(map, settings, methodKeys, contexts) {
+    const usesMark = methodKeys.some((key) => C.METHODS.find((method) => method.key === key).unit === "mark");
+    if (!usesMark) {
+      return [];
+    }
+    const prepared = prepareContext(map, settings, "mark");
+    if (prepared.errors.length > 0) {
+      return prepared.errors.map((text) => `Mark単位: ${text}`);
+    }
+    contexts.mark = prepared;
+    return [];
+  }
+
+  /**
    * 評価を実行する。
    * input: { map, data, settings, manualPlans: [{ key, label, shotIndices }] }
    *   manualPlans は人が選んだ手動プラン（比較に含めるものだけ）。自動の選び方と同列に評価する
@@ -444,21 +470,28 @@
    */
   async function runEvaluation(input, onProgress, isCancelled) {
     const { map, data, settings } = input;
-    const prepared = prepareContext(map, settings);
+    const prepared = prepareContext(map, settings, "shot");
     if (prepared.errors.length > 0) {
       return { errors: prepared.errors };
     }
-    const { context, freeContext, relaxed } = prepared;
+    const { context, relaxed } = prepared;
     const sampling = settings.sampling;
     const variants = ASC.correction.buildVariants(settings.model);
     const modelCache = createModelCache(map);
     const termSets = [settings.model.termsX, settings.model.termsY];
+    const contexts = { shot: prepared };
+    const markErrors = prepareMarkContext(
+      map,
+      settings,
+      C.METHODS.filter((method) => sampling.methods[method.key]).map((method) => method.key),
+      contexts
+    );
 
     // ---- 選ぶ ----
     const manualPlans = (input.manualPlans || []).filter((manualPlan) => manualPlan.shotIndices.length > 0);
-    const methods = C.METHODS.filter((method) => sampling.methods[method.key])
-      .map((method) => ({ key: method.key, label: method.label, usesDraws: method.usesDraws, manual: false }))
-      .concat(manualPlans.map((manualPlan) => ({ key: manualPlan.key, label: manualPlan.label, usesDraws: false, manual: true })));
+    const methods = C.METHODS.filter((method) => sampling.methods[method.key] && contexts[method.unit])
+      .map((method) => ({ key: method.key, label: method.label, usesDraws: method.usesDraws, manual: false, unit: method.unit }))
+      .concat(manualPlans.map((manualPlan) => ({ key: manualPlan.key, label: manualPlan.label, usesDraws: false, manual: true, unit: "shot" })));
     const plan = [];
     for (const method of methods) {
       if (method.manual) {
@@ -481,7 +514,8 @@
       }
       const selection = entry.manualPlan
         ? ASC.sampling.manualSelection(context, entry.manualPlan.shotIndices)
-        : selectByMethod(entry.method, context, freeContext, settings, entry.draw, termSets);
+        : selectByMethod(entry.method, contexts, settings, entry.draw, termSets);
+      const setContext = entry.manualPlan ? context : contexts[methodInfo(entry.method).unit].context;
       doneSteps++;
       onProgress(doneSteps, totalSteps, "計測Markを選んでいます");
       if (!selection || selection.markIndices.length === 0) {
@@ -491,7 +525,7 @@
         }
         continue;
       }
-      sets.push(describeSet(context, settings, entry, selection));
+      sets.push(describeSet(setContext, settings, entry, selection));
       await yieldToBrowser();
     }
 
@@ -517,6 +551,10 @@
       errors: [],
       context,
       relaxed,
+      // Mark単位の前提と、そこでソフトに切り替えた制約・作れなかった理由（Mark単位の選び方を使わなければ null と空）
+      markContext: contexts.mark ? contexts.mark.context : null,
+      markRelaxed: contexts.mark ? contexts.mark.relaxed : [],
+      markErrors,
       failedMethods,
       sets,
       baselines: { uncorrected, allMarks: allMarks.results },
@@ -563,29 +601,36 @@
    */
   function runPlan(input) {
     const { map, settings } = input;
-    const prepared = prepareContext(map, settings);
+    const prepared = prepareContext(map, settings, "shot");
     if (prepared.errors.length > 0) {
       return { errors: prepared.errors };
     }
-    const { context, freeContext, relaxed } = prepared;
+    const { context, relaxed } = prepared;
     const termSets = [settings.model.termsX, settings.model.termsY];
+    const contexts = { shot: prepared };
+    // Mark単位のD最適・I最適は、比べる選び方でオンにしているものだけ一緒に出す
+    const markKeys = C.MARK_PLAN_METHOD_KEYS.filter((key) => settings.sampling.methods[key]);
+    const markErrors = prepareMarkContext(map, settings, markKeys, contexts);
     const methods = [];
     const sets = [];
     const failedMethods = [];
-    for (const key of C.PLAN_METHOD_KEYS) {
-      const method = C.METHODS.find((entry) => entry.key === key);
-      const selection = selectByMethod(key, context, freeContext, settings, 0, termSets);
+    for (const key of C.PLAN_METHOD_KEYS.concat(contexts.mark ? markKeys : [])) {
+      const method = methodInfo(key);
+      const selection = selectByMethod(key, contexts, settings, 0, termSets);
       if (!selection || selection.markIndices.length === 0) {
         failedMethods.push(method.label);
         continue;
       }
-      methods.push({ key, label: method.label, usesDraws: false, manual: false });
-      sets.push(describeSet(context, settings, { method: key, draw: 0 }, selection));
+      methods.push({ key, label: method.label, usesDraws: false, manual: false, unit: method.unit });
+      sets.push(describeSet(contexts[method.unit].context, settings, { method: key, draw: 0 }, selection));
     }
     return {
       errors: [],
       context,
       relaxed,
+      markContext: contexts.mark ? contexts.mark.context : null,
+      markRelaxed: contexts.mark ? contexts.mark.relaxed : [],
+      markErrors,
       failedMethods,
       methods,
       sets,
@@ -621,6 +666,8 @@
       const shotCount = values[index];
       const pointSettings = JSON.parse(JSON.stringify(settings));
       pointSettings.sampling.shotCount = shotCount;
+      // Mark単位の選び方のMark数は、評価の設定の比（Mark数 ÷ 計測Shot数）を保って計測Shot数に比例させる
+      pointSettings.sampling.markCount = Math.max(1, Math.round((settings.sampling.markCount * shotCount) / settings.sampling.shotCount));
       pointSettings.sampling.draws = sweepSettings.draws;
       if (sweepSettings.methods) {
         pointSettings.sampling.methods = Object.assign({}, sweepSettings.methods);
@@ -647,6 +694,8 @@
         summary: output.summary,
         relaxed: output.relaxed,
         failedMethods: output.failedMethods,
+        markErrors: output.markErrors,
+        markCount: pointSettings.sampling.markCount,
         warnings: Array.from(new Set(output.sets.flatMap((set) => set.warnings))),
       });
       last = output;
@@ -735,8 +784,10 @@
     return {
       method: entry.method,
       draw: entry.draw,
+      // 選ぶ単位（shot・mark）。Mark単位では shotIndices は「Markを測るShot」（重複なし）、最小間隔はMarkどうしの間隔
+      unit: context.unit,
       items: selection.items.slice(),
-      shotIndices: selection.items.map((item) => context.items[item].shotIndex),
+      shotIndices: Array.from(new Set(selection.items.map((item) => context.items[item].shotIndex))),
       markIndices,
       minSpacingMm: ASC.sampling.minimumShotSpacing(context, selection.items),
       criteria: criteriaOf(map, markIndices, settings.model),

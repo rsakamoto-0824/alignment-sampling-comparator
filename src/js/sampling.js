@@ -412,6 +412,40 @@
   }
 
   /**
+   * swapChange の、外す候補と入れる候補が1行ずつ（Mark単位の選び方）のときの近道。2×2の行列を式で直接解く
+   * （行列を作らないので速い。Shot単位の計算の丸め誤差を変えないよう、Mark単位の前提でだけ使う）。
+   *   K = [[1 + g_a, c], [c, g_r − 1]]（g = f A fᵀ、c = f_a A f_rᵀ）、det(M')/det(M) = −det(K)
+   *   tr(M'⁻¹W) − tr(AW) = −tr(K⁻¹H)、H = [[h_a, h_c], [h_c, h_r]]（h = qᵀWq、h_c = q_aᵀ W q_r）
+   */
+  function swapChangeSingle(model, prepared, removed, added, useWeight) {
+    const p = model.p;
+    const a = prepared.perItem[added];
+    const r = prepared.perItem[removed];
+    const blockAdded = model.blocks[added];
+    let cross = 0;
+    for (let l = 0; l < p; l++) {
+      cross += blockAdded[l] * r.q[l];
+    }
+    const kTopLeft = 1 + a.g[0];
+    const kBottomRight = r.g[0] - 1;
+    const determinant = kTopLeft * kBottomRight - cross * cross;
+    const signedDet = -determinant;
+    if (!(signedDet > 1e-12)) {
+      return null;
+    }
+    const result = { logDetChange: Math.log(signedDet), traceChange: 0 };
+    if (!useWeight) {
+      return result;
+    }
+    let hCross = 0;
+    for (let l = 0; l < p; l++) {
+      hCross += a.q[l] * r.s[l];
+    }
+    result.traceChange = -(kBottomRight * a.h[0] - 2 * cross * hCross + kTopLeft * r.h[0]) / determinant;
+    return result;
+  }
+
+  /**
    * D最適またはI最適の入れ替え法（Fedorov）。
    * 目的: D最適は「項あたりの log det」を大きく、I最適は「log（予測分散の平均）」を小さくする。
    * ソフト制約の外れは、強さに応じて目的から差し引く。ハード制約を外す入れ替えはしない。
@@ -422,6 +456,8 @@
     const penaltyScale = context.softStrength * C.SOFT_PENALTY_LOG_EFFICIENCY;
     const state = startState;
     const forced = new Set(K.forcedItemsOf(context));
+    // Mark単位の前提では候補が1行ずつなので、入れ替えの変化を式で直接求める
+    const change = context.unit === "mark" ? swapChangeSingle : swapChange;
 
     for (let pass = 0; pass < C.OPTIMAL_MAX_PASSES; pass++) {
       const prepared = models.map((model) => prepareExchange(model, state.list, useWeight));
@@ -442,11 +478,11 @@
             let traceChange = 0;
             let valid = true;
             models.forEach((model, index) => {
-              const change = swapChange(model, prepared[index], removed, added, true);
-              if (!change) {
+              const swap = change(model, prepared[index], removed, added, true);
+              if (!swap) {
                 valid = false;
               } else {
-                traceChange += change.traceChange;
+                traceChange += swap.traceChange;
               }
             });
             if (!valid || !(traceTotal + traceChange > 0)) {
@@ -457,11 +493,11 @@
             let logDetChange = 0;
             let valid = true;
             models.forEach((model, index) => {
-              const change = swapChange(model, prepared[index], removed, added, false);
-              if (!change) {
+              const swap = change(model, prepared[index], removed, added, false);
+              if (!swap) {
                 valid = false;
               } else {
-                logDetChange += change.logDetChange;
+                logDetChange += swap.logDetChange;
               }
             });
             if (!valid) {
@@ -655,6 +691,7 @@
     buildModels,
     prepareExchange,
     swapChange,
+    swapChangeSingle,
     informationMatrix,
   };
 })(typeof window !== "undefined" ? window : globalThis);

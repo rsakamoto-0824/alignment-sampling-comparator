@@ -429,6 +429,17 @@ legend {
   column-gap: var(--space-4);
 }
 
+/* 比べる選び方: Shot単位とMark単位（検証用）に分けて並べる */
+.method-unit-group {
+  flex-basis: 100%;
+  margin-bottom: var(--space-2);
+}
+
+.method-unit-title {
+  font-weight: 700;
+  margin: var(--space-2) 0 0;
+}
+
 .hint {
   color: var(--ink-2);
   margin: var(--space-1) 0 var(--space-3);
@@ -768,6 +779,18 @@ th.number {
   stroke: var(--map-mark);
   stroke-width: 0.5;
 }
+
+/* Mark単位の選び方で、各Markが選ばれた割合（段階色。説明文にも割合を書く） */
+.map-mark-step {
+  stroke: var(--ink-2);
+  stroke-width: 0.4;
+}
+
+.map-mark-step.step-1 { fill: var(--step-1); }
+.map-mark-step.step-2 { fill: var(--step-2); }
+.map-mark-step.step-3 { fill: var(--step-3); }
+.map-mark-step.step-4 { fill: var(--step-4); }
+.map-mark-step.step-5 { fill: var(--step-5); }
 
 .map-mark.measured {
   fill: var(--map-mark-measured);

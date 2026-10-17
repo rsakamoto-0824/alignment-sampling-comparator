@@ -294,7 +294,9 @@
       drawSelect.value = String(state.view.draw);
     }
     const plan = activePlan();
-    ui.byId("copy-to-manual-button").hidden = Boolean(plan) || !displayedSet();
+    // 手動プランはShotで持つので、Mark単位の選択は写せない
+    const shown = displayedSet();
+    ui.byId("copy-to-manual-button").hidden = Boolean(plan) || !shown || shown.unit === "mark";
     ui.byId("new-plan-button").disabled = state.plans.plans.length >= C.MAX_MANUAL_PLANS;
     ui.byId("manual-panel").hidden = !plan;
     if (plan) {
@@ -345,19 +347,23 @@
       return { shots: new Set(), marks: new Set(), status: null, stats: null, context: state.context };
     }
     const source = isDesignPlanKey(state.view.selection) ? state.plan : state.output;
+    // Mark単位の選択はShotを塗らず（Shotを選んだわけではないので）、測るMarkだけを示す
+    const markUnit = set.unit === "mark";
     return {
-      shots: new Set(set.shotIndices),
+      shots: markUnit ? new Set() : new Set(set.shotIndices),
       marks: new Set(set.markIndices),
       status: set.status,
       stats: {
+        unit: set.unit,
         shotCount: set.shotIndices.length,
         markCount: set.markIndices.length,
         minSpacingMm: set.minSpacingMm,
         criteria: set.criteria,
         reference: source.criteriaReference,
       },
-      context: source.context,
-      relaxedKeys: new Set(source.relaxed.map((entry) => entry.key)),
+      context: markUnit ? source.markContext : source.context,
+      relaxedKeys: new Set((markUnit ? source.markRelaxed : source.relaxed).map((entry) => entry.key)),
+      markUnit,
     };
   }
 
@@ -406,6 +412,7 @@
       eligibleShots,
       selectedShots: selection.shots,
       measuredMarks: selection.marks,
+      largeMeasuredMarks: Boolean(selection.markUnit),
       centerMarkIndex: context && context.center.enabled ? context.center.markIndex : null,
       mandatoryShots: annotations.mandatoryShots,
       shotNotes: annotations.notes,
@@ -433,13 +440,19 @@
     if (!context) {
       return "設定に誤りがあるため、手動プランの判定と制約の判定はできません: " + state.contextErrors.join(" ");
     }
+    const markNote = selection.markUnit
+      ? "Mark単位（Shotの括りなし）で選んだ点です。Shotは塗らず、測るMarkだけを濃い点で示します（手動プランには写せません）。制約は選んだMarkの数で数えています。"
+      : "";
     if (isDesignPlanKey(state.view.selection)) {
-      return state.planStale
-        ? "「計画を作成」で選んだ点ですが、そのあとで設定が変わりました。今の設定で選ぶには、もう一度「計画を作成」を押してください。"
+      if (state.planStale) {
+        return "「計画を作成」で選んだ点ですが、そのあとで設定が変わりました。今の設定で選ぶには、もう一度「計画を作成」を押してください。";
+      }
+      return selection.markUnit
+        ? `「計画を作成」で選んだ点です（${planConstraintText()}。評価データは使っていません）。${markNote}CSVで保存できます。`
         : `「計画を作成」で選んだ点です（${planConstraintText()}。評価データは使っていません）。CSVで保存したり、新しい手動プランに写して手直ししたりできます。`;
     }
     if (!activePlan()) {
-      return "評価で選ばれた点です。「この選択を新しい手動プランにする」で写して手直しできます。";
+      return selection.markUnit ? `評価で選ばれた点です。${markNote}` : "評価で選ばれた点です。「この選択を新しい手動プランにする」で写して手直しできます。";
     }
     const notes = [];
     if (selection.missing && selection.missing.length > 0) {
@@ -709,10 +722,15 @@
     if (plan.relaxed.length > 0) {
       details.push(`同時に満たせなかったハード制約をソフトとして扱いました: ${plan.relaxed.map((entry) => entry.label).join("、")}`);
     }
+    if (plan.markRelaxed.length > 0) {
+      details.push(`Mark単位で同時に満たせなかったハード制約をソフトとして扱いました: ${plan.markRelaxed.map((entry) => entry.label).join("、")}`);
+    }
     if (plan.failedMethods.length > 0) {
       details.push(`制約を満たす点を選べなかった選び方: ${plan.failedMethods.join("、")}（計測Shot数や制約を見直してください）`);
     }
-    ui.showMessage(plan.failedMethods.length > 0 ? "warning" : "success", "計画を作成しました。", details);
+    details.push(...plan.markErrors);
+    const planWarning = plan.failedMethods.length > 0 || plan.markErrors.length > 0;
+    ui.showMessage(planWarning ? "warning" : "success", "計画を作成しました。", details);
     if (plan.sets.length > 0) {
       const firstSet = plan.sets.find((set) => set.method === C.PLAN_FIRST_VIEW_KEY) || plan.sets[0];
       state.view.selection = `${C.PLAN_PREFIX}${firstSet.method}`;
@@ -797,7 +815,13 @@
       if (output.relaxed.length > 0) {
         details.push(`同時に満たせなかったハード制約 ${output.relaxed.length}件をソフトとして扱いました（「評価結果」に理由があります）。`);
       }
-      ui.showMessage("success", "評価が終わりました。", details);
+      if (output.markRelaxed.length > 0) {
+        details.push(`Mark単位で同時に満たせなかったハード制約 ${output.markRelaxed.length}件をソフトとして扱いました（「評価結果」に理由があります）。`);
+      }
+      if (output.markErrors.length > 0) {
+        details.push("Mark単位の選び方は、次の理由で評価していません。", ...output.markErrors);
+      }
+      ui.showMessage(output.markErrors.length > 0 ? "warning" : "success", "評価が終わりました。", details);
       renderMapTab();
       renderResultsTab();
       renderMapsTab();

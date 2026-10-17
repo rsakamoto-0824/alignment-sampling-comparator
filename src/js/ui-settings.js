@@ -408,15 +408,22 @@
     }
   }
 
-  /** 選び方のチェックボックス（評価の「比べる選び方」と、スイープの「比べる選び方」）。 */
+  /**
+   * 選び方のチェックボックス（評価の「比べる選び方」と、スイープの「比べる選び方」）。
+   * Shot単位とMark単位（Shotの括りなし。検証用）に分けて並べる。
+   */
   function renderMethodChoices() {
     for (const [containerId, prefix] of [["method-choices", "sampling.methods"], ["sweep-method-choices", "sweep.methods"]]) {
       const container = ui.byId(containerId);
       container.replaceChildren();
-      for (const method of C.METHODS) {
-        const input = ui.create("input", { type: "checkbox", "data-setting": `${prefix}.${method.key}` });
-        input.addEventListener("change", handleBoundInput);
-        container.append(ui.create("label", { className: "choice" }, [input, ` ${method.label}`]));
+      for (const [unit, title] of Object.entries(C.METHOD_UNITS)) {
+        const choices = ui.create("div", { className: "choice-group" });
+        for (const method of C.METHODS.filter((entry) => entry.unit === unit)) {
+          const input = ui.create("input", { type: "checkbox", "data-setting": `${prefix}.${method.key}` });
+          input.addEventListener("change", handleBoundInput);
+          choices.append(ui.create("label", { className: "choice" }, [input, ` ${method.label}`]));
+        }
+        container.append(ui.create("div", { className: "method-unit-group", role: "group", "aria-label": title }, [ui.create("p", { className: "method-unit-title", text: title }), choices]));
       }
     }
   }
@@ -507,8 +514,12 @@
         notes.push(`除外Shot ${excludedCount}個は選びません`);
       }
       eligible.textContent = `選べるShot: ${eligibleShots.length}個（Mark ${markCount}個）。${notes.join("。")}。`;
+      // Mark単位は端のShotのMarkも選べる（除外ShotのMarkは除く）
+      const markCandidates = map.shots.filter((shot) => !excluded.has(shot.id)).reduce((sum, shot) => sum + shot.markIndices.length, 0);
+      ui.byId("mark-count-summary").textContent = `Mark単位で選べるMark: ${markCandidates}個。いまのShot単位の計測Mark数の目安: ${Math.round((sampling.shotCount * markCount) / Math.max(eligibleShots.length, 1))}個（計測Shot数 × 選べるShotの平均Mark数）。`;
     } else {
       eligible.textContent = "マップがまだありません。";
+      ui.byId("mark-count-summary").textContent = "";
     }
     writeShotIdFields();
     updateShotIdErrors();

@@ -18,7 +18,11 @@
   const SCALES = { linear: "線形", log: "対数" };
   const X_AXES = { marks: "計測Mark数（計測コスト）", shots: "計測Shot数" };
   // 選び方の線の色と形。ランダムは基準として灰色にする（補正の色と重ならないように）。
-  // D最適・I最適は、制約なしを破線と中抜きのマーカー、制約付きを実線と塗りのマーカーにして、色以外でも見分けられるようにする
+  // D最適・I最適は、制約なしを破線と中抜きのマーカー、制約付きを実線と塗りのマーカーにして、色以外でも見分けられるようにする。
+  // Mark単位（Shotの括りなし）は、同じ選び方のShot単位と同じ色・形にし、線を点線（制約なしは一点鎖線）にする
+  const DASH_PATTERN = "6 4";
+  const MARK_DOTTED = { dash: "1 4", legendDash: "1 2" };
+  const MARK_DASH_DOT = { dash: "10 3 1 3", legendDash: "5 2 1 2", hollow: true };
   const METHOD_STYLES = {
     random: { color: "var(--method-random)", shape: "circle" },
     poisson: { color: "var(--method-poisson)", shape: "square" },
@@ -26,8 +30,26 @@
     iOptimal: { color: "var(--method-i)", shape: "diamond", dashed: true },
     constrainedD: { color: "var(--method-d)", shape: "triangle" },
     constrainedI: { color: "var(--method-i)", shape: "diamond" },
+    markRandom: Object.assign({ color: "var(--method-random)", shape: "circle" }, MARK_DOTTED),
+    markPoisson: Object.assign({ color: "var(--method-poisson)", shape: "square" }, MARK_DOTTED),
+    markDOptimal: Object.assign({ color: "var(--method-d)", shape: "triangle" }, MARK_DASH_DOT),
+    markIOptimal: Object.assign({ color: "var(--method-i)", shape: "diamond" }, MARK_DASH_DOT),
+    markConstrainedD: Object.assign({ color: "var(--method-d)", shape: "triangle" }, MARK_DOTTED),
+    markConstrainedI: Object.assign({ color: "var(--method-i)", shape: "diamond" }, MARK_DOTTED),
   };
-  const DASH_PATTERN = "6 4";
+
+  /** 系列の線の破線の形（凡例は短い線なので詰めた形）。dash を持たなければ dashed のときだけ破線。 */
+  function dashOf(entry, forLegend) {
+    if (entry.dash) {
+      return forLegend ? entry.legendDash : entry.dash;
+    }
+    return entry.dashed ? (forLegend ? "3 2" : DASH_PATTERN) : null;
+  }
+
+  /** 中抜きのマーカーにするか（hollow がなければ破線の系列）。 */
+  function hollowOf(entry) {
+    return entry.hollow !== undefined ? entry.hollow : Boolean(entry.dashed);
+  }
   // 補正の系統ごとの印の形（色と同じく系統で決め、RBF・GPRの式内は破線と中抜きの印にする）
   const CORRECTION_SHAPES = { howa: "circle", rbfXY: "square", rbfXYR: "triangle", gpXY: "diamond", gpXYR: "triangleDown", measured: "circle" };
   // 手動プランは計測Shot数が決まっているので、線ではなく点（文字色の × や ＋）で重ねる
@@ -102,6 +124,9 @@
           color: style.color,
           shape: style.shape,
           dashed: Boolean(style.dashed),
+          dash: style.dash,
+          legendDash: style.legendDash,
+          hollow: style.hollow,
           points: methodPoints(sweep, method.key, (summary) => statOf(summary.variants[view.variant][view.axis][view.metric], view.stat), view.xAxis),
         });
       });
@@ -246,10 +271,10 @@
       }
       const d = valid.map((point, index) => `${index === 0 ? "M" : "L"} ${xOf(point.x)} ${yOf(point.y)}`).join(" ");
       svg.append(
-        ui.createSvg("path", { d, fill: "none", stroke: entry.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round", "stroke-dasharray": entry.dashed ? DASH_PATTERN : null })
+        ui.createSvg("path", { d, fill: "none", stroke: entry.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round", "stroke-dasharray": dashOf(entry, false) })
       );
       for (const point of valid) {
-        svg.append(marker(entry.shape, xOf(point.x), yOf(point.y), entry.color, entry.dashed));
+        svg.append(marker(entry.shape, xOf(point.x), yOf(point.y), entry.color, hollowOf(entry)));
       }
       const last = valid[valid.length - 1];
       if (valid.length === 1) {
@@ -354,8 +379,8 @@
       series.map((entry) =>
         ui.create("li", null, [
           ui.createSvg("svg", { className: "legend-marker", viewBox: "0 0 16 16", "aria-hidden": "true" }, [
-            ui.createSvg("line", { x1: 0, y1: 8, x2: 16, y2: 8, stroke: entry.color, "stroke-width": 2, "stroke-dasharray": entry.dashed ? "3 2" : null }),
-            marker(entry.shape, 8, 8, entry.color, entry.dashed),
+            ui.createSvg("line", { x1: 0, y1: 8, x2: 16, y2: 8, stroke: entry.color, "stroke-width": 2, "stroke-linecap": "round", "stroke-dasharray": dashOf(entry, true) }),
+            marker(entry.shape, 8, 8, entry.color, hollowOf(entry)),
           ]),
           entry.label,
         ])
@@ -446,6 +471,10 @@
     const relaxed = sweep.points.filter((point) => point.relaxed && point.relaxed.length > 0);
     if (relaxed.length > 0) {
       children.push(notice("ハード制約を同時に満たせず、ソフトとして扱った計測Shot数があります。", relaxed.map((point) => `Shot ${point.shotCount}: ${point.relaxed.map((entry) => entry.label).join("、")}`)));
+    }
+    const markErrors = sweep.points.filter((point) => point.markErrors && point.markErrors.length > 0);
+    if (markErrors.length > 0) {
+      children.push(notice("Mark単位の選び方を評価できなかった計測Shot数があります。", markErrors.map((point) => `Shot ${point.shotCount}（Mark ${point.markCount}個）: ${point.markErrors.join(" ")}`)));
     }
     const rankWarnings = sweep.points.filter((point) => point.warnings && point.warnings.some((text) => text.includes("多すぎる")));
     if (rankWarnings.length > 0) {

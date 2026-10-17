@@ -34,18 +34,21 @@
     };
   }
 
-  /** 全試行で各Shotが選ばれた割合を、段階（1〜5）と説明文にする。 */
-  function selectionFrequency(sets) {
+  /**
+   * 全試行で各Shot（Mark単位の選び方なら各Mark）が選ばれた割合を、段階（1〜5）と説明文にする。
+   * indicesOf(set) で、試行ごとに数える番号（Shot番号かMark番号）を返す。
+   */
+  function selectionFrequency(sets, indicesOf) {
     const counts = new Map();
     for (const set of sets) {
-      for (const shotIndex of set.shotIndices) {
-        counts.set(shotIndex, (counts.get(shotIndex) || 0) + 1);
+      for (const index of indicesOf(set)) {
+        counts.set(index, (counts.get(index) || 0) + 1);
       }
     }
     const steps = new Map();
-    for (const [shotIndex, count] of counts) {
+    for (const [index, count] of counts) {
       const fraction = count / sets.length;
-      steps.set(shotIndex, {
+      steps.set(index, {
         step: Math.min(FREQUENCY_STEPS, Math.max(1, Math.ceil(fraction * FREQUENCY_STEPS))),
         text: `選ばれた割合 ${Math.round(fraction * 100)}%（${count} / ${sets.length}回）`,
       });
@@ -96,18 +99,32 @@
    */
   function render(container, output, map, zones, choices, handlers) {
     const rankingVariant = output.variants[0];
-    const context = output.context;
-    const eligibleShots = new Set(context.items.map((item) => item.shotIndex));
-    const centerMarkIndex = context.center.enabled ? context.center.markIndex : null;
-    const mandatoryShots = new Set(context.mandatoryItems.map((item) => context.items[item].shotIndex));
+    // 選び方の単位（Shot・Mark）ごとの前提から、選べるShot・中心の1点・強制計測Shotを出す
+    const viewsByUnit = {};
+    for (const [unit, context, relaxed] of [["shot", output.context, output.relaxed], ["mark", output.markContext, output.markRelaxed || []]]) {
+      if (!context) {
+        continue;
+      }
+      viewsByUnit[unit] = {
+        eligibleShots: new Set(context.items.map((item) => item.shotIndex)),
+        centerMarkIndex: context.center.enabled ? context.center.markIndex : null,
+        mandatoryShots: new Set(context.mandatoryItems.map((item) => context.items[item].shotIndex)),
+        relaxedKeys: new Set(relaxed.map((entry) => entry.key)),
+      };
+    }
     const cards = [];
     let usesFrequency = false;
+    let usesMarkUnit = false;
 
     for (const method of output.methods) {
       const sets = output.sets.filter((set) => set.method === method.key && set.results);
       if (sets.length === 0) {
         continue;
       }
+      const markUnit = sets[0].unit === "mark";
+      usesMarkUnit = usesMarkUnit || markUnit;
+      const { eligibleShots, centerMarkIndex, mandatoryShots, relaxedKeys } = viewsByUnit[sets[0].unit];
+      const labels = ASC.mapView.unitLabels(sets[0].unit);
       const card = ui.create("section", { className: "map-card", "aria-label": `${method.label}で選んだ点` });
       card.append(ui.create("h3", { text: method.manual ? `${method.label}（手動プラン）` : method.label }));
       const choice = sets.length > 1 ? choices[method.key] || "median" : "single";
@@ -132,11 +149,20 @@
           mandatoryShots,
           editable: false,
           compact: true,
-          shotSteps: selectionFrequency(sets),
-          ariaLabel: `${method.label}: 全${sets.length}回の試行で各Shotが選ばれた割合`,
+          // Mark単位は各Markが選ばれた割合をMarkの色で、Shot単位は各Shotが選ばれた割合をShotの色で示す
+          shotSteps: markUnit ? null : selectionFrequency(sets, (set) => set.shotIndices),
+          markSteps: markUnit ? selectionFrequency(sets, (set) => set.markIndices) : null,
+          ariaLabel: `${method.label}: 全${sets.length}回の試行で各${markUnit ? "Mark" : "Shot"}が選ばれた割合`,
         });
         card.append(frame);
-        card.append(statList([["試行の数", `${sets.length}回`], ["選ばれたShotの種類", `${new Set(sets.flatMap((set) => set.shotIndices)).size}個`]]));
+        card.append(
+          statList([
+            ["試行の数", `${sets.length}回`],
+            markUnit
+              ? ["選ばれたMarkの種類", `${new Set(sets.flatMap((set) => set.markIndices)).size}個`]
+              : ["選ばれたShotの種類", `${new Set(sets.flatMap((set) => set.shotIndices)).size}個`],
+          ])
+        );
         card.append(constraintSummaryTable(output.summary[method.key].constraints));
       } else {
         const entry = choice === "single" ? { set: sets[0], index: 0 } : rankedDraws(sets, rankingVariant.key)[choice];
@@ -145,8 +171,10 @@
           map,
           zones,
           eligibleShots,
-          selectedShots: new Set(set.shotIndices),
+          // Mark単位はShotを選んだわけではないので、Shotは塗らずに測るMarkだけを示す
+          selectedShots: markUnit ? new Set() : new Set(set.shotIndices),
           measuredMarks: new Set(set.markIndices),
+          largeMeasuredMarks: markUnit,
           centerMarkIndex,
           mandatoryShots,
           editable: false,
@@ -159,14 +187,14 @@
           statList(
             [
               ["試行", sets.length > 1 ? `${entry.index + 1}回目` : "—"],
-              ["Shot数・Mark数", `${set.shotIndices.length}個・${set.markIndices.length}個`],
-              ["Shot中心の最小間隔", `${ui.formatNumber(set.minSpacingMm, 1)} mm`],
+              [`${labels.shots}・Mark数`, `${set.shotIndices.length}個・${set.markIndices.length}個`],
+              [labels.spacing, `${ui.formatNumber(set.minSpacingMm, 1)} mm`],
             ]
               .concat(ASC.mapView.criteriaRows(set.criteria, output.criteriaReference))
               .concat([[`残差RMS（${rankingVariant.label}）`, `X ${ui.formatNumber(ASC.math.summarize(result.x.rms).mean)}・Y ${ui.formatNumber(ASC.math.summarize(result.y.rms).mean)} nm`]])
           )
         );
-        card.append(ASC.mapView.constraintTable(set.status, new Set(output.relaxed.map((relaxedEntry) => relaxedEntry.key))));
+        card.append(ASC.mapView.constraintTable(set.status, relaxedKeys));
         const exportName = sets.length > 1 ? `${method.label}_試行${entry.index + 1}` : method.label;
         card.append(
           ui.create("div", { className: "button-row" }, [
@@ -195,6 +223,14 @@
         text: `ランダム・ポアソンの「良い・悪い」は、${rankingVariant.label}の残差RMS（XとYの平均）で決めています。記号は「マップと選択点」のタブと同じです（塗りつぶしたShotが選んだShot、濃い点が測るMark、赤い輪が中心の1点、太い枠が強制計測Shot）。「この選択点をCSVで保存」は、表示中の試行の点を1行1Markで保存します。D基準 log₁₀det(XᵀX) は大きいほど、I基準（予測分散の平均÷σ²）は小さいほど良く、効率はこの評価の中で最も良い選び方を100%にした値です。制約の「ずれ」は、何個のShotを別の区画へ移せば満たせるかの目安です。`,
       }),
     ];
+    if (usesMarkUnit) {
+      children.push(
+        ui.create("p", {
+          className: "hint",
+          text: "Mark単位（Shotの括りなし）の選び方は、Shotを塗らず、測るMarkだけを濃い点で示します（選ばれた割合はMarkの色）。制約は選んだMarkの数で数え、「ずれ」は何個のMarkを移せば満たせるかの目安です。",
+        })
+      );
+    }
     if (usesFrequency) {
       children.push(ui.create("h3", { className: "subheading", text: "選ばれた割合の色" }), frequencyLegend());
     }

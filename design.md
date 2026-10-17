@@ -114,6 +114,14 @@ Shot中心どうしの最小間隔を d として、5-1 に「選んだShotか�
 - 制約付きD最適・I最適は、強制計測Shotを固定して残りを入れ替える（拡張計画）。制約なしは前提から制約を外して同じ入れ替え法を使う。
 - 乱数は選び方の並び順（`C.METHODS` の位置）と試行の番号で決める（`methodRandom`）。新しい選び方は末尾に足し、既存の選び方の乱数を変えない。
 
+### 5-3b Mark単位（Shotの括りなし。検証用・ブラウザ版だけ）
+
+- `buildMarkContext` で、候補（item）を有効なMarkの1つずつにした前提を作る（除外ShotのMarkは除き、Markが揃わない端のShotのMarkも候補）。選ぶ数は `sampling.markCount`。
+- 制約は選んだMarkの数で数え、4象限・同心円はMarkの座標、Scan方向はMarkのShotで判定する。中心の1点は最も近いMarkそのもの、強制計測ShotはそのShotのMarkをすべて必ず選ぶ。ハード制約の切り替えはShot単位とは別に行う（`markRelaxed`）。
+- 選び方の関数（1つずつ加える方法・ポアソン・入れ替え法）はShot単位と共通。入れ替えの変化は1行ずつなので2×2を式で直接解く（`swapChangeSingle`。Shot単位の丸め誤差を変えないようMark単位でだけ使う）。
+- 選び方は `C.METHODS` の末尾に `unit: "mark"` で足した（既存の乱数列を変えない）。初期設定ではオフなので、照合の基準データとPython版・MATLAB版の結果は変わらない。
+- スイープでは、Mark数を評価の設定の比（Mark数 ÷ 計測Shot数）で計測Shot数に比例させる。
+
 ### 5-4 計画を作成（`runPlan`）
 
 評価データと補正を使わず、`buildContext` → `resolveHardConstraints` → D最適・I最適（`C.PLAN_METHOD_KEYS`: 制約なし・制約付きの4通り）の選択だけを行う。乱数と前提の作り方は `runEvaluation` と共通（`prepareContext`・`selectByMethod`）なので、同じ設定なら評価の同じ選び方と同じ点になる。制約なしの選び方も、制約の満たし具合は今の制約で判定する（評価と同じ）。作成後は制約付きD最適を最初に表示する。結果は `describeSet` の形（D基準・I基準・制約の満たし具合）で返し、「マップと選択点」の選択肢に「（計画）」として出す。設定を変えたら「設定が変わる前」と表示する。
