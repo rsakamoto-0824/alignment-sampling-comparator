@@ -22,6 +22,7 @@
   --radius: 8px;
   --header-height: 72px;
   --settings-width: 440px;
+  --resizer-width: 12px;
   --touch-target: 44px;
 
   --surface-page: #f4f3ef;
@@ -158,6 +159,68 @@
   }
 }
 
+/* 画面の「表示の色」でダークを選んだとき（OSの設定によらず、上と同じ値を使う） */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-page: #0d0d0d;
+  --surface-1: #1a1a19;
+  --surface-2: #262624;
+  --ink-1: #ffffff;
+  --ink-2: #d4d3c9;
+  --ink-muted: #a9a89f;
+  --border: #4a4a46;
+  --grid: #2c2c2a;
+  --axis: #5c5c57;
+  --accent: #3987e5;
+  --accent-strong: #86b6ef;
+  --accent-wash: #16304f;
+  --accent-ink-on: #0b0b0b;
+  --good-ink: #4cc94c;
+  --critical-ink: #f08a8a;
+  --warning-ink: #fab219;
+  --warning-wash: #3a2f12;
+  --critical-wash: #3d1d1d;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --method-random: #a9a89f;
+  --method-poisson: #0ca30c;
+  --method-d: #9085e9;
+  --method-i: #e66767;
+  /* 濃色表示では、値が大きいほど明るくする */
+  --step-1: #16304f;
+  --step-2: #184f95;
+  --step-3: #256abf;
+  --step-4: #6da7ec;
+  --step-5: #cde2fb;
+  --step-ink-1: #ffffff;
+  --step-ink-2: #ffffff;
+  --step-ink-3: #ffffff;
+  --step-ink-4: #0b0b0b;
+  --step-ink-5: #0b0b0b;
+  --map-wafer: #202020;
+  --map-shot: #262624;
+  --map-shot-disabled: #34342f;
+  --map-shot-selected: #1f4a7d;
+  --map-mark: #a9a89f;
+  --map-mark-measured: #cde2fb;
+  --map-center: #f08a8a;
+  /* 濃色表示では、ほぼ0を背景になじませ、大きいほど明るくする */
+  --div-1: #8bbcf2;
+  --div-2: #4e95ea;
+  --div-3: #2f6fc4;
+  --div-4: #1f4673;
+  --div-5: #383835;
+  --div-6: #6b2b2a;
+  --div-7: #a83a39;
+  --div-8: #e05a59;
+  --div-9: #f2a3a2;
+  --data-arrow: #e8e7df;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -286,8 +349,55 @@ button,
 
 .layout {
   display: grid;
-  grid-template-columns: var(--settings-width) minmax(0, 1fr);
+  grid-template-columns: var(--settings-width) var(--resizer-width) minmax(0, 1fr);
   align-items: start;
+}
+
+/* 設定欄の幅を変える取っ手（ドラッグ、または選んで左右キー。ダブルクリックで元の幅） */
+.sidebar-resizer {
+  position: sticky;
+  top: var(--header-height);
+  height: calc(100vh - var(--header-height));
+  cursor: col-resize;
+  touch-action: none;
+  background: var(--surface-2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-resizer::before {
+  content: "";
+  width: 2px;
+  height: 40px;
+  border-left: 2px dotted var(--ink-muted);
+}
+
+.sidebar-resizer:hover,
+.sidebar-resizer.dragging {
+  background: var(--accent-wash);
+}
+
+.sidebar-resizer:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+
+/* ドラッグ中は文字を選ばない */
+body.resizing-sidebar {
+  user-select: none;
+  cursor: col-resize;
+}
+
+.theme-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.theme-field select {
+  min-height: var(--touch-target);
 }
 
 .settings-panel {
@@ -296,7 +406,6 @@ button,
   height: calc(100vh - var(--header-height));
   overflow-y: auto;
   padding: var(--space-4);
-  border-right: 1px solid var(--border);
   background: var(--surface-1);
 }
 
@@ -319,6 +428,9 @@ main {
   }
   .layout {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .sidebar-resizer {
+    display: none;
   }
   .settings-panel {
     position: static;

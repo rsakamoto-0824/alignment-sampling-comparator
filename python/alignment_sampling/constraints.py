@@ -2,6 +2,7 @@
 
 候補（item）: 選べるShot（除外Shotと、設定によってはMarkが揃わない端のShotを除いたもの）。選んだShotの有効なMarkはすべて測る
 区画（class）: 制約ごとの分け方。制約は「選んだShotの数」で数え、区画はShot中心で判定する
+同心円の区切り: 自動（初期設定）なら、選べるShotの数が3領域で均等になる半径（resolve_zones）
 目標の幅: 各区画の選択数が入るべき範囲 [floor, ceil]（同数配分なら差1以内と同じ）
 強制計測Shot: 必ず選ぶShot（常にハード）。中心の1点のShotとあわせて、入れ替えの対象にしない
 """
@@ -26,6 +27,53 @@ def zone_of(radius, inner, outer):
     if radius < inner:
         return 0
     return 1 if radius < outer else 2
+
+
+def _zone_radii_valid(zones, valid_radius):
+    return zones["innerRadiusMm"] > 0 and zones["outerRadiusMm"] > zones["innerRadiusMm"] and zones["outerRadiusMm"] < valid_radius
+
+
+def radius_text(value):
+    """区切りの半径の表示（小数1桁。整数ならそのまま）。"""
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
+
+
+def equal_count_zone_radii(radii):
+    """候補の半径を3つの区画に分けたとき、区画ごとの数ができるだけ均等になる区切りの半径（ブラウザ版と同じ手順）。
+
+    区切りは隣り合う半径の真ん中に置き、同じ半径（差 ZONE_RADIUS_TIE_MM 以下）の候補は同じ区画に入れる。
+    数のずれ（3 × 区画の数 − 全体の数）の2乗の和が最も小さい組を選び、同じなら先に調べた（内側が小さい）組を使う。
+    半径が3種類より少なければ None。
+    """
+    values, cumulative = [], []
+    for radius in sorted(radii):
+        if values and radius - values[-1] <= C.ZONE_RADIUS_TIE_MM:
+            cumulative[-1] += 1
+        else:
+            values.append(radius)
+            cumulative.append((cumulative[-1] if cumulative else 0) + 1)
+    total = len(radii)
+    if len(values) < 3:
+        return None
+    best = None
+    for inner in range(len(values) - 2):
+        for outer in range(inner + 1, len(values) - 1):
+            counts = [cumulative[inner], cumulative[outer] - cumulative[inner], total - cumulative[outer]]
+            score = sum((3 * count - total) ** 2 for count in counts)
+            if best is None or score < best[0]:
+                best = (score, inner, outer, counts)
+    _, inner, outer, counts = best
+    return {"innerRadiusMm": (values[inner] + values[inner + 1]) / 2, "outerRadiusMm": (values[outer] + values[outer + 1]) / 2, "counts": counts}
+
+
+def resolve_zones(zone_settings, items, valid_radius):
+    """同心円の区切り。自動（auto）なら候補の数が3領域で均等になる半径、そうでなければ設定の値。決められなければ ValueError。"""
+    if not zone_settings.get("auto"):
+        return {"innerRadiusMm": zone_settings["innerRadiusMm"], "outerRadiusMm": zone_settings["outerRadiusMm"], "auto": False, "counts": None}
+    computed = equal_count_zone_radii([math.hypot(item["x"], item["y"]) for item in items])
+    if computed is None or not _zone_radii_valid(computed, valid_radius):
+        raise ValueError("同心円の区切りを、選べるShotの数が均等になるように決められませんでした。自動をオフにして区切りの半径を入れてください。")
+    return {**computed, "auto": True}
 
 
 def shot_id_list(values):
@@ -55,7 +103,8 @@ def build_context(wafer_map, settings):
     """候補・区画・中心の1点・強制計測Shotをまとめた「サンプリングの前提」。設定の誤りは ValueError で知らせる。"""
     sampling, zones, constraint_settings = settings["sampling"], settings["zones"], settings["constraints"]
     errors = []
-    if not (zones["innerRadiusMm"] > 0 and zones["outerRadiusMm"] > zones["innerRadiusMm"] and zones["outerRadiusMm"] < wafer_map["validRadiusMm"]):
+    # 自動の区切りは候補から決めるので、ここでは手で入れた区切りだけを確かめる
+    if not zones.get("auto") and not _zone_radii_valid(zones, wafer_map["validRadiusMm"]):
         errors.append(f"同心円の区切りは 0 < 内側 < 外側 < 有効半径（{wafer_map['validRadiusMm']} mm）にしてください。")
     if not (isinstance(sampling["shotCount"], int) and sampling["shotCount"] >= 1):
         errors.append("計測Shot数は1以上の整数にしてください。")
@@ -102,6 +151,7 @@ def build_context(wafer_map, settings):
     if errors:
         raise ValueError("\n".join(errors))
 
+    resolved_zones = resolve_zones(zones, items, wafer_map["validRadiusMm"])
     center = _build_center(wafer_map, items, constraint_settings["center"])
     forced_count = len(set(mandatory_items) | ({center["itemIndex"]} if center["active"] else set()))
     if forced_count > shot_count:
@@ -110,7 +160,9 @@ def build_context(wafer_map, settings):
         "map": wafer_map,
         "items": items,
         "shotCount": shot_count,
-        "constraints": _build_balance_constraints(items, settings),
+        # 使う同心円の区切り（自動なら選べるShotの中心で、3領域の数が均等になる半径）
+        "zones": resolved_zones,
+        "constraints": _build_balance_constraints(items, settings, resolved_zones),
         "center": center,
         "mandatoryItems": mandatory_items,
         "softStrength": constraint_settings["softStrength"],
@@ -131,14 +183,17 @@ def unconstrained_context(context):
     return {**context, "constraints": [], "center": {"enabled": False, "active": False}, "mandatoryItems": []}
 
 
-def _build_balance_constraints(items, settings):
-    zones = settings["zones"]
+def _build_balance_constraints(items, settings, zones):
     definitions = {
         "scan": (2, ["Up", "Down"], ["Up", "Down"], lambda item: 0 if item["scan"] == C.SCAN_UP else 1),
         "quadrant": (4, QUADRANT_LABELS, ["第1", "第2", "第3", "第4"], lambda item: quadrant_of(item["x"], item["y"])),
         "zone": (
             3,
-            [f"内側（r < {zones['innerRadiusMm']} mm）", f"中間（{zones['innerRadiusMm']}〜{zones['outerRadiusMm']} mm）", f"外側（r ≧ {zones['outerRadiusMm']} mm）"],
+            [
+                f"内側（r < {radius_text(zones['innerRadiusMm'])} mm）",
+                f"中間（{radius_text(zones['innerRadiusMm'])}〜{radius_text(zones['outerRadiusMm'])} mm）",
+                f"外側（r ≧ {radius_text(zones['outerRadiusMm'])} mm）",
+            ],
             ["内側", "中間", "外側"],
             lambda item: zone_of(math.hypot(item["x"], item["y"]), zones["innerRadiusMm"], zones["outerRadiusMm"]),
         ),

@@ -5,11 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>アライメント計測Markの選び方の比較</title>
     <link rel="stylesheet" href="src/css/style.css" />
+    <script>
+      // 覚えている「表示の色」と設定欄の幅を、最初の表示の前に当てる（ちらつかないように。詳しくは src/js/ui-layout.js）
+      try {
+        var savedTheme = localStorage.getItem("asc-theme");
+        if (savedTheme === "light" || savedTheme === "dark") {
+          document.documentElement.dataset.theme = savedTheme;
+        }
+        var savedWidth = Number(localStorage.getItem("asc-sidebar-width"));
+        if (savedWidth >= 300 && savedWidth <= 900) {
+          document.documentElement.style.setProperty("--settings-width", savedWidth + "px");
+        }
+      } catch (error) {
+        // 覚えた値が読めないときは初期の見た目のまま
+      }
+    </script>
   </head>
   <body>
     <header class="app-header">
       <h1>アライメント計測Markの選び方の比較</h1>
       <div class="run-area">
+        <div class="theme-field">
+          <label for="theme-select">表示の色</label>
+          <select id="theme-select">
+            <option value="auto">OSに合わせる</option>
+            <option value="light">ライト</option>
+            <option value="dark">ダーク</option>
+          </select>
+        </div>
         <div class="progress-area" id="progress-area" hidden>
           <progress id="progress-bar" max="1" value="0"></progress>
           <span id="progress-label" aria-live="polite"></span>
@@ -23,7 +46,7 @@
     <div class="message-area" id="message-area" role="status" aria-live="polite"></div>
 
     <div class="layout">
-      <aside class="settings-panel" aria-label="設定">
+      <aside class="settings-panel" id="settings-panel" aria-label="設定">
         <!-- 1. Waferマップ -->
         <details class="settings-section" open>
           <summary>1. Waferマップ</summary>
@@ -303,7 +326,7 @@
             </div>
             <p class="hint">選んだShotでは、そのShotに紐づくMark（Shot内のMark）をすべて測ります。ほかのShotのMarkは測りません。</p>
             <label class="choice"><input type="checkbox" id="exclude-incomplete" data-setting="sampling.excludeIncompleteShots" /> Markが揃わない端のShot（有効半径の外にMarkがはみ出すShot）は選ばない</label>
-            <p class="hint">初期設定はオンです。オフにすると、端のShotも有効半径の中にあるMarkだけを測る形で選べます（そのときは「5. 条件制約」の同心円の区切りも見直してください。初期値の 75・110 mm は、Markが揃うShotが3領域でほぼそろう値です）。</p>
+            <p class="hint">初期設定はオンです。オフにすると、端のShotも有効半径の中にあるMarkだけを測る形で選べます（「5. 条件制約」の同心円の区切りは、初期設定では選べるShotの数が3領域で均等になるよう自動で決め直します）。</p>
             <p id="eligible-summary" class="hint"></p>
 
             <fieldset>
@@ -364,6 +387,8 @@
               <p class="hint" id="excluded-shots-hint">どの選び方でも選びません（制約なしのD最適・I最適も同じ）。手動プランに入っていれば、評価から外します。</p>
               <p class="field-error" id="excluded-shots-error"></p>
             </div>
+            <label class="choice"><input type="checkbox" id="zone-auto" data-setting="zones.auto" aria-describedby="zone-auto-summary" /> 同心円の区切りを自動で決める（3領域の候補の数が均等になる半径。初期設定）</label>
+            <p class="hint" id="zone-auto-summary"></p>
             <div class="field-row">
               <div class="field">
                 <label for="zone-inner">同心円の内側の区切り [mm]</label>
@@ -402,6 +427,16 @@
         </details>
       </aside>
 
+      <div
+        class="sidebar-resizer"
+        id="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-controls="settings-panel"
+        aria-label="設定欄の幅（ドラッグか左右キーで変える。ダブルクリックかEnterで元の幅）"
+        tabindex="0"
+        title="ドラッグで設定欄の幅を変える（ダブルクリックで元の幅）"
+      ></div>
       <main>
         <div class="tab-list" role="tablist" aria-label="表示の切り替え">
           <button type="button" class="tab" role="tab" id="tab-map" aria-controls="panel-map" aria-selected="true">マップと選択点</button>
@@ -649,6 +684,7 @@
     <script src="src/js/ui-sampling-maps.js"></script>
     <script src="src/js/ui-sweep.js"></script>
     <script src="src/js/ui-data.js"></script>
+    <script src="src/js/ui-layout.js"></script>
     <script src="src/js/app.js"></script>
   </body>
 </html>

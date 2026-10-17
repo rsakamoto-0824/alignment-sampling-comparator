@@ -26,7 +26,8 @@ end
 % 初期設定はアプリの初期設定と同じです（Wafer 100枚、計測Shot 20個、試行30回、制約はすべてハード、Scan方向は一筆書き）。
 % 選んだShotでは、そのShotに紐づくMark（有効範囲の中にあるもの）をすべて測ります。
 % 初期設定では、Markが揃わない端のShotは選びません。選ぶときは settings.sampling.excludeIncompleteShots = false にします
-% （そのときは同心円の区切り settings.zones も見直してください。初期値の 75・110 mm は、Markが揃うShotが3領域でほぼそろう値です）。
+% 同心円の区切りは初期設定で自動（settings.zones.auto = true）で、選べるShotの数が3領域で均等になる半径を使います
+% （手で決めるときは auto を false にして innerRadiusMm・outerRadiusMm を入れます）。
 % 強制計測Shot・除外Shotは settings.constraints.mandatoryShotIds・excludedShotIds に Shot番号の cell（{'30'; '45'}）で入れます。
 % 比べる補正（HOWA、RBF・GPRの式内と予測、計測値＋HOWA）は settings.model.corrections で選びます（例: settings.model.corrections.gpXY = false）。
 % アプリの「設定をJSONで保存」で作ったファイルがあれば、settingsFile に置き場所を書くと、そのまま読み込みます
@@ -93,7 +94,7 @@ layout = tiledlayout(2, 2, 'TileSpacing', 'compact');
 for s = 1:numel(designPlan.sets)
     entry = designPlan.sets(s);
     asc.plotSelectionMap(waferMap, entry, sprintf('%s（Shot %d個・Mark %d個）', designPlan.methods(s).label, ...
-        numel(entry.shotIndices), numel(entry.markIndices)), settings.zones, nexttile(layout), mandatoryShots);
+        numel(entry.shotIndices), numel(entry.markIndices)), designPlan.context.zones, nexttile(layout), mandatoryShots);
     fid = fopen(fullfile(outputFolder, ['plan_' entry.method '.csv']), 'w', 'n', 'UTF-8');
     fwrite(fid, [char(65279), asc.selectionToCsv(waferMap, entry.markIndices)], 'char');  % Excel向けにBOMを付ける
     fclose(fid);
@@ -167,7 +168,7 @@ for m = 1:numel(output.methods)
     rmsByDraw = arrayfun(@(s) mean(s.results(1).x.rms, 'omitnan'), methodSets);
     [~, order] = sort(rmsByDraw);
     entry = methodSets(order(ceil(numel(order) / 2)));
-    asc.plotSelectionMap(waferMap, entry, sprintf('%s（Mark %d個）', methodNames{m}, numel(entry.markIndices)), settings.zones, ...
+    asc.plotSelectionMap(waferMap, entry, sprintf('%s（Mark %d個）', methodNames{m}, numel(entry.markIndices)), output.context.zones, ...
         nexttile(layout), mandatoryShots);
 end
 

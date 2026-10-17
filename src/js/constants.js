@@ -149,6 +149,8 @@
     MAX_PLAN_NAME_LENGTH: 30,
 
     // ---- 条件制約 ----
+    // 同心円の区切りを自動で決めるとき、この差より近い半径は同じ半径とみなす（同じ区画に入れる）[mm]
+    ZONE_RADIUS_TIE_MM: 1e-6,
     CONSTRAINT_KEYS: ["center", "scan", "quadrant", "zone"],
     CONSTRAINT_LABELS: {
       center: "中心の1点",
@@ -204,9 +206,10 @@
           { markNo: 4, x: 12, y: -15.5 },
         ],
       },
-      // 初期のマップで、選べるShot（Markが揃うShot 64個）の数が3領域でほぼそろう値（20・24・20個）。
-      // 区切りはShot中心の半径の間に置く（境界のすぐそばにShotが来ないように）
-      zones: { innerRadiusMm: 75, outerRadiusMm: 110 },
+      // auto: true なら、選べる候補（Shot単位はShot中心、Mark単位はMarkの位置）の数が3領域で均等になる半径を使う。
+      // false なら下の2つの値を使う（自動の区切りを使っているあいだは、画面がShot単位の自動の値をここに写す）。
+      // 75・110 mm は、初期のマップでMarkが揃うShot 64個が 20・24・20個に分かれる値（自動をオフにしたときの初期値）
+      zones: { auto: true, innerRadiusMm: 75, outerRadiusMm: 110 },
       evaluationData: {
         // zernike: Zernike項の乱数で作る。file: 計測データのファイルを読む（ファイルの中身は設定に保存しない）
         source: constants.DATA_SOURCE_ZERNIKE,

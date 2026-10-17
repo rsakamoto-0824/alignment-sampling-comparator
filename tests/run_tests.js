@@ -887,9 +887,45 @@ async function main() {
     assert(median(poissonSpacings) > median(randomSpacings), "ポアソンの最小間隔がランダムより広くありません");
   });
 
+  await test("同心円の区切り（自動）: 候補の数が3領域で最も均等になる半径を、Shot単位はShot中心、Mark単位はMarkの位置で決める", () => {
+    // 同じ半径は同じ区画に入れ、隣り合う半径の真ん中に区切りを置く
+    const split = ASC.constraints.equalCountZoneRadii([1, 2, 3, 4, 5, 6]);
+    assert(split.innerRadiusMm === 2.5 && split.outerRadiusMm === 4.5 && split.counts.join(",") === "2,2,2", "6点を2個ずつに分けていません");
+    const tied = ASC.constraints.equalCountZoneRadii([1, 1, 1, 1, 2, 3, 3, 3]);
+    assert(tied.counts.join(",") === "4,1,3", "同じ半径の点を別の区画に分けたか、最も均等な組を選んでいません");
+    assert(ASC.constraints.equalCountZoneRadii([1, 1, 2, 2]) === null, "半径が2種類しかないのに区切りを返しました");
+    const map = defaultMap();
+    const settings = ASC.defaultSettings();
+    for (const [built, label] of [[ASC.constraints.buildContext(map, settings), "Shot単位"], [ASC.constraints.buildMarkContext(map, settings), "Mark単位"]]) {
+      assert(built.errors.length === 0, built.errors.join(" / "));
+      const context = built.context;
+      const zone = context.constraints.find((constraint) => constraint.key === "zone");
+      const available = Array.from(zone.available);
+      assert(context.zones.auto && available.join(",") === context.zones.counts.join(","), `${label}: 区画の候補数が自動の区切りの数と違います`);
+      // ほかのどの区切り（候補の半径の間）よりも均等か、同じ
+      const radii = context.items.map((item) => Math.hypot(item.x, item.y)).sort((a, b) => a - b);
+      const total = radii.length;
+      const score = (counts) => counts.reduce((sum, count) => sum + (3 * count - total) ** 2, 0);
+      const best = score(available);
+      for (let i = 1; i < total; i += 3) {
+        for (let j = i + 1; j < total; j += 3) {
+          if (radii[i] > radii[i - 1] && radii[j] > radii[j - 1]) {
+            assert(score([i, j - i, total - j]) >= best, `${label}: もっと均等な区切りがあります`);
+          }
+        }
+      }
+    }
+    const shotZones = ASC.constraints.buildContext(map, settings).context.zones;
+    const markZones = ASC.constraints.buildMarkContext(map, settings).context.zones;
+    assert(shotZones.counts.reduce((a, b) => a + b, 0) === 64 && markZones.counts.reduce((a, b) => a + b, 0) === map.marks.length, "自動の区切りの候補の数が違います");
+    const manual = ASC.constraints.buildContext(map, Object.assign({}, settings, { zones: { auto: false, innerRadiusMm: 75, outerRadiusMm: 110 } })).context;
+    assert(!manual.zones.auto && manual.zones.innerRadiusMm === 75 && manual.zones.outerRadiusMm === 110, "自動をオフにしたとき、入れた区切りを使っていません");
+  });
+
   await test("制約の切り替え: 区画の候補が足りないハード制約はソフトになり、理由を返す", () => {
     const map = defaultMap();
     const { context } = contextFor(map, (s) => {
+      s.zones.auto = false; // 区切りを手で入れる
       s.zones.innerRadiusMm = 20; // 内側の領域にShotがほとんど入らない
       s.zones.outerRadiusMm = 123;
     });

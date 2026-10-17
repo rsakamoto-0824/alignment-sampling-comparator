@@ -189,10 +189,16 @@ for section = {'map', 'zones', 'model', 'constraints'}
     verifyEqual(testCase, settings.(section{1}), reference.(section{1}), [section{1} ' の初期設定が違います']);
 end
 verifyEqual(testCase, settings.evaluationData.terms, reference.evaluationData.terms);
-verifyEqual(testCase, settings.sweep.methods, reference.sweep.methods);
-verifyEqual(testCase, sort(fieldnames(settings.sampling)), sort(fieldnames(reference.sampling)));
+% Mark単位（Shotの括りなし）の選び方とそのMark数は、ブラウザ版だけの検証用の項目なので比べない
+verifyEqual(testCase, settings.sweep.methods, withoutBrowserOnly(reference.sweep.methods));
+verifyEqual(testCase, sort(fieldnames(settings.sampling)), sort(fieldnames(withoutBrowserOnly(reference.sampling))));
 verifyEqual(testCase, sort(fieldnames(settings.evaluationData)), sort(fieldnames(reference.evaluationData)));
 verifyEqual(testCase, settings.evaluationData.source, reference.evaluationData.source);
+end
+
+function value = withoutBrowserOnly(value)
+names = fieldnames(value);
+value = rmfield(value, names(startsWith(names, 'mark')));
 end
 
 function testOldSettingsFile(testCase)

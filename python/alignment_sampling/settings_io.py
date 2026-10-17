@@ -10,7 +10,7 @@ from pathlib import Path
 from . import constants as C
 from .wafer_map import build_map_from_settings
 
-READABLE_VERSIONS = (1, 2, 3, 4)
+READABLE_VERSIONS = (1, 2, 3, 4, 5)
 
 
 def _merge(base, loaded):
@@ -35,6 +35,7 @@ def _migrate_old_settings(loaded, version):
              「必ず測るMark」「k個以上」「HOWA＋推定」は、なくなったので使わない（重ねるときに捨てられる）。
     版3以前: 補正の流れ「HOWAのみ」は HOWA、「推定→HOWA × 推定手法」は RBF・GPR の予測として読む。
              選んでいた推定手法は式内も比べる。計測値＋HOWA は比べる。
+    版4以前: 同心円の区切りは手で入れた値を使う（自動にしない）。
     """
     if not isinstance(loaded, dict):
         return loaded
@@ -59,6 +60,8 @@ def _migrate_old_settings(loaded, version):
                 corrections[correction["key"]] = selected
                 corrections[correction["key"] + "Predict"] = selected and flows.get("estimateThenHowa") is not False
         loaded["model"]["corrections"] = corrections
+    if version < 5 and isinstance(loaded.get("zones"), dict):
+        loaded["zones"]["auto"] = False
     return loaded
 
 
