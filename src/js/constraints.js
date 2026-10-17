@@ -38,7 +38,8 @@
     const errors = [];
     const sampling = settings.sampling;
     const zones = settings.zones;
-    if (!(zones.innerRadiusMm > 0) || !(zones.outerRadiusMm > zones.innerRadiusMm) || !(zones.outerRadiusMm < map.validRadiusMm)) {
+    // 自動の区切りは候補から決めるので、ここでは手で入れた区切りだけを確かめる
+    if (!zones.auto && !zoneRadiiValid(zones, map.validRadiusMm)) {
       errors.push(`同心円の区切りは 0 < 内側 < 外側 < 有効半径（${map.validRadiusMm} mm）にしてください。`);
     }
     if (!Number.isInteger(sampling.shotCount) || sampling.shotCount < 1) {
@@ -51,6 +52,65 @@
       errors.push("オンにした制約の優先度が重複しています。1〜4を1回ずつ使ってください。");
     }
     return errors;
+  }
+
+  function zoneRadiiValid(zones, validRadius) {
+    return zones.innerRadiusMm > 0 && zones.outerRadiusMm > zones.innerRadiusMm && zones.outerRadiusMm < validRadius;
+  }
+
+  /**
+   * 候補の半径を3つの区画に分けたとき、区画ごとの数ができるだけ均等になる区切りの半径（内側・外側）。
+   * 区切りは隣り合う半径の真ん中に置く（境界のすぐそばに候補が来ないように）。同じ半径の候補は同じ区画に入れる。
+   * 数のずれ（3 × 区画の数 − 全体の数）の2乗の和が最も小さい組を選び、同じなら先に調べた（内側が小さい）組を使う。
+   * 半径が3種類より少なくて分けられなければ null。Python版・MATLAB版も同じ手順。
+   */
+  function equalCountZoneRadii(radii) {
+    const sorted = radii.slice().sort((a, b) => a - b);
+    const values = [];
+    const cumulative = [];
+    for (const radius of sorted) {
+      if (values.length > 0 && radius - values[values.length - 1] <= C.ZONE_RADIUS_TIE_MM) {
+        cumulative[cumulative.length - 1]++;
+      } else {
+        values.push(radius);
+        cumulative.push((cumulative.length > 0 ? cumulative[cumulative.length - 1] : 0) + 1);
+      }
+    }
+    const total = sorted.length;
+    if (values.length < 3) {
+      return null;
+    }
+    let best = null;
+    for (let inner = 0; inner < values.length - 2; inner++) {
+      for (let outer = inner + 1; outer < values.length - 1; outer++) {
+        const counts = [cumulative[inner], cumulative[outer] - cumulative[inner], total - cumulative[outer]];
+        const score = counts.reduce((sum, count) => sum + (3 * count - total) * (3 * count - total), 0);
+        if (!best || score < best.score) {
+          best = { score, inner, outer, counts };
+        }
+      }
+    }
+    return {
+      innerRadiusMm: (values[best.inner] + values[best.inner + 1]) / 2,
+      outerRadiusMm: (values[best.outer] + values[best.outer + 1]) / 2,
+      counts: best.counts,
+    };
+  }
+
+  /**
+   * 同心円の区切り。自動（zones.auto）なら候補の数が3領域で均等になる半径、そうでなければ設定の値。
+   * 戻り値: { innerRadiusMm, outerRadiusMm, auto, counts（自動のときの区画ごとの候補数）}。決められなければ errors に足して null。
+   */
+  function resolveZones(zoneSettings, items, validRadius, unitLabel, errors) {
+    if (!zoneSettings.auto) {
+      return { innerRadiusMm: zoneSettings.innerRadiusMm, outerRadiusMm: zoneSettings.outerRadiusMm, auto: false, counts: null };
+    }
+    const computed = equalCountZoneRadii(items.map((item) => Math.hypot(item.x, item.y)));
+    if (!computed || !zoneRadiiValid(computed, validRadius)) {
+      errors.push(`同心円の区切りを、${unitLabel}の数が均等になるように決められませんでした（候補の半径の種類が少ないか、区切りが有効半径の外になる）。「自動」をオフにして区切りの半径を入れてください。`);
+      return null;
+    }
+    return { innerRadiusMm: computed.innerRadiusMm, outerRadiusMm: computed.outerRadiusMm, auto: true, counts: computed.counts };
   }
 
   /** Shot番号の並び（数でも文字でもよい）を、重複のない文字の並びにする。 */
@@ -111,6 +171,10 @@
       return { context: null, errors };
     }
 
+    const zones = resolveZones(settings.zones, items, map.validRadiusMm, "選べるShot", errors);
+    if (!zones) {
+      return { context: null, errors };
+    }
     const center = buildCenter(map, items, constraintSettings.center);
     const forcedCount = new Set(mandatoryItems.concat(center.active ? [center.itemIndex] : [])).size;
     if (forcedCount > shotCount) {
@@ -124,7 +188,9 @@
         unit: "shot",
         items,
         shotCount,
-        constraints: buildBalanceConstraints(items, settings),
+        // 使う同心円の区切り（自動なら選べるShotの中心で、3領域の数が均等になる半径）
+        zones,
+        constraints: buildBalanceConstraints(items, settings, zones),
         center,
         mandatoryItems,
         softStrength: constraintSettings.softStrength,
@@ -205,6 +271,10 @@
       return { context: null, errors };
     }
 
+    const zones = resolveZones(settings.zones, items, map.validRadiusMm, "選べるMark", errors);
+    if (!zones) {
+      return { context: null, errors };
+    }
     const center = buildCenter(map, items, constraintSettings.center);
     const forcedCount = new Set(mandatoryItems.concat(center.active ? [center.itemIndex] : [])).size;
     if (forcedCount > markCount) {
@@ -219,7 +289,9 @@
         items,
         // 選ぶ候補の数（選び方の関数はShot単位と共通なので、名前は shotCount のまま。ここではMarkの数）
         shotCount: markCount,
-        constraints: buildBalanceConstraints(items, settings),
+        // 使う同心円の区切り（自動ならMarkの位置で、3領域のMarkの数が均等になる半径）
+        zones,
+        constraints: buildBalanceConstraints(items, settings, zones),
         center,
         mandatoryItems,
         softStrength: constraintSettings.softStrength,
@@ -248,8 +320,7 @@
     });
   }
 
-  function buildBalanceConstraints(items, settings) {
-    const zones = settings.zones;
+  function buildBalanceConstraints(items, settings, zones) {
     const definitions = {
       scan: {
         classCount: 2,
@@ -266,9 +337,9 @@
       zone: {
         classCount: 3,
         labels: [
-          `内側（r < ${zones.innerRadiusMm} mm）`,
-          `中間（${zones.innerRadiusMm}〜${zones.outerRadiusMm} mm）`,
-          `外側（r ≧ ${zones.outerRadiusMm} mm）`,
+          `内側（r < ${radiusText(zones.innerRadiusMm)} mm）`,
+          `中間（${radiusText(zones.innerRadiusMm)}〜${radiusText(zones.outerRadiusMm)} mm）`,
+          `外側（r ≧ ${radiusText(zones.outerRadiusMm)} mm）`,
         ],
         shortLabels: ["内側", "中間", "外側"],
         classOf: (item) => zoneOf(Math.hypot(item.x, item.y), zones.innerRadiusMm, zones.outerRadiusMm),
@@ -303,6 +374,11 @@
       });
     }
     return constraints;
+  }
+
+  /** 区切りの半径の表示（小数1桁。整数ならそのまま）。 */
+  function radiusText(value) {
+    return Number.isInteger(value) ? String(value) : value.toFixed(1);
   }
 
   /** 中心に最も近いMark（選べるShotの全Markから探す）。そのMarkのShotを必ず選ぶ。 */
@@ -597,6 +673,8 @@
     QUADRANT_LABELS,
     quadrantOf,
     zoneOf,
+    equalCountZoneRadii,
+    radiusText,
     shotIdList,
     isIncompleteShot,
     buildContext,

@@ -10,8 +10,10 @@
   // 設定ファイルの版。2 で手動プランを複数持てるようにした。3 で選んだShotの全Markを測る形・
   // 制約なし／制約付きのD・I最適・強制計測Shot・除外Shot・一筆書きのScan方向を入れた（1・2 も読める）
   // 4 で補正を「HOWA・RBF/GPR（式内・予測）・計測値＋HOWA」にした（推定→HOWA は「予測」として読む）
-  const SETTINGS_FILE_VERSION = 4;
-  const READABLE_SETTINGS_VERSIONS = [1, 2, 3, 4];
+  // 自動の区切りを設定に写すときの桁（0.01 mm）
+  const ZONE_ROUND_FACTOR = 100;
+  const SETTINGS_FILE_VERSION = 5;
+  const READABLE_SETTINGS_VERSIONS = [1, 2, 3, 4, 5];
   // ファイル名に使えない文字（Windowsを含む）
   const FILE_NAME_FORBIDDEN = /[\\/:*?"<>|\s]+/g;
 
@@ -150,6 +152,12 @@
     const built = ASC.constraints.buildContext(state.map, state.settings);
     state.context = built.context;
     state.contextErrors = built.errors;
+    // 自動の区切りを使っているあいだは、Shot単位の自動の値を設定に写す（入力欄に見せ、自動をオフにしたときの初めの値にする）
+    const zones = state.settings.zones;
+    if (zones.auto && state.context) {
+      zones.innerRadiusMm = Math.round(state.context.zones.innerRadiusMm * ZONE_ROUND_FACTOR) / ZONE_ROUND_FACTOR;
+      zones.outerRadiusMm = Math.round(state.context.zones.outerRadiusMm * ZONE_ROUND_FACTOR) / ZONE_ROUND_FACTOR;
+    }
   }
 
   function onSettingsChange(kind) {
@@ -408,7 +416,8 @@
     const annotations = shotAnnotations(context);
     ASC.mapView.render(frame, {
       map: state.map,
-      zones: state.settings.zones,
+      // 表示中の前提（Shot単位かMark単位か）で使った同心円の区切りを描く
+      zones: context ? context.zones : state.settings.zones,
       eligibleShots,
       selectedShots: selection.shots,
       measuredMarks: selection.marks,
@@ -1076,6 +1085,7 @@
    *            「必ず測るMark」「k個以上」「HOWA＋推定」は、なくなったので使わない（重ねるときに捨てられる）
    *   版3以前: 補正の流れ「HOWAのみ」は HOWA、「推定→HOWA × 推定手法」は RBF・GPR の予測として読む。
    *            選んでいた推定手法は式内も比べる。計測値＋HOWA は比べる
+   *   版4以前: 同心円の区切りは手で入れた値を使う（自動にしない）
    */
   function migrateOldSettings(loaded, version) {
     if (!loaded) {
@@ -1102,6 +1112,10 @@
         corrections[`${correction.key}Predict`] = selected && flows.estimateThenHowa !== false;
       }
       loaded.model.corrections = corrections;
+    }
+    // 版4以前は同心円の区切りを手で入れていたので、その値を使う（自動にしない）
+    if (version < 5 && loaded.zones) {
+      loaded.zones.auto = false;
     }
     return loaded;
   }
@@ -1167,6 +1181,9 @@
       if (content.version < 3) {
         notes.push("以前の版の設定です。D最適・I最適は「制約付きD最適・I最適」として読み、「必ず測るMark」「k個以上」「HOWA＋推定」の設定は使いません（選んだShotのMarkはすべて測ります）。");
       }
+      if (content.version < 5) {
+        notes.push("以前の版の設定なので、同心円の区切りは保存されていた半径をそのまま使います（「5. 条件制約」で自動に切り替えられます）。");
+      }
       if (content.version < 4) {
         notes.push("以前の版の補正の設定です。「HOWAのみ」はHOWA、「推定→HOWA」はRBF・GPRの「予測」として読みました。選んでいた推定手法の「式内」と「計測値＋HOWA」も比べる設定にしています。");
       }
@@ -1213,6 +1230,8 @@
   // ---- 起動 ----------------------------------------------------------------
 
   function start() {
+    ASC.layout.setupThemeSwitch();
+    ASC.layout.setupSidebarResizer();
     rebuildMap();
     ASC.settingsForm.initialize(state, onSettingsChange);
     rebuildContext();

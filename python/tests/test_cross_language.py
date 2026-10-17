@@ -304,8 +304,10 @@ class SettingsTest(unittest.TestCase):
         settings = C.default_settings()
         for section in ["map", "zones", "model", "constraints"]:
             self.assertEqual(settings[section], reference[section], f"{section} の初期設定が違います")
-        self.assertEqual(settings["sweep"]["methods"], reference["sweep"]["methods"])
-        self.assertEqual(sorted(settings["sampling"]), sorted(reference["sampling"]), "sampling の項目が違います")
+        # Mark単位（Shotの括りなし）の選び方とそのMark数は、ブラウザ版だけの検証用の項目なので比べない
+        browser_only = lambda key: key.startswith("mark")
+        self.assertEqual(settings["sweep"]["methods"], {k: v for k, v in reference["sweep"]["methods"].items() if not browser_only(k)})
+        self.assertEqual(sorted(settings["sampling"]), sorted(k for k in reference["sampling"] if not browser_only(k)), "sampling の項目が違います")
         self.assertEqual(sorted(settings["evaluationData"]), sorted(reference["evaluationData"]), "evaluationData の項目が違います")
         self.assertEqual(settings["evaluationData"]["source"], reference["evaluationData"]["source"])
         self.assertEqual(settings["evaluationData"]["terms"], reference["evaluationData"]["terms"])

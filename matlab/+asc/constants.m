@@ -121,6 +121,8 @@ C.LEAST_SQUARES_RIDGE = 1e-6;
 C.SINGULAR_DIAGONAL_RATIO = 1e-7;
 % 候補の良さの差がこの割合以下なら同点とみなし、先に調べた候補を選ぶ（言語間で丸め誤差による違いを出さない）
 C.TIE_TOLERANCE = 1e-9;
+% 同心円の区切りを自動で決めるとき、この差より近い半径は同じ半径とみなす [mm]
+C.ZONE_RADIUS_TIE_MM = 1e-6;
 
 cached = C;
 end

@@ -533,8 +533,17 @@
 
     const zones = settings.zones;
     const validRadius = map ? map.validRadiusMm : settings.map.validRadiusMm;
+    // 自動のときは、入力欄を使わずに（無効にして）自動で決めた値を見せる
+    ui.byId("zone-inner").disabled = Boolean(zones.auto);
+    ui.byId("zone-outer").disabled = Boolean(zones.auto);
+    ui.byId("zone-auto-summary").textContent = zones.auto ? autoZoneSummary(map, settings) : "区切りの半径を手で入れます。候補の区画ごとの数は「マップと選択点」の制約の表で確かめられます。";
+    if (zones.auto) {
+      for (const [id, value] of [["zone-inner", zones.innerRadiusMm], ["zone-outer", zones.outerRadiusMm]]) {
+        ui.byId(id).value = Number.isFinite(value) ? String(value) : "";
+      }
+    }
     ui.byId("zones-error").textContent =
-      zones.innerRadiusMm < zones.outerRadiusMm && zones.outerRadiusMm < validRadius
+      zones.auto || (zones.innerRadiusMm < zones.outerRadiusMm && zones.outerRadiusMm < validRadius)
         ? ""
         : `区切りは「内側 < 外側 < 有効半径（${validRadius} mm）」にしてください。`;
     const priorities = C.CONSTRAINT_KEYS.filter((key) => settings.constraints[key].enabled).map((key) => settings.constraints[key].priority);
@@ -596,6 +605,34 @@
   }
 
   /** 設定欄全体を settings の内容で書き直す。 */
+  /**
+   * 自動の区切りの説明。Shot単位は選べるShotの中心、Mark単位は選べるMark（除外ShotのMarkを除く）の位置で、
+   * 3領域の数が均等になる半径（計算の中身は constraints.equalCountZoneRadii と同じ）。
+   */
+  function autoZoneSummary(map, settings) {
+    if (!map) {
+      return "マップができると、選べるShot（Mark単位はMark）の数が3領域で均等になる半径を使います。";
+    }
+    const excluded = new Set(ASC.constraints.shotIdList(settings.constraints.excludedShotIds));
+    const shots = map.shots.filter(
+      (shot) => !excluded.has(shot.id) && !(settings.sampling.excludeIncompleteShots && ASC.constraints.isIncompleteShot(shot))
+    );
+    const marks = map.shots.filter((shot) => !excluded.has(shot.id)).flatMap((shot) => shot.markIndices.map((index) => map.marks[index]));
+    const describe = (label, unitLabel, points) => {
+      const split = ASC.constraints.equalCountZoneRadii(points.map((point) => Math.hypot(point.x, point.y)));
+      if (!split) {
+        return `${label}: 決められません（候補の半径が3種類より少ない）`;
+      }
+      const text = ASC.constraints.radiusText;
+      return `${label}: ${text(split.innerRadiusMm)}・${text(split.outerRadiusMm)} mm（${unitLabel} ${split.counts.join("・")}個）`;
+    };
+    const parts = [describe("Shot単位", "選べるShot", shots)];
+    if (C.METHODS.some((method) => method.unit === "mark" && (settings.sampling.methods[method.key] || settings.sweep.methods[method.key]))) {
+      parts.push(describe("Mark単位", "選べるMark", marks));
+    }
+    return `自動の区切り（内側・外側）: ${parts.join("。")}。同じ半径の候補は同じ領域に入るので、ぴったり同数にならないことがあります。`;
+  }
+
   function writeAll() {
     state.invalidFields.clear();
     writeBoundInputs();

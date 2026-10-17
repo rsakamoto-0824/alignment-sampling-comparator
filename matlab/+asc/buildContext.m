@@ -3,6 +3,7 @@ function context = buildContext(waferMap, settings)
 %   候補（item）: 選べるShot（除外Shotと、設定によってはMarkが揃わない端のShotを除いたもの）。
 %                 選んだShotでは、そのShotの有効なMarkをすべて測る（items(k).marks）
 %   区画（class）: 制約ごとの分け方。制約は「選んだShotの数」で数え、区画はShot中心で判定する
+%   同心円の区切り: 自動（初期設定）なら選べるShotの数が3領域で均等になる半径（context.zones）
 %   強制計測Shot: 必ず選ぶShot（常にハード。context.mandatoryItems）。中心の1点のShotとあわせて入れ替えの対象にしない
 %   番号（item・Mark・Shot・区画）はすべて1始まり。
 
@@ -11,7 +12,9 @@ sampling = settings.sampling;
 zones = settings.zones;
 constraintSettings = settings.constraints;
 errors = {};
-if ~(zones.innerRadiusMm > 0 && zones.outerRadiusMm > zones.innerRadiusMm && zones.outerRadiusMm < waferMap.validRadiusMm)
+% 自動の区切りは候補から決めるので、ここでは手で入れた区切りだけを確かめる
+autoZones = isfield(zones, 'auto') && isequal(zones.auto, true);
+if ~autoZones && ~zoneRadiiValid(zones, waferMap.validRadiusMm)
     errors{end + 1} = sprintf('同心円の区切りは 0 < 内側 < 外側 < 有効半径（%g mm）にしてください。', waferMap.validRadiusMm);
 end
 if ~(isscalar(sampling.shotCount) && sampling.shotCount >= 1 && sampling.shotCount == floor(sampling.shotCount))
@@ -78,6 +81,17 @@ elseif shotCount > numel(items)
 end
 raiseIfAny(errors);
 
+% 同心円の区切り（自動なら、選べるShotの中心の数が3領域で均等になる半径）
+if autoZones
+    computed = asc.equalCountZoneRadii(hypot([items.x], [items.y]));
+    if isempty(computed) || ~zoneRadiiValid(computed, waferMap.validRadiusMm)
+        error('asc:invalidSettings', '同心円の区切りを、選べるShotの数が均等になるように決められませんでした。自動をオフにして区切りの半径を入れてください。');
+    end
+    resolvedZones = struct('innerRadiusMm', computed.innerRadiusMm, 'outerRadiusMm', computed.outerRadiusMm, 'auto', true, 'counts', computed.counts);
+else
+    resolvedZones = struct('innerRadiusMm', zones.innerRadiusMm, 'outerRadiusMm', zones.outerRadiusMm, 'auto', false, 'counts', []);
+end
+
 center = buildCenter(waferMap, items, constraintSettings.center);
 forced = mandatoryItems;
 if center.active
@@ -92,7 +106,8 @@ context.map = waferMap;
 context.items = items;
 context.itemXY = [[items.x]', [items.y]'];
 context.shotCount = shotCount;
-context.constraints = buildBalanceConstraints(items, settings, C);
+context.zones = resolvedZones;
+context.constraints = buildBalanceConstraints(items, settings, resolvedZones, C);
 context.center = center;
 context.mandatoryItems = mandatoryItems;
 context.softStrength = constraintSettings.softStrength;
@@ -112,8 +127,20 @@ if ~isempty(errors)
 end
 end
 
-function constraints = buildBalanceConstraints(items, settings, C)
-zones = settings.zones;
+function valid = zoneRadiiValid(zones, validRadius)
+valid = zones.innerRadiusMm > 0 && zones.outerRadiusMm > zones.innerRadiusMm && zones.outerRadiusMm < validRadius;
+end
+
+function text = radiusText(value)
+% 区切りの半径の表示（小数1桁。整数ならそのまま）
+if value == floor(value)
+    text = sprintf('%d', value);
+else
+    text = sprintf('%.1f', value);
+end
+end
+
+function constraints = buildBalanceConstraints(items, settings, zones, C)
 inner = zones.innerRadiusMm;
 outer = zones.outerRadiusMm;
 x = [items.x]';
@@ -139,7 +166,8 @@ for key = {'scan', 'quadrant', 'zone'}
             classes(y < 0 & x < 0) = 3;
             classes(y < 0 & x >= 0) = 4;
         otherwise
-            labels = {sprintf('内側（r < %g mm）', inner), sprintf('中間（%g〜%g mm）', inner, outer), sprintf('外側（r ≧ %g mm）', outer)};
+            labels = {sprintf('内側（r < %s mm）', radiusText(inner)), sprintf('中間（%s〜%s mm）', radiusText(inner), radiusText(outer)), ...
+                sprintf('外側（r ≧ %s mm）', radiusText(outer))};
             shortLabels = {'内側', '中間', '外側'};
             radius = hypot(x, y);
             classes = 1 + (radius >= inner) + (radius >= outer);

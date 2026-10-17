@@ -110,6 +110,7 @@
         centerMarkIndex: context.center.enabled ? context.center.markIndex : null,
         mandatoryShots: new Set(context.mandatoryItems.map((item) => context.items[item].shotIndex)),
         relaxedKeys: new Set(relaxed.map((entry) => entry.key)),
+        zones: context.zones || zones,
       };
     }
     const cards = [];
@@ -123,7 +124,7 @@
       }
       const markUnit = sets[0].unit === "mark";
       usesMarkUnit = usesMarkUnit || markUnit;
-      const { eligibleShots, centerMarkIndex, mandatoryShots, relaxedKeys } = viewsByUnit[sets[0].unit];
+      const { eligibleShots, centerMarkIndex, mandatoryShots, relaxedKeys, zones: unitZones } = viewsByUnit[sets[0].unit];
       const labels = ASC.mapView.unitLabels(sets[0].unit);
       const card = ui.create("section", { className: "map-card", "aria-label": `${method.label}で選んだ点` });
       card.append(ui.create("h3", { text: method.manual ? `${method.label}（手動プラン）` : method.label }));
@@ -141,7 +142,7 @@
         usesFrequency = true;
         ASC.mapView.render(frame, {
           map,
-          zones,
+          zones: unitZones,
           eligibleShots,
           selectedShots: new Set(),
           measuredMarks: new Set(),
@@ -169,7 +170,7 @@
         const set = entry.set;
         ASC.mapView.render(frame, {
           map,
-          zones,
+          zones: unitZones,
           eligibleShots,
           // Mark単位はShotを選んだわけではないので、Shotは塗らずに測るMarkだけを示す
           selectedShots: markUnit ? new Set() : new Set(set.shotIndices),

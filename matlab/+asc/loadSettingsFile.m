@@ -3,7 +3,7 @@ function loaded = loadSettingsFile(path)
 %   loaded.settings（初期設定に重ねたもの）, loaded.csvText（CSVのマップ。なければ ''）, loaded.manual（手動プランのJSONのまま）
 %   マップは asc.mapFromLoaded(loaded)、手動プランは asc.manualPlanInputs(loaded.manual, waferMap) で作る。
 
-readableVersions = [1, 2, 3, 4];
+readableVersions = [1, 2, 3, 4, 5];
 content = jsondecode(fileread(path));
 if ~isstruct(content) || ~isfield(content, 'version') || ~any(content.version == readableVersions) || ~isfield(content, 'settings')
     error('asc:invalidSettings', 'このアプリで保存した設定ファイルではありません。');
@@ -31,6 +31,7 @@ function loaded = migrateOldSettings(loaded, version)
 %          「必ず測るMark」「k個以上」「HOWA＋推定」は、なくなったので使わない（重ねるときに捨てられる）。
 % 版3以前: 補正の流れ「HOWAのみ」は HOWA、「推定→HOWA × 推定手法」は RBF・GPR の予測として読む。
 %          選んでいた推定手法は式内も比べる。計測値＋HOWA は比べる。
+% 版4以前: 同心円の区切りは手で入れた値を使う（自動にしない）。
 if ~isstruct(loaded)
     return
 end
@@ -55,6 +56,9 @@ if version < 4 && isfield(loaded, 'model') && isstruct(loaded.model)
     end
     corrections.measured = true;
     loaded.model.corrections = corrections;
+end
+if version < 5 && isfield(loaded, 'zones') && isstruct(loaded.zones)
+    loaded.zones.auto = false;
 end
 end
 

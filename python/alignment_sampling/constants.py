@@ -111,6 +111,8 @@ INFORMATION_RIDGE = 1e-8
 LEAST_SQUARES_RIDGE = 1e-6
 # 候補の良さの差がこの割合以下なら同点とみなし、先に調べた候補を選ぶ（言語間で丸め誤差による違いを出さない）
 TIE_TOLERANCE = 1e-9
+# 同心円の区切りを自動で決めるとき、この差より近い半径は同じ半径とみなす [mm]
+ZONE_RADIUS_TIE_MM = 1e-6
 
 _DEFAULT_SETTINGS = {
     "map": {
@@ -131,7 +133,8 @@ _DEFAULT_SETTINGS = {
         ],
     },
     # 初期のマップで、選べるShot（Markが揃うShot 64個）の数が3領域でほぼそろう値（20・24・20個）
-    "zones": {"innerRadiusMm": 75, "outerRadiusMm": 110},
+    # auto: True なら、選べるShotの中心の数が3領域で均等になる半径を使う（False なら下の2つの値）
+    "zones": {"auto": True, "innerRadiusMm": 75, "outerRadiusMm": 110},
     "evaluationData": {
         # zernike: Zernike項の乱数で作る。file: 計測データのファイルを読む（ファイルの中身は設定に保存しない）
         "source": "zernike",
